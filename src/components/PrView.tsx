@@ -2681,9 +2681,9 @@ export function PrView({
                       <span className="pr-round-took">{pr.checks_summary}</span>
                     )}
                   </div>
-                  {!!pr.check_runs?.length && liveChecks !== "PASS" && (
+                  {!!pr.check_runs?.some((c) => c.state !== "passed") && liveChecks !== "PASS" && (
                     <ul className="pr-check-list" aria-label="Checks not yet passed">
-                      {pr.check_runs.map((c, i) => (
+                      {pr.check_runs.filter((c) => c.state !== "passed").map((c, i) => (
                         <li key={`${i}:${c.name}`} className={`pr-check-${c.state}`}>
                           <span className="pr-check-state">{c.state}</span>
                           <span className="pr-check-name">{c.name}</span>

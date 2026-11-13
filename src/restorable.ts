@@ -3,6 +3,7 @@
 // Extracted so the Agents panel and the project's empty state agree: a session
 // listed as restorable in one place and missing in the other is worse than
 // either behaviour on its own.
+import { settledIds } from "./settledSessions";
 import * as ipc from "./ipc";
 import { restoreCommand } from "./projects";
 import { identifyAgent } from "./agentIdentity";
@@ -175,6 +176,7 @@ export function restorableFrom(
   const alivePtys = new Set(stats.map((s) => String(s.id)));
   const forgotten = readForgotten();
   const userClosed = readUserClosed();
+  const settled = settledIds();
   const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
   const liveAgents = liveAgentsFrom(stats);
   // Same CLI, same directory, running right now — that work is open, whatever
@@ -198,6 +200,8 @@ export function restorableFrom(
       // closes, but that is a timer racing the CLI's last write and neither
       // survives a force quit; the marker is on the session itself.
       if (d.micro) return false;
+      // Settled: listed under Agents → Settled with its own Restore.
+      if (settled.has(id)) return false;
 
       // Forgotten by the user, and the transcript hasn't been written since —
       // stay gone. A newer mtime (real new activity) crosses the threshold and

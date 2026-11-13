@@ -19,6 +19,7 @@ import {
   type Attention,
 } from "../../shared/agentLife";
 import { markRestored } from "../restorable";
+import { SETTLED_TTL_MS, type SettledSession } from "../settledSessions";
 import { openSessionDoc } from "../sessionDoc/events";
 import { SubagentTree } from "./SubagentTree";
 import { lastHumanPrompt, useAgentSessions } from "../agentSessions";
@@ -106,6 +107,11 @@ interface AgentsPanelProps {
   liveSessionIds?: string[];
   /** Reopen a past agent session: runs `cmd` in `cwd` as a new terminal. */
   onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
+  /** Agents put away with Settle in this project, newest first. */
+  settled?: SettledSession[];
+  onRestoreSettled?: (entry: SettledSession) => void;
+  /** Remove a settled agent's worktree, branch and record now. */
+  onDiscardSettled?: (entry: SettledSession) => void;
   /** Toasts for background actions (auto-hibernation) the user didn't click. */
   onNotice?: (msg: string) => void;
   /** Open the agent-instructions tab, optionally on one file. */
@@ -260,6 +266,9 @@ export function AgentsPanel({
   onShareContext,
   liveSessionIds = [],
   onRestore,
+  settled = [],
+  onRestoreSettled,
+  onDiscardSettled,
   onRespond,
   onNotice,
   onOpenInstructions,
@@ -487,6 +496,7 @@ export function AgentsPanel({
     | { key: string; kind: "agent" | "term"; row: Row }
     | { key: string; kind: "claim"; claim: ipc.AgentClaim }
     | { key: string; kind: "restore"; entry: Restorable }
+    | { key: string; kind: "settled"; entry: SettledSession }
     | { key: string; kind: "more" };
 
   const uid = useId().replace(/:/g, "");
@@ -566,7 +576,13 @@ export function AgentsPanel({
       .filter((claim) => matches(claim.owner, claim.note, claim.paths.join(" ")))
       .map((claim) => ({ key: `c:${claim.id}`, kind: "claim", claim }));
     if (claimItems.length > 0) out.push({ title: "Claimed files", groups: [{ name: null, items: claimItems }] });
+    const settledItems: Item[] = settled
+      .filter((entry) => matches(entry.title, entry.agentId, basename(entry.cwd), entry.branch))
+      .map((entry) => ({ key: `s:${entry.id}`, kind: "settled", entry }));
+    if (settledItems.length > 0) out.push({ title: "Settled", groups: [{ name: null, items: settledItems }] });
+    const settledIds = new Set(settled.map((entry) => entry.id));
     const past = [...restorable]
+      .filter((entry) => !settledIds.has(entry.digest.session_id))
       .sort((a, b) => (b.digest.updated ?? 0) - (a.digest.updated ?? 0))
       .filter((entry) =>
         matches(entry.agentId, basename(entry.cwd), entry.digest.branch, lastHumanPrompt(entry.digest.prompts)),
@@ -583,7 +599,7 @@ export function AgentsPanel({
     return out;
     // `rowMatches` and `matches` close over `query` and the props already listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentSessions, termSessions, claims, restorable, query, showAllRestorable, roots, tabNames, lifeOf, attentionOf]);
+  }, [agentSessions, termSessions, claims, restorable, settled, query, showAllRestorable, roots, tabNames, lifeOf, attentionOf]);
 
   const items = useMemo(() => blocks.flatMap((b) => b.groups.flatMap((g) => g.items)), [blocks]);
   const found = items.findIndex((item) => item.key === cursorKey);
@@ -626,6 +642,7 @@ export function AgentsPanel({
   const activate = (item: Item) => {
     if (item.kind === "agent" || item.kind === "term") onJumpToPty?.(item.row.session.id);
     else if (item.kind === "restore") restoreEntry(item.entry);
+    else if (item.kind === "settled") onRestoreSettled?.(item.entry);
     else if (item.kind === "claim") onOpenClaim?.(item.claim);
     else setShowAllRestorable((v) => !v);
   };
@@ -636,6 +653,7 @@ export function AgentsPanel({
   const remove = (item: Item) => {
     if (item.kind === "agent" || item.kind === "term") void ipc.ptyKill(item.row.session.id);
     else if (item.kind === "restore") forget([item.entry.digest, ...item.entry.superseded]);
+    else if (item.kind === "settled") onDiscardSettled?.(item.entry);
     else if (item.kind === "claim")
       void ipc
         .contextReleaseClaim(item.claim.owner_key)
@@ -925,6 +943,97 @@ export function AgentsPanel({
     );
   };
 
+  const settledRow = (item: Extract<Item, { kind: "settled" }>) => {
+    const { entry } = item;
+    const selected = cursorItem?.key === item.key;
+    const dir = basename(entry.worktree?.root ?? entry.cwd);
+    const leftMs = entry.settledAt + SETTLED_TTL_MS - Date.now();
+    const unsaved = entry.unsaved
+      ? [
+          entry.unsaved.dirty > 0 && `${entry.unsaved.dirty} uncommitted`,
+          entry.unsaved.unpushed > 0 && `${entry.unsaved.unpushed} unpushed`,
+        ]
+          .filter(Boolean)
+          .join(", ")
+      : "";
+    const fate = entry.unsaved?.note
+      ? `Kept: ${entry.unsaved.note}${unsaved ? `, ${unsaved}` : ""}`
+      : unsaved
+      ? `Kept: ${unsaved}`
+      : entry.worktree
+        ? `Cleans up in ${Math.max(1, Math.ceil(leftMs / 3_600_000))}h`
+        : "";
+    return (
+      <div
+        key={item.key}
+        id={domId(item.key)}
+        role="option"
+        aria-selected={selected}
+        className={`ap2-row ap2-row-past ${selected ? "is-cursor" : ""}`}
+        onClick={() => setCursorKey(item.key)}
+        onDoubleClick={() => onRestoreSettled?.(entry)}
+        title={`${entry.title}\n${entry.cwd}`}
+      >
+        <div className="ap2-line">
+          <span className="ap2-dot ap2-dot-ended" aria-hidden="true" />
+          <AgentIcon id={entry.agentId} size={13} className="ap2-mark" />
+          <span className="ap2-name">{entry.title}</span>
+          <span className="ap2-spacer" />
+          <span className={`ap2-trail ${armed === item.key ? "is-armed" : ""}`}>
+            {armed === item.key
+              ? "press x again to discard"
+              : agoShort(Math.floor(entry.settledAt / 1000))}
+          </span>
+        </div>
+        <div className="ap2-meta">
+          {dir && <span className="ap2-chip" title={entry.cwd}>{dir}</span>}
+          {entry.branch && <span className="ap2-chip ap2-chip-branch">⎇ {entry.branch}</span>}
+          {fate && (
+            <span className={`ap2-chip${entry.unsaved ? " ap2-chip-warn" : ""}`}>{fate}</span>
+          )}
+        </div>
+        <div className="ap2-actions">
+          <button
+            type="button"
+            tabIndex={-1}
+            className="ap2-act"
+            title="Restore: reopen this agent and its conversation"
+            aria-label={`Restore ${entry.title}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRestoreSettled?.(entry);
+            }}
+          >
+            <RestartIcon size={12} />
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="ap2-act ap2-act-danger"
+            title={
+              unsaved
+                ? `Discard: deletes its worktree with ${unsaved}`
+                : "Discard: remove its worktree and record now"
+            }
+            aria-label={`Discard ${entry.title}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (armed === item.key) {
+                setArmed(null);
+                onDiscardSettled?.(entry);
+              } else {
+                setArmed(item.key);
+                setCursorKey(item.key);
+              }
+            }}
+          >
+            <TrashIcon size={12} />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const restoreRow = (item: Extract<Item, { kind: "restore" }>) => {
     const { digest: d, agentId, cwd: runIn, command: cmd, superseded } = item.entry;
     const selected = cursorItem?.key === item.key;
@@ -1065,6 +1174,7 @@ export function AgentsPanel({
   const renderItem = (item: Item) => {
     if (item.kind === "agent" || item.kind === "term") return sessionRow(item);
     if (item.kind === "restore") return restoreRow(item);
+    if (item.kind === "settled") return settledRow(item);
     if (item.kind === "claim") return claimRow(item);
     const past = restorable.length;
     return (

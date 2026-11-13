@@ -7182,13 +7182,6 @@ body.dragging-tab * {
 .agent-card-progress-run {
   background: #f2a93b;
 }
-.agent-card-current {
-  margin: -2px 8px 4px 30px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .agent-card-tasks {
   list-style: none;
   margin: 0 0 4px;
@@ -29917,12 +29910,6 @@ a.btn-sm {
     -webkit-backdrop-filter: blur(22px) saturate(1.4);
   }
 }
-/* Sections read as separate groups: a hairline between each, not one run of text. */
-.agent-card > * + * {
-  border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
-  margin-top: 4px;
-  padding-top: 4px;
-}
 /* Tasks as a notepad checklist: one ruled line per item. */
 .agent-card-task {
   border-bottom: 1px dashed color-mix(in srgb, var(--text) 12%, transparent);
@@ -30560,11 +30547,6 @@ a.btn-sm {
 .pr-check-running .pr-check-state { color: var(--warn, #f5a524); opacity: 1; }
 .aw-pr-checks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .aw-pr-check-failed { color: var(--danger, #f87171); }
-.agent-card-checks { list-style: none; margin: 0; padding: 0 12px 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
-.agent-card-checks li { display: flex; gap: 8px; min-width: 0; }
-.agent-card-check-state { flex: none; width: 52px; opacity: 0.7; }
-.agent-card-check-failed .agent-card-check-state { color: var(--danger, #f87171); opacity: 1; }
-.agent-card-check-running .agent-card-check-state { color: var(--warn, #f5a524); opacity: 1; }
 
 /* A preview tab's thumbnail: the last picture taken of its page, cropped to the
    card from the top, or a globe tile with the address when there is none yet. */
@@ -30598,4 +30580,244 @@ a.btn-sm {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Agent card layout ----------
+   The card is a stack of groups (git, work, tasks, assets, actions). One
+   straight hairline separates groups; rows inside a group sit on a single
+   rhythm: 30px tall, 8px side padding, a 14px icon column. */
+.agent-card,
+.agent-card-checks-pop {
+  --ac-ok: #46c07a;
+  --ac-run: #f2a93b;
+  --ac-bad: var(--danger, #e5534b);
+  --ac-rule: color-mix(in srgb, var(--text) 9%, transparent);
+}
+.agent-card-head {
+  padding: 4px 6px 8px 8px;
+}
+.agent-card-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 0;
+  border-top: 1px solid var(--ac-rule);
+}
+.agent-card-section:empty {
+  display: none;
+}
+.agent-card-section:last-child {
+  padding-bottom: 2px;
+}
+.agent-card-row {
+  box-sizing: border-box;
+  min-height: 30px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  line-height: 18px;
+}
+.agent-card-row > svg {
+  flex: 0 0 14px;
+}
+.agent-card-label-text {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.agent-card-row .agent-card-ellipsis.agent-card-dim {
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: right;
+}
+.agent-card-servers {
+  margin: 0 2px 6px;
+}
+.agent-card-lineage {
+  padding: 0;
+}
+.agent-card-lineage-head {
+  padding: 4px 8px 2px;
+}
+.agent-card-subs {
+  padding: 0;
+}
+.agent-card-sub {
+  padding: 5px 8px;
+}
+.agent-card-tasks {
+  margin: 2px 0 0;
+  padding: 0;
+}
+.agent-card-task-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+}
+
+/* Status dots: one vocabulary across checks, sub-agents and tasks. */
+.agent-card-dot {
+  display: inline-block;
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-dim) 55%, transparent);
+}
+.agent-card-dot-passed {
+  background: var(--ac-ok);
+}
+.agent-card-dot-failed {
+  background: var(--ac-bad);
+}
+.agent-card-dot-running,
+.agent-card-sub-running .agent-card-sub-dot {
+  background: var(--ac-run);
+  animation: agent-card-pulse 1.4s ease-in-out infinite;
+}
+.agent-card-dot-queued,
+.agent-card-dot-pending {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--text-dim) 80%, transparent);
+}
+.agent-card-sub-done .agent-card-sub-dot {
+  background: var(--ac-ok);
+}
+@keyframes agent-card-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ac-run) 55%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--ac-run) 0%, transparent); opacity: 0.75; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-card-dot-running,
+  .agent-card-sub-running .agent-card-sub-dot {
+    animation: none;
+  }
+}
+.agent-card-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* PR row: number, title, checks dot, status chip. Nothing else competes
+   with the title; actions live on the row below. */
+.agent-card-pr-row .agent-card-chip {
+  line-height: 16px;
+}
+.agent-card-checks-anchor {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.agent-card-checks-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.agent-card-checks-btn:hover,
+.agent-card-checks-btn:focus-visible {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text);
+}
+.agent-card-checks-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.agent-card-checks-pop {
+  position: fixed;
+  z-index: 1000;
+  width: 260px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.6);
+}
+.agent-card-checks-pop-head {
+  padding: 4px 6px 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.agent-card-checks-pop ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.agent-card-checks-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-card-checks-more:hover {
+  color: var(--text);
+}
+.agent-card-checks-pop li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+/* Tasks: the bar is the split (done green, in progress orange, the empty
+   track is what has not started); the legend repeats it in numbers. */
+.agent-card-tasks-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.agent-card-tasks-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.agent-card-tasks-legend .agent-card-dot {
+  animation: none;
+  width: 7px;
+  height: 7px;
+}
+.agent-card-progress {
+  box-sizing: border-box;
+  height: 4px;
+  margin: 2px 8px 4px 30px;
+  padding: 0;
+  border: 0;
+}
+.agent-card-progress-done {
+  background: var(--ac-ok);
+}
+.agent-card-progress-run {
+  background: var(--ac-run);
+}
+
+/* A settled agent whose worktree still holds work only it has. */
+.ap2-chip-warn {
+  color: var(--warn, #f5a524);
+  background: color-mix(in srgb, var(--warn, #f5a524) 14%, transparent);
 }

@@ -7,6 +7,7 @@
 // It only reads: the digest the hook wrote, `git status`, and the PR list. The
 // task actions send the agent a message, exactly as typing it would.
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { runCommitPushPr } from "../commitPushPrIpc";
 import { draftPrWithBrain, type BrainPrDraft } from "../prDraftBrain";
 import * as ipc from "../ipc";
@@ -144,6 +145,117 @@ function useNow(live: boolean): number {
 
 const MAX_PREVIOUS = 30;
 
+type CheckRun = NonNullable<ipc.PrInfo["check_runs"]>[number];
+const CHECK_ORDER: Record<CheckRun["state"], number> = {
+  failed: 0,
+  running: 1,
+  queued: 2,
+  passed: 3,
+};
+const CHECK_WORD: Record<CheckRun["state"], string> = {
+  failed: "Failed",
+  running: "Running",
+  queued: "Queued",
+  passed: "Passed",
+};
+
+/** The PR's checks as one dot (red failing, pulsing orange running, green
+ *  passed). Hover or focus opens every check with its own dot; passed ones
+ *  fold into one row so a long list stays short. Drawn in a portal: the card's
+ *  blur would otherwise clip it. */
+function ChecksBadge({ pr }: { pr: ipc.PrInfo }) {
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const [showPassed, setShowPassed] = useState(false);
+  const closeTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(closeTimer.current), []);
+  const runs = [...(pr.check_runs ?? [])].sort(
+    (a, b) => CHECK_ORDER[a.state] - CHECK_ORDER[b.state],
+  );
+  const open = runs.filter((c) => c.state !== "passed");
+  const passed = runs.length - open.length;
+  const overall =
+    pr.checks === "FAIL" ? "failed" : pr.checks === "PENDING" ? "running" : "passed";
+  const count = runs.length ? `${passed}/${runs.length}` : "";
+  const label = runs.length
+    ? `${passed} of ${runs.length} checks passed`
+    : pr.checks_summary || `Checks ${CHECK_WORD[overall].toLowerCase()}`;
+  const show = (el: HTMLElement) => {
+    window.clearTimeout(closeTimer.current);
+    setAnchor(el.getBoundingClientRect());
+  };
+  const keep = () => window.clearTimeout(closeTimer.current);
+  const hide = () => {
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      setAnchor(null);
+      setShowPassed(false);
+    }, 150);
+  };
+  const row = (c: CheckRun, i: number) => (
+    <li key={`${i}:${c.name}`} title={CHECK_WORD[c.state]}>
+      <span className={`agent-card-dot agent-card-dot-${c.state}`} aria-hidden="true" />
+      <span className="agent-card-ellipsis">{c.name}</span>
+      <span className="agent-card-sr">{CHECK_WORD[c.state]}</span>
+    </li>
+  );
+  return (
+    <span
+      className="agent-card-checks-anchor"
+      onMouseEnter={(e) => show(e.currentTarget)}
+      onMouseLeave={hide}
+    >
+      <button
+        type="button"
+        className="agent-card-checks-btn"
+        aria-label={label}
+        aria-expanded={!!anchor}
+        onFocus={(e) => show(e.currentTarget)}
+        onBlur={hide}
+        onKeyDown={(e) => e.key === "Escape" && setAnchor(null)}
+      >
+        <span className={`agent-card-dot agent-card-dot-${overall}`} aria-hidden="true" />
+        {count && <span className="agent-card-checks-count">{count}</span>}
+      </button>
+      {anchor &&
+        createPortal(
+          <div
+            className="agent-card-checks-pop"
+            role="tooltip"
+            onMouseEnter={keep}
+            onMouseLeave={hide}
+            style={{
+              top: Math.min(anchor.bottom + 4, window.innerHeight - 120),
+              right: Math.max(8, window.innerWidth - anchor.right),
+            }}
+          >
+            <div className="agent-card-checks-pop-head">{label}</div>
+            {runs.length > 0 && (
+              <ul aria-label="Checks">
+                {open.map(row)}
+                {passed > 0 &&
+                  (showPassed ? (
+                    runs.filter((c) => c.state === "passed").map(row)
+                  ) : (
+                    <li>
+                      <button
+                        type="button"
+                        className="agent-card-checks-more"
+                        onClick={() => setShowPassed(true)}
+                      >
+                        <span className="agent-card-dot agent-card-dot-passed" aria-hidden="true" />
+                        <span>{passed} passed</span>
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </div>,
+          document.body,
+        )}
+    </span>
+  );
+}
+
 /** The agent's sub-agents, as T3 Code's "Lineage": the ones running now with
  *  their age, and the finished ones behind a row that opens. This is the list
  *  Claude Code draws as a block of text inside the terminal ("8 agents"); here
@@ -254,9 +366,8 @@ interface AgentDetailsCardProps {
    *  branch and changes are read there, and a pull request is not looked up from
    *  this Mac's checkout. */
   machine?: { env: string; name: string };
-  /** Settle (put away) or un-settle this agent's tab. `settled` is its current state. */
-  settled?: boolean;
-  onSettle?: (settle: boolean) => void;
+  /** Settle: retire this agent's tab; it stays restorable under Agents. */
+  onSettle?: () => void;
   /** Type a message to this agent (its terminal), as the person would. Resolves
    *  with whether it was delivered and, when not, why. */
   onSendToAgent: (
@@ -277,7 +388,6 @@ export function AgentDetailsCard({
   onDockChange,
   onOpenAsset,
   onSendToWorkspace,
-  settled,
   onSettle,
   onSendToAgent,
   onNotice,
@@ -651,6 +761,7 @@ export function AgentDetailsCard({
         </section>
       )}
 
+      <div className="agent-card-section">
       {branch && (
         <div className="agent-card-row" title={branch}>
           <GitBranchIcon size={14} />
@@ -715,55 +826,18 @@ export function AgentDetailsCard({
           <span className="agent-card-grow agent-card-ellipsis">
             {pr.title}
           </span>
-          <span
-            className={`agent-card-chip agent-card-chip-${prStatusLabel(pr).toLowerCase().replace(/\s+/g, "-")}`}
-          >
-            {prStatusLabel(pr)}
-          </span>
-          {(pr.checks === "FAIL" || pr.mergeable === "CONFLICTING") && (
-            <button
-              type="button"
-              className="agent-card-fix"
-              disabled={!canAct}
-              title={
-                actHint ??
-                (pr.checks === "FAIL"
-                  ? "Ask this agent to fix the failing checks"
-                  : "Ask this agent to resolve the conflicts")
-              }
-              onClick={() =>
-                void Promise.resolve(
-                  onSendToAgent(
-                    pr.checks === "FAIL"
-                      ? prFixChecksContext(pr)
-                      : prConflictContext(pr),
-                  ),
-                ).then((result) => {
-                  if (result && !result.delivered)
-                    onNotice?.(
-                      result.note || "The agent did not receive that.",
-                    );
-                })
-              }
-            >
-              {pr.checks === "FAIL" ? "Fix it" : "Resolve"}
-            </button>
-          )}
+          {pr.checks && <ChecksBadge pr={pr} />}
+          {/* The checks dot already says failing or running; the chip is
+              only for what it cannot say. */}
+          {prStatusLabel(pr) !== "Checks failing" &&
+            !(prStatusLabel(pr) === "Ready" && pr.checks === "PENDING") && (
+              <span
+                className={`agent-card-chip agent-card-chip-${prStatusLabel(pr).toLowerCase().replace(/\s+/g, "-")}`}
+              >
+                {prStatusLabel(pr)}
+              </span>
+            )}
         </div>
-      )}
-
-      {pr && !!pr.check_runs?.length && (
-        <ul className="agent-card-checks" aria-label="Checks not yet passed">
-          {pr.check_runs.slice(0, 5).map((c, i) => (
-            <li key={`${i}:${c.name}`} className={`agent-card-check-${c.state}`}>
-              <span className="agent-card-check-state">{c.state}</span>
-              <span className="agent-card-grow agent-card-ellipsis">{c.name}</span>
-            </li>
-          ))}
-          {pr.check_runs.length > 5 && (
-            <li>+{pr.check_runs.length - 5} more</li>
-          )}
-        </ul>
       )}
 
       {pr && repo && !remoteMachine && pr.state.toUpperCase() === "OPEN" && (
@@ -817,7 +891,7 @@ export function AgentDetailsCard({
             <>
               <span className="agent-card-grow agent-card-ellipsis">
                 {pending === "close"
-                  ? "Close"
+                  ? "Close PR"
                   : pending === "squash"
                     ? "Squash and merge"
                     : pending === "merge"
@@ -879,6 +953,45 @@ export function AgentDetailsCard({
                 Cancel
               </button>
             </>
+          ) : pr.checks === "FAIL" || pr.mergeable === "CONFLICTING" ? (
+            <>
+              <button
+            type="button"
+            className="agent-card-fix"
+            disabled={!canAct}
+            title={
+              actHint ??
+              (pr.checks === "FAIL"
+                ? "Ask this agent to fix the failing checks"
+                : "Ask this agent to resolve the conflicts")
+            }
+            onClick={() =>
+              void Promise.resolve(
+                onSendToAgent(
+                  pr.checks === "FAIL"
+                    ? prFixChecksContext(pr)
+                    : prConflictContext(pr),
+                ),
+              ).then((result) => {
+                if (result && !result.delivered)
+                  onNotice?.(
+                    result.note || "The agent did not receive that.",
+                  );
+              })
+            }
+          >
+            {pr.checks === "FAIL" ? "Fix it" : "Resolve"}
+          </button>
+              <span className="agent-card-grow" />
+              <button
+                type="button"
+                className="agent-card-fix agent-card-fix-quiet agent-card-close"
+                onClick={() => setPending("close")}
+                title={`Close #${pr.number} without merging`}
+              >
+                Close PR
+              </button>
+            </>
           ) : (
             <>
               <span className="agent-card-split">
@@ -938,8 +1051,9 @@ export function AgentDetailsCard({
                 type="button"
                 className="agent-card-fix agent-card-fix-quiet agent-card-close"
                 onClick={() => setPending("close")}
+                title={`Close #${pr.number} without merging`}
               >
-                Close
+                Close PR
               </button>
             </>
           )}
@@ -1084,7 +1198,9 @@ export function AgentDetailsCard({
           )}
         </div>
       )}
+      </div>
 
+      <div className="agent-card-section">
       {subagents.length > 0 ? (
         <Lineage subagents={subagents} />
       ) : (
@@ -1096,7 +1212,9 @@ export function AgentDetailsCard({
           </div>
         )
       )}
+      </div>
 
+      <div className="agent-card-section">
       <button
         type="button"
         className="agent-card-row agent-card-btn"
@@ -1107,12 +1225,19 @@ export function AgentDetailsCard({
         <TasksIcon size={14} />
         <span>Tasks</span>
         <span className="agent-card-grow" />
-        <span
-          className="agent-card-dim agent-card-tasks-headline"
-          title={taskHeadline(summary)}
-        >
-          {taskHeadline(summary)}
-        </span>
+        {summary.total > 0 ? (
+          <span
+            className="agent-card-tasks-legend"
+            title={taskHeadline(summary)}
+            aria-label={taskHeadline(summary)}
+          >
+            <span><i className="agent-card-dot agent-card-dot-passed" />{summary.done}</span>
+            <span><i className="agent-card-dot agent-card-dot-running" />{summary.running}</span>
+            <span><i className="agent-card-dot agent-card-dot-pending" />{summary.pending}</span>
+          </span>
+        ) : (
+          <span className="agent-card-dim">{taskHeadline(summary)}</span>
+        )}
         {summary.total > 0 && (
           <span aria-hidden="true">{tasksOpen ? "▾" : "▸"}</span>
         )}
@@ -1138,12 +1263,6 @@ export function AgentDetailsCard({
         </div>
       )}
 
-      {summary.current && !tasksOpen && (
-        <div className="agent-card-current" title={summary.current.text}>
-          {summary.current.text}
-        </div>
-      )}
-
       {tasksOpen && (
         <ul className="agent-card-tasks">
           {tasks.map((task, i) => (
@@ -1152,11 +1271,15 @@ export function AgentDetailsCard({
               className={`agent-card-task agent-card-task-${task.status}`}
             >
               <span className="agent-card-task-mark" aria-hidden="true">
-                {task.status === "completed"
-                  ? "✓"
-                  : task.status === "running"
-                    ? "●"
-                    : "○"}
+                <span
+                  className={`agent-card-dot agent-card-dot-${
+                    task.status === "completed"
+                      ? "passed"
+                      : task.status === "running"
+                        ? "running"
+                        : "pending"
+                  }`}
+                />
               </span>
               <button
                 type="button"
@@ -1211,8 +1334,10 @@ export function AgentDetailsCard({
         </ul>
       )}
 
+      </div>
+
       {assets.length > 0 && (
-        <>
+        <div className="agent-card-section">
           <button
             type="button"
             className="agent-card-row agent-card-btn"
@@ -1279,19 +1404,21 @@ export function AgentDetailsCard({
           {hovered && assetsOpen && (
             <AssetPreview asset={hovered.asset} anchor={hovered.anchor} />
           )}
-        </>
+        </div>
       )}
+
+      <div className="agent-card-section">
 
       {onSettle && (
         <button
           type="button"
           className="agent-card-row agent-card-btn"
-          onClick={() => onSettle(!settled)}
+          onClick={() => onSettle()}
         >
-          <span>{settled ? "Unsettle" : "Settle"}</span>
+          <span className="agent-card-label-text">Settle</span>
           <span className="agent-card-grow" />
-          <span className="agent-card-dim">
-            {settled ? "Back to the strip" : "Put finished work away"}
+          <span className="agent-card-dim agent-card-ellipsis">
+            Close, keep under Agents
           </span>
         </button>
       )}
@@ -1302,9 +1429,9 @@ export function AgentDetailsCard({
           className="agent-card-row agent-card-btn"
           onClick={onSendToWorkspace}
         >
-          <span>To a workspace</span>
+          <span className="agent-card-label-text">To a workspace</span>
           <span className="agent-card-grow" />
-          <span className="agent-card-dim">Send this project</span>
+          <span className="agent-card-dim agent-card-ellipsis">Send this project</span>
           <span aria-hidden="true">›</span>
         </button>
       )}
@@ -1314,11 +1441,12 @@ export function AgentDetailsCard({
         className="agent-card-row agent-card-btn agent-card-workspace"
         onClick={onOpenWorkspace}
       >
-        <span>Workspace</span>
+        <span className="agent-card-label-text">Workspace</span>
         <span className="agent-card-grow" />
-        <span className="agent-card-dim">Files, diffs, commits</span>
+        <span className="agent-card-dim agent-card-ellipsis">Files, diffs, commits</span>
         <span aria-hidden="true">›</span>
       </button>
+      </div>
     </aside>
   );
 }

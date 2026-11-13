@@ -10,6 +10,7 @@
 // `gitWorkAudit`) so the rules that delete a folder are tested rather than
 // clicked. Only `agent/…` branches — the ones agentWorkspaceBranch mints — are
 // ever considered; a workspace the user made by hand is never touched.
+import { settledRoots } from "./settledSessions";
 import * as ipc from "./ipc";
 import { agentBranchSlug } from "./agentSpawn";
 
@@ -92,6 +93,8 @@ export function pickReusableWorkspace(
   agentId: string,
   worktrees: readonly ipc.WorktreeInfo[],
   work: readonly ipc.BranchWork[],
+  /** Worktrees a settled agent may come back to: never handed to another. */
+  skip: ReadonlySet<string> = new Set(),
 ): ipc.WorktreeInfo | null {
   const prefix = `${AGENT_BRANCH_PREFIX}${agentBranchSlug(agentId)}-`;
   const byBranch = new Map(work.map((item) => [item.branch, item]));
@@ -99,6 +102,7 @@ export function pickReusableWorkspace(
     worktrees
       .filter((w) => {
         if (w.is_main || w.locked != null || w.prunable != null) return false;
+        if (skip.has(w.path)) return false;
         if (!w.branch?.startsWith(prefix) || w.dirty > 0) return false;
         const item = byBranch.get(w.branch);
         return (
@@ -125,13 +129,49 @@ export async function reuseAgentWorkspace(
       ipc.gitWorktrees(repo),
       ipc.gitWorkAudit(repo),
     ]);
-    const pick = pickReusableWorkspace(agentId, worktrees, audit.items);
+    const pick = pickReusableWorkspace(agentId, worktrees, audit.items, settledRoots());
     if (!pick) return null;
     await ipc.gitWorktreeRealign(repo, pick.path);
     return pick.path;
   } catch {
     return null;
   }
+}
+
+/** What the settled sweep does with a settled agent a day on.
+ *  - `forget`: nothing on disk to keep (no worktree, or it is already gone):
+ *    drop the session record and the entry.
+ *  - `remove`: nothing only-here: remove the worktree (and the branch when
+ *    `deleteBranch`), then forget.
+ *  - `flag`: the worktree stays: it holds work found nowhere else, or it may
+ *    not be removed automatically. Listed as kept, for Restore or Discard. */
+export type SettledCleanup =
+  | { kind: "forget" }
+  | { kind: "remove"; branch: string; deleteBranch: boolean }
+  | { kind: "flag"; dirty: number; unpushed: number; note?: string };
+
+export function settledCleanup(
+  hasWorktree: boolean,
+  worktree: ipc.WorktreeInfo | undefined,
+  work: ipc.BranchWork | undefined,
+  /** The branch's PR merged at the local tip (squash/rebase merges). */
+  landed = false,
+): SettledCleanup {
+  if (!hasWorktree || !worktree) return { kind: "forget" };
+  if (worktree.is_main) return { kind: "flag", dirty: 0, unpushed: 0, note: "main checkout" };
+  const decision = reapDecision(worktree, work);
+  if (decision.kind === "remove") return decision;
+  if (decision.kind === "ask") {
+    if (landed && decision.dirty === 0)
+      return { kind: "remove", branch: decision.branch, deleteBranch: true };
+    return { kind: "flag", dirty: decision.dirty, unpushed: decision.unpushed };
+  }
+  return {
+    kind: "flag",
+    dirty: worktree.dirty,
+    unpushed: 0,
+    note: worktree.locked != null ? "locked" : "not an agent branch",
+  };
 }
 
 /** Whether the startup sweep may even consider a workspace: a real, finished

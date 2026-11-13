@@ -31,7 +31,10 @@
 //! hibernation, not on a timer. Hibernating a project is a promise to bring it
 //! back exactly as it was, and a wake that has to reinstall first would break
 //! that promise on the one path where the user explicitly asked to keep the
-//! arrangement. Reclaiming disk is always a thing the user clicked.
+//! arrangement. Reclaiming disk is always a thing the user clicked. The one
+//! exception lives in the frontend: an agent the user Settled has its worktree
+//! removed a day later, and only when nothing in it exists anywhere else (see
+//! `settledCleanup` in src/agentWorkspaceLifecycle.ts).
 use crate::fsx::{check_scope, WorkspaceManager};
 use crate::git::{git, scan_worktrees};
 use serde::Serialize;
