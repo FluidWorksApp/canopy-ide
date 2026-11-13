@@ -22,10 +22,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopy-term-input"
+version = "0.1.0"
+dependencies = [
+ "canopy-term-core",
+]
+
+[[package]]
 name = "canopy-term-wasm"
 version = "0.1.0"
 dependencies = [
  "canopy-term-core",
+ "canopy-term-input",
  "wasm-bindgen",
 ]
 

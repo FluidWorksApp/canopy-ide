@@ -38,6 +38,27 @@ const r = Terminal.restore(20, 4, snap);
 r.refresh();
 assert.equal(r.text(), t.text(), "snapshot restores the visible screen");
 
+// Input encoders follow the modes the program set.
+const k = new Terminal(80, 24, 0);
+const dec = (b) => new TextDecoder().decode(b);
+k.refresh();
+assert.equal(dec(k.encode_key("Up", 0, 0, "", 0, 0)), "\x1b[A");
+assert.equal(dec(k.encode_key("c", 4, 0, "", 0, 0)), "\x03", "ctrl+c");
+assert.equal(dec(k.encode_key("a", 0, 0, "a", 0, 0)), "a");
+assert.equal(dec(k.encode_key("NoSuchKey", 0, 0, "", 0, 0)), "");
+assert.equal(dec(k.encode_paste("a\nb\x1b[201~", true)), "a\rb[201~");
+assert.equal(dec(k.encode_mouse(0, 0, 2, 3, 0)), "", "mouse off");
+assert.equal(dec(k.encode_focus(true)), "");
+k.advance(enc.encode("\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1004h"));
+k.refresh();
+assert.equal(dec(k.encode_key("Up", 0, 0, "", 0, 0)), "\x1bOA", "application cursor keys");
+assert.equal(dec(k.encode_paste("a\nb", true)), "\x1b[200~a\nb\x1b[201~");
+assert.equal(dec(k.encode_mouse(0, 0, 2, 3, 0)), "\x1b[<0;3;4M");
+assert.equal(dec(k.encode_mouse(1, 0, 2, 3, 0)), "\x1b[<0;3;4m");
+assert.equal(dec(k.encode_mouse(0, 5, 0, 0, 0)), "\x1b[<65;1;1M", "wheel down");
+assert.equal(dec(k.encode_focus(true)), "\x1b[I");
+k.free();
+
 const before = wasmBytes();
 const many = Array.from({ length: 20 }, () => new Terminal(120, 40, 10_000));
 for (const m of many) for (let i = 0; i < 2000; i++) m.advance(enc.encode(`${i} ${"x".repeat(100)}\r\n`));

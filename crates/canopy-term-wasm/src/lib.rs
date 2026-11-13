@@ -26,6 +26,10 @@
 
 use canopy_term_core::frame::{Cell, Color, CursorShape, Frame, MouseEncoding, MouseMode};
 use canopy_term_core::{Event, PromptKind, Row, Screen};
+use canopy_term_input::{
+    encode_focus, encode_key, encode_mouse, encode_paste_with, Key, KeyEvent, KeyEventKind, Keypad,
+    ModifierKey, Mods, MouseButton, MouseEvent, MouseEventKind,
+};
 use wasm_bindgen::prelude::*;
 
 /// Words per packed cell.
@@ -201,6 +205,76 @@ fn events_json(events: &[Event]) -> String {
     }
     out.push(']');
     out
+}
+
+/// A key name from the page (see [`Terminal::encode_key`]).
+fn parse_key(name: &str) -> Option<Key> {
+    let mut chars = name.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        return Some(Key::Char(c));
+    }
+    if let Some(n) = name.strip_prefix('F').and_then(|n| n.parse::<u8>().ok()) {
+        return Some(Key::F(n));
+    }
+    if let Some(k) = name.strip_prefix("Kp") {
+        return Some(Key::Keypad(match k {
+            "0" => Keypad::Num0,
+            "1" => Keypad::Num1,
+            "2" => Keypad::Num2,
+            "3" => Keypad::Num3,
+            "4" => Keypad::Num4,
+            "5" => Keypad::Num5,
+            "6" => Keypad::Num6,
+            "7" => Keypad::Num7,
+            "8" => Keypad::Num8,
+            "9" => Keypad::Num9,
+            "Decimal" => Keypad::Decimal,
+            "Divide" => Keypad::Divide,
+            "Multiply" => Keypad::Multiply,
+            "Subtract" => Keypad::Subtract,
+            "Add" => Keypad::Add,
+            "Enter" => Keypad::Enter,
+            "Equal" => Keypad::Equal,
+            "Separator" => Keypad::Separator,
+            _ => return None,
+        }));
+    }
+    if let Some(k) = name.strip_prefix("Mod") {
+        return Some(Key::Modifier(match k {
+            "LeftShift" => ModifierKey::LeftShift,
+            "LeftControl" => ModifierKey::LeftControl,
+            "LeftAlt" => ModifierKey::LeftAlt,
+            "LeftSuper" => ModifierKey::LeftSuper,
+            "RightShift" => ModifierKey::RightShift,
+            "RightControl" => ModifierKey::RightControl,
+            "RightAlt" => ModifierKey::RightAlt,
+            "RightSuper" => ModifierKey::RightSuper,
+            _ => return None,
+        }));
+    }
+    Some(match name {
+        "Escape" => Key::Escape,
+        "Enter" => Key::Enter,
+        "Tab" => Key::Tab,
+        "Backspace" => Key::Backspace,
+        "Insert" => Key::Insert,
+        "Delete" => Key::Delete,
+        "Left" => Key::Left,
+        "Right" => Key::Right,
+        "Up" => Key::Up,
+        "Down" => Key::Down,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
+        "Home" => Key::Home,
+        "End" => Key::End,
+        "CapsLock" => Key::CapsLock,
+        "ScrollLock" => Key::ScrollLock,
+        "NumLock" => Key::NumLock,
+        "PrintScreen" => Key::PrintScreen,
+        "Pause" => Key::Pause,
+        "Menu" => Key::Menu,
+        _ => return None,
+    })
 }
 
 /// One terminal screen. Feed it PTY output, read the screen back.
@@ -413,6 +487,109 @@ impl Terminal {
     /// See [`digest`].
     pub fn digest(&self) -> String {
         digest(&self.screen)
+    }
+
+    /// The bytes a key event sends to the program under its current modes
+    /// (cursor and keypad application modes, kitty keyboard flags); empty
+    /// when the event sends nothing.
+    ///
+    /// `key` is a single character (the unshifted character of the key) or a
+    /// name: `Escape`, `Enter`, `Tab`, `Backspace`, `Insert`, `Delete`,
+    /// `Left`, `Right`, `Up`, `Down`, `PageUp`, `PageDown`, `Home`, `End`,
+    /// `CapsLock`, `ScrollLock`, `NumLock`, `PrintScreen`, `Pause`, `Menu`,
+    /// `F1`..`F35`, `Kp<name>` for the keypad (`Kp0`..`Kp9`, `KpDecimal`,
+    /// `KpDivide`, `KpMultiply`, `KpSubtract`, `KpAdd`, `KpEnter`, `KpEqual`)
+    /// and `Mod<name>` for a modifier key (`ModLeftShift`...). An unknown
+    /// name sends nothing.
+    ///
+    /// `kind`: 0 press, 1 repeat, 2 release. `mods`: shift 1, alt 2, ctrl 4,
+    /// super 8, caps lock 64, num lock 128. `text` is what the key types
+    /// (empty for none); `shifted` and `base` are the kitty alternates as
+    /// code points (0 for none).
+    pub fn encode_key(
+        &self,
+        key: &str,
+        mods: u8,
+        kind: u8,
+        text: &str,
+        shifted: u32,
+        base: u32,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        let Some(key) = parse_key(key) else {
+            return out;
+        };
+        let mut ev = KeyEvent::new(key).with_mods(Mods(mods)).with_kind(match kind {
+            1 => KeyEventKind::Repeat,
+            2 => KeyEventKind::Release,
+            _ => KeyEventKind::Press,
+        });
+        if !text.is_empty() {
+            ev = ev.with_text(text);
+        }
+        if let Some(c) = char::from_u32(shifted).filter(|_| shifted != 0) {
+            ev = ev.with_shifted_key(c);
+        }
+        if let Some(c) = char::from_u32(base).filter(|_| base != 0) {
+            ev = ev.with_base_layout_key(c);
+        }
+        encode_key(&ev, self.frame.modes, &mut out);
+        out
+    }
+
+    /// The report a mouse event sends under the program's mouse mode and
+    /// encoding; empty when the mode does not report it.
+    ///
+    /// `kind`: 0 press (or one wheel step), 1 release, 2 motion. `button`: 0
+    /// left, 1 middle, 2 right, 3 none (motion only), 4 wheel up, 5 wheel
+    /// down, 6 wheel left, 7 wheel right, 8 back, 9 forward. `col` and `row`
+    /// are 0-based cells.
+    pub fn encode_mouse(&self, kind: u8, button: u8, col: u16, row: u16, mods: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        let b = match button {
+            0 => Some(MouseButton::Left),
+            1 => Some(MouseButton::Middle),
+            2 => Some(MouseButton::Right),
+            4 => Some(MouseButton::WheelUp),
+            5 => Some(MouseButton::WheelDown),
+            6 => Some(MouseButton::WheelLeft),
+            7 => Some(MouseButton::WheelRight),
+            8 => Some(MouseButton::Back),
+            9 => Some(MouseButton::Forward),
+            _ => None,
+        };
+        let kind = match (kind, b) {
+            (2, held) => MouseEventKind::Motion(held),
+            (1, Some(b)) => MouseEventKind::Release(b),
+            (0, Some(b)) => MouseEventKind::Press(b),
+            _ => return out,
+        };
+        let ev = MouseEvent {
+            kind,
+            col,
+            row,
+            mods: Mods(mods),
+        };
+        encode_mouse(&ev, self.frame.modes, &mut out);
+        out
+    }
+
+    /// A paste as the program should receive it: bracketed when it asked for
+    /// that, newlines as Enter otherwise. `strip_controls` removes control
+    /// characters (ESC included) so pasted text can neither end the bracket
+    /// early nor type key sequences.
+    pub fn encode_paste(&self, text: &str, strip_controls: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_paste_with(text, self.frame.modes, strip_controls, &mut out);
+        out
+    }
+
+    /// The focus report (`CSI I` / `CSI O`); empty unless the program asked
+    /// for focus events.
+    pub fn encode_focus(&self, focused: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_focus(focused, self.frame.modes, &mut out);
+        out
     }
 }
 
