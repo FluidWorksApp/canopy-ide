@@ -32,8 +32,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: cargo 1.100 build-dir layout breaks tauri-build 2.6.3 sidecar copy
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:

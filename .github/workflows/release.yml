@@ -118,8 +118,9 @@ jobs:
             arch: x86-64
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: cargo 1.100 build-dir layout breaks tauri-build 2.6.3 sidecar copy
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           targets: ${{ matrix.target }}
       - uses: ./.github/actions/install-zig
       - uses: swatinem/rust-cache@v2
@@ -204,8 +205,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: cargo 1.100 build-dir layout breaks tauri-build 2.6.3 sidecar copy
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           targets: ${{ matrix.target }}
       - uses: ./.github/actions/install-zig
       - uses: swatinem/rust-cache@v2
@@ -312,8 +314,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: cargo 1.100 build-dir layout breaks tauri-build 2.6.3 sidecar copy
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           targets: x86_64-unknown-linux-gnu
       - uses: ./.github/actions/install-zig
       - uses: swatinem/rust-cache@v2
@@ -433,8 +436,9 @@ jobs:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: cargo 1.100 build-dir layout breaks tauri-build 2.6.3 sidecar copy
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           targets: ${{ matrix.target }}
 
       # prepare-sidecar.mjs (beforeBuildCommand) builds canopy-term-app, whose
@@ -1005,7 +1009,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: cargo 1.100 build-dir layout breaks tauri-build 2.6.3 sidecar copy
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
       - name: Verify all assets, repair complete updater manifest, then optionally publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
