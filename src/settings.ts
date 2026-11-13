@@ -344,7 +344,7 @@ export interface Settings {
   /** What draws a terminal tab: "ghostty" is Canopy's own engine (the one the
    *  native Canopy Terminal uses, compiled for the webview), "xterm" is
    *  xterm.js. New terminals only. A terminal falls back to xterm by itself
-   *  when the engine cannot run here (see src/terminalEngine). */
+   *  when the engine cannot run here (see shared/terminalEngine). */
   terminalEngine: "ghostty" | "xterm";
   /** A small badge over each terminal: its engine, speed and memory. */
   terminalEngineStats: boolean;

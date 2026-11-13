@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // Tests only: load the committed wasm build from disk (a test DOM cannot
 // fetch it the way the app does).
 import { readFileSync } from "node:fs";
@@ -6,6 +7,6 @@ import { loadGhosttyFromBytes } from "./ghostty/engine";
 
 export function loadEngineForTests(): void {
   loadGhosttyFromBytes(
-    readFileSync(resolve(process.cwd(), "src/terminalEngine/pkg/canopy_term_wasm_bg.wasm")),
+    readFileSync(resolve(process.cwd(), "shared/terminalEngine/pkg/canopy_term_wasm_bg.wasm")),
   );
 }

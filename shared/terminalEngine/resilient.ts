@@ -12,7 +12,7 @@ interface Disposable {
 
 export interface XtermBundle {
   term: Terminal;
-  fit: { proposeDimensions(): { cols: number; rows: number } | undefined };
+  fit: { proposeDimensions(): { cols: number; rows: number } | undefined; fit(): void };
   serializer: { serialize(options?: { scrollback?: number }): string };
   mouseModes: {
     reset(): void;
@@ -305,6 +305,10 @@ export class ResilientTerminal {
   }
   proposeDimensions(): { cols: number; rows: number } | undefined {
     return this.xterm ? this.xterm.fit.proposeDimensions() : this.ghostty!.proposeDimensions();
+  }
+  fit(): void {
+    if (this.xterm) this.xterm.fit.fit();
+    else this.ghostty!.fit();
   }
   serialize(options?: { scrollback?: number }): string {
     return this.xterm

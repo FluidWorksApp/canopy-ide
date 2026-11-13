@@ -67,6 +67,8 @@ export interface GhosttyOptions {
   linkHandler?: ILinkHandler | null;
   /** URLs written out in the text. */
   webLinks?: WebLinkHandler | null;
+  /** Leave the default background clear (the page shows through). */
+  allowTransparency?: boolean;
   /** Accepted and ignored: xterm options with no meaning here. */
   allowProposedApi?: boolean;
 }
@@ -213,6 +215,7 @@ export class GhosttyTerminal {
   private readonly optionIsMeta: boolean;
   private readonly optionForcesSelection: boolean;
   private webLinks: WebLinkHandler | null;
+  private readonly transparent: boolean;
   private palette: Palette;
 
   private readonly queue: Pending[] = [];
@@ -282,6 +285,7 @@ export class GhosttyTerminal {
     this.optionIsMeta = options.macOptionIsMeta ?? false;
     this.optionForcesSelection = options.macOptionClickForcesSelection ?? false;
     this.webLinks = options.webLinks ?? null;
+    this.transparent = options.allowTransparency ?? false;
     this.palette = buildPalette(options.theme);
 
     const state = {
@@ -1326,7 +1330,10 @@ export class GhosttyTerminal {
     // checks ("is the caret in a terminal?") look for them.
     const root = doc.createElement("div");
     root.className = "xterm canopy-term";
-    root.style.cssText = "position:relative;width:100%;height:100%;overflow:hidden;";
+    // Like xterm's root: a block as wide as its container and as tall as the
+    // grid. The grid is fitted to the container (proposeDimensions), or the
+    // container scrolls a grid that is deliberately larger (the phone view).
+    root.style.cssText = "position:relative;";
     const screen = doc.createElement("div");
     screen.className = "xterm-screen";
     screen.style.cssText = "position:relative;";
@@ -1344,7 +1351,12 @@ export class GhosttyTerminal {
     thumb.className = "canopy-term-scrollbar";
     thumb.style.cssText = `position:absolute;right:1px;top:0;width:${SCROLLBAR_WIDTH - 4}px;border-radius:3px;background:currentColor;opacity:0;transition:opacity 120ms;pointer-events:none;`;
 
-    const renderer = new CanvasRenderer(doc, this.options.fontSize, this.options.fontFamily);
+    const renderer = new CanvasRenderer(
+      doc,
+      this.options.fontSize,
+      this.options.fontFamily,
+      this.transparent,
+    );
     screen.appendChild(renderer.canvas);
     root.append(screen, area, thumb);
     parent.appendChild(root);
@@ -1430,8 +1442,13 @@ export class GhosttyTerminal {
     const root = this.element;
     const renderer = this.renderer;
     if (!root || !renderer) return undefined;
-    const width = root.clientWidth;
-    const height = root.clientHeight;
+    // The space is the container's, less its padding (xterm's FitAddon).
+    const parent = root.parentElement;
+    const style = parent ? root.ownerDocument.defaultView?.getComputedStyle(parent) : null;
+    if (!parent || !style) return undefined;
+    const pad = (value: string) => Number.parseFloat(value) || 0;
+    const width = parent.clientWidth - pad(style.paddingLeft) - pad(style.paddingRight);
+    const height = parent.clientHeight - pad(style.paddingTop) - pad(style.paddingBottom);
     if (!(width > 0) || !(height > 0)) return undefined;
     if (!renderer.metrics.measured && renderer.measure(root)) {
       renderer.resize(this.cols, this.rows);

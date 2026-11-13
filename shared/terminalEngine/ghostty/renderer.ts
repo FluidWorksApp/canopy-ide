@@ -61,7 +61,12 @@ export class CanvasRenderer {
   private currentFont = "";
   private currentFill = "";
 
-  constructor(ownerDocument: Document, fontSize: number, fontFamily: string) {
+  /** The default background is left clear, for a terminal drawn over the
+   *  page (xterm's allowTransparency). */
+  private readonly transparent: boolean;
+
+  constructor(ownerDocument: Document, fontSize: number, fontFamily: string, transparent = false) {
+    this.transparent = transparent;
     this.canvas = ownerDocument.createElement("canvas");
     this.canvas.style.display = "block";
     this.fontSize = fontSize;
@@ -69,7 +74,7 @@ export class CanvasRenderer {
     this.metrics = fallbackMetrics(fontSize, 1);
     this.buildFonts();
     try {
-      this.ctx = this.canvas.getContext("2d", { alpha: false }) ?? null;
+      this.ctx = this.canvas.getContext("2d", { alpha: transparent }) ?? null;
     } catch {
       // No canvas (a test DOM): everything but painting still works.
       this.ctx = null;
@@ -206,8 +211,12 @@ export class CanvasRenderer {
     const link = source.link(row);
     const cursor = source.cursor && source.cursor.row === row ? source.cursor : null;
 
-    this.fill(ctx, palette.bg);
-    ctx.fillRect(0, y, cols * cw, ch);
+    if (this.transparent) {
+      ctx.clearRect(0, y, cols * cw, ch);
+    } else {
+      this.fill(ctx, palette.bg);
+      ctx.fillRect(0, y, cols * cw, ch);
+    }
 
     // Backgrounds first, in runs, so a glyph that overhangs its cell is not
     // cut off by its neighbour's background.

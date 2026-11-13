@@ -389,7 +389,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const { term, fit, serializer, mouseModes } = created;
     setEngineStats(created.stats);
     // Our engine repairs itself and, failing that, the tab carries on with
-    // xterm (src/terminalEngine). This fires only if that failed too.
+    // xterm (shared/terminalEngine). This fires only if that failed too.
     const engineFailureSub = created.onEngineFailure(() => {
       el.dataset.engineFailed = "true";
     });

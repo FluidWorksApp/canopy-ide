@@ -93,6 +93,11 @@ export interface CreateTerminalOptions {
   /** The engine the user chose in Settings. */
   engine: TerminalEngine;
   scrollback: number;
+  /** The grid before the first fit (80x24 by default). */
+  cols?: number;
+  rows?: number;
+  /** Leave the default background clear so the page shows through. */
+  allowTransparency?: boolean;
   fontSize?: number;
   fontFamily?: string;
   cursorStyle?: "block" | "underline" | "bar";
@@ -104,6 +109,11 @@ export interface CreateTerminalOptions {
   theme?: ITheme;
   /** URLs written out in the text. */
   webLinks?: WebLinkHandler;
+  /** How much of xterm to load when the terminal runs on it. A tab needs
+   *  everything; a view that only shows a stream needs `fit`; a screen that
+   *  is never shown (replaying output to read it back) needs `none`.
+   *  Ghostty has all of it built in. */
+  xtermAddons?: "all" | "fit" | "none";
 }
 
 export interface CreatedTerminal {
@@ -113,7 +123,11 @@ export interface CreatedTerminal {
   /** Why that is not the chosen engine ("" when it is). A short code. */
   readonly fallback: string;
   stats: TerminalStats;
-  fit: { proposeDimensions(): { cols: number; rows: number } | undefined };
+  fit: {
+    proposeDimensions(): { cols: number; rows: number } | undefined;
+    /** Resize the grid to fill its container. */
+    fit(): void;
+  };
   serializer: { serialize(options?: { scrollback?: number }): string };
   /** Serialising with the mouse report encoding kept, and forgetting it. */
   mouseModes: {
@@ -141,6 +155,17 @@ export function preloadTerminalEngine(waitMs = 3000): Promise<boolean> {
   });
 }
 
+/** The engine for a page with no Settings screen (the phone and browser
+ *  view): Ghostty, unless this browser was told otherwise with
+ *  `localStorage["canopy.terminalEngine"] = "xterm"`. */
+export function preferredTerminalEngine(): TerminalEngine {
+  try {
+    return localStorage.getItem("canopy.terminalEngine") === "xterm" ? "xterm" : "ghostty";
+  } catch {
+    return "ghostty";
+  }
+}
+
 export function createTerminal(options: CreateTerminalOptions): CreatedTerminal {
   let fallback = "";
   if (options.engine === "ghostty") {
@@ -159,6 +184,9 @@ export function createTerminal(options: CreateTerminalOptions): CreatedTerminal 
 
 function createGhostty(options: CreateTerminalOptions): CreatedTerminal {
   const ghostty = new GhosttyTerminal({
+    cols: options.cols,
+    rows: options.rows,
+    allowTransparency: options.allowTransparency,
     scrollback: options.scrollback,
     fontSize: options.fontSize,
     fontFamily: options.fontFamily,
@@ -193,6 +221,9 @@ function createGhostty(options: CreateTerminalOptions): CreatedTerminal {
 function xtermBundle(options: CreateTerminalOptions): XtermBundle {
   const term = new Terminal({
     allowProposedApi: true,
+    ...(options.cols ? { cols: options.cols } : {}),
+    ...(options.rows ? { rows: options.rows } : {}),
+    ...(options.allowTransparency ? { allowTransparency: true } : {}),
     scrollback: options.scrollback,
     fontSize: options.fontSize,
     fontFamily: options.fontFamily,
@@ -204,6 +235,21 @@ function xtermBundle(options: CreateTerminalOptions): XtermBundle {
     disableStdin: options.disableStdin,
     theme: options.theme,
   });
+  const addons = options.xtermAddons ?? "all";
+  if (addons !== "all") {
+    const fit =
+      addons === "fit"
+        ? new FitAddon()
+        : { proposeDimensions: () => undefined, fit() {} };
+    if (addons === "fit") term.loadAddon(fit as FitAddon);
+    const plain = { serialize: () => "" };
+    return {
+      term,
+      fit,
+      serializer: plain,
+      mouseModes: { reset() {}, serialize: () => "", dispose() {} },
+    };
+  }
   const mouseModes = trackMouseEncoding(term);
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -226,6 +272,18 @@ function xtermBundle(options: CreateTerminalOptions): XtermBundle {
 function createXterm(options: CreateTerminalOptions, fallback: string): CreatedTerminal {
   const { term, fit, serializer, mouseModes } = xtermBundle(options);
   const stats = newStats("xterm", fallback);
+  const created: CreatedTerminal = {
+    term,
+    engine: "xterm",
+    fallback,
+    stats,
+    fit,
+    serializer,
+    mouseModes,
+    onEngineFailure: () => ({ dispose() {} }),
+  };
+  // Only a full tab shows the stats badge; a bare view is left untouched.
+  if ((options.xtermAddons ?? "all") !== "all") return created;
   const untrack = trackStats(stats);
   // Numbers for the developer overlay; xterm does not report its own.
   const write = term.write.bind(term);
@@ -246,14 +304,5 @@ function createXterm(options: CreateTerminalOptions, fallback: string): CreatedT
     for (const subscription of subscriptions) subscription.dispose();
     dispose();
   };
-  return {
-    term,
-    engine: "xterm",
-    fallback,
-    stats,
-    fit,
-    serializer,
-    mouseModes,
-    onEngineFailure: () => ({ dispose() {} }),
-  };
+  return created;
 }

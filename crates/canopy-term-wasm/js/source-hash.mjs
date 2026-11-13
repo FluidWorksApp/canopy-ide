@@ -1,7 +1,7 @@
 // One hash over everything the wasm build is made from. The app ships a
-// prebuilt copy of the engine (src/terminalEngine/pkg, built by CI's
+// prebuilt copy of the engine (shared/terminalEngine/pkg, built by CI's
 // "Terminal engine (wasm)" job, so that building the frontend needs neither
-// Rust nor Zig); src/terminalEngine/pkg/SOURCE_HASH records the sources that
+// Rust nor Zig); shared/terminalEngine/pkg/SOURCE_HASH records the sources that
 // copy was built from. CI fails when they no longer match.
 //
 //   node crates/canopy-term-wasm/js/source-hash.mjs            print the hash
@@ -13,7 +13,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const stamp = join(root, "src/terminalEngine/pkg/SOURCE_HASH");
+const stamp = join(root, "shared/terminalEngine/pkg/SOURCE_HASH");
 const inputs = [
   "crates/canopy-term-core/src",
   "crates/canopy-term-core/Cargo.toml",
@@ -56,10 +56,10 @@ if (mode === "--write") {
     console.error(
       [
         "The bundled terminal engine is stale.",
-        `  src/terminalEngine/pkg was built from sources ${recorded}`,
+        `  shared/terminalEngine/pkg was built from sources ${recorded}`,
         `  the sources are now                         ${digest}`,
         "Take pkg-web from this job's canopy-term-wasm artifact, copy it over",
-        "src/terminalEngine/pkg, run this script with --write, and commit both.",
+        "shared/terminalEngine/pkg, run this script with --write, and commit both.",
         "(scripts/update-terminal-engine.sh does all three from a CI run.)",
       ].join("\n"),
     );

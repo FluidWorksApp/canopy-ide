@@ -6,7 +6,8 @@
 // overdrawn frames stacked on top of each other, so the bytes are replayed
 // through the same terminal emulator the visible tabs use and the buffer is read
 // off the other side. Same parser, same result as Term's captureText.
-import { Terminal } from "@xterm/xterm";
+import { createTerminal, type TermLike } from "./terminalEngine";
+import { getSettings } from "./settings";
 
 // Transcript capture is optional. Bound its parser and waiting inputs rather
 // than let concurrent task completions grow xterm's write queue indefinitely.
@@ -32,7 +33,7 @@ function drainCaptures(): void {
   if (!capture) return;
   queuedBytes -= capture.raw.length * 2;
   capturing = true;
-  let term: Terminal | undefined;
+  let term: TermLike | undefined;
   let guard: number | undefined;
   let finished = false;
   const finish = (text: string) => {
@@ -48,12 +49,14 @@ function drainCaptures(): void {
     }
   };
   try {
-    term = new Terminal({
-      allowProposedApi: true,
+    // The engine the visible tabs use, so a detached run reads the same.
+    term = createTerminal({
+      engine: getSettings().terminalEngine,
       cols: capture.cols,
       rows: capture.rows,
       scrollback: 5000,
-    });
+      xtermAddons: "none",
+    }).term;
     guard = window.setTimeout(() => finish(capture.raw.slice(-capture.maxChars)), 2000);
     term.write(capture.raw, () => {
       if (finished) return;
@@ -68,7 +71,7 @@ function drainCaptures(): void {
 /** Read the tail of a terminal buffer as plain text — the shared half of this
  *  and Term's captureText, kept identical on purpose: what a detached task
  *  stores in its history should be what the same run in a tab would have. */
-export function bufferTail(term: Terminal, maxChars: number): string {
+export function bufferTail(term: Pick<TermLike, "buffer">, maxChars: number): string {
   const buf = term.buffer.active;
   const lines: string[] = [];
   let chars = 0;
