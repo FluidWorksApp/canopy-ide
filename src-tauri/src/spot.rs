@@ -1364,14 +1364,26 @@ mod tests {
             vec![doc("a/1", "one"), doc("a/2", "two")],
         )
         .unwrap();
-        // What an older build does: same documents, new rows.
+        let rowid_of = |key: &str| -> i64 {
+            conn.query_row(
+                "SELECT rowid_in_docs FROM doc_stamps WHERE kind = 'research' AND key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let (one, two) = (rowid_of("a/1"), rowid_of("a/2"));
+        // What an older build does: the same documents written again, here on
+        // each other's rows, so every stamp now points at the other document.
+        // (Explicit rowids: which row each lands on otherwise depends on the
+        // order the first sync wrote them in, which is a hash map's order.)
         conn.execute("DELETE FROM docs WHERE kind = 'research'", [])
             .unwrap();
-        for (k, b) in [("a/2", "two"), ("a/1", "one")] {
+        for (rowid, k, b) in [(two, "a/1", "one"), (one, "a/2", "two")] {
             conn.execute(
-                "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
-                 VALUES ('research', ?1, 'research', '/p', 't', ?2, '/dir', 7)",
-                rusqlite::params![k, b],
+                "INSERT INTO docs (rowid, kind, key, agent, cwd, title, body, meta, ts)
+                 VALUES (?1, 'research', ?2, 'research', '/p', 't', ?3, '/dir', 7)",
+                rusqlite::params![rowid, k, b],
             )
             .unwrap();
         }
