@@ -618,6 +618,9 @@ mod tests {
             rig.tx.send(b"x".to_vec()).unwrap();
         }
         until(|| rig.link.queued() == 50);
+        // The queue fills before the reader thread calls the waker, so wait
+        // for the wake; the burst must still have produced exactly one.
+        until(|| rig.wakes.load(Ordering::SeqCst) >= 1);
         assert_eq!(rig.wakes.load(Ordering::SeqCst), 1);
         // Drained, so the next output wakes again.
         assert_eq!(read(&mut rig.link, 8).0, LinkRead::ReplayEnd);
@@ -627,6 +630,7 @@ mod tests {
         );
         rig.tx.send(b"y".to_vec()).unwrap();
         until(|| rig.link.queued() == 1);
+        until(|| rig.wakes.load(Ordering::SeqCst) >= 2);
         assert_eq!(rig.wakes.load(Ordering::SeqCst), 2);
     }
 
