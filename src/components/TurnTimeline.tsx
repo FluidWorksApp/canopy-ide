@@ -2,7 +2,9 @@
 // turn" (back to how the tree was before it) and "Back to here" (how it left
 // the tree), always through a diff preview first. Snapshots and restores are
 // src-tauri/src/turn_rollback.rs; which snapshot each button means is
-// turnRollback.ts buildTimeline, tested there.
+// turnRollback.ts buildTimeline, tested there. What a turn's prompt says —
+// a background task reporting back, another agent's message, an image — is
+// read by turnPrompt.ts, so a row never prints the raw payload.
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import * as ipc from "../ipc";
@@ -21,6 +23,7 @@ import {
   timelineWords,
   type TimelineAction,
 } from "../turnRollback";
+import { readTurnPrompt, turnPromptText, type TurnPromptView } from "../turnPrompt";
 import { irreversibleByTurn } from "../gates/timeline";
 import { lensStepsVersion, matchStepSummary, stepSummariesFor, subscribeLensSteps, type StepSummary } from "../lensSteps";
 import { RISK_LABEL, summarizeCheckpoint } from "../lensCheckpoints";
@@ -35,6 +38,9 @@ interface Props {
   /** Changes whenever the session's digest moves, so the list refreshes even
    *  if a snapshot event was missed. */
   refreshKey?: number;
+  /** The session's subagents, to name a background-task turn whose stored
+   *  prompt was cut before its summary. */
+  subagents?: readonly ipc.SubagentRun[];
   onNotice: Notify;
   /** Context controls on each turn — the harness's own compaction steered
    *  to this turn (ContextControls.tsx). Absent where it can't be driven. */
@@ -49,11 +55,15 @@ interface Pending {
 const clock = (ms: number | null) =>
   ms ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
 
-export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNotice, onSummarize }: Props) {
+export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, subagents, onNotice, onSummarize }: Props) {
   const [list, setList] = useState<ipc.TurnList | null>(null);
   const [tick, setTick] = useState(0);
   const [pending, setPending] = useState<Pending | null>(null);
   const [onlyMine, setOnlyMine] = useState(true);
+  // One turn is open at a time, showing its whole prompt and its actions.
+  // Until the person picks, that is the newest; `null` is "all closed".
+  const [picked, setPicked] = useState<number | null | undefined>(undefined);
+  useEffect(() => setPicked(undefined), [sessionId]);
   const words = timelineWords(!!builder);
 
   useEffect(() => {
@@ -110,7 +120,7 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
       void summarizeCheckpoint(cwd, {
         key: `turn:${sessionId}:${point.start.ts_ms}`,
         kind: "step",
-        goal: point.prompt ?? "",
+        goal: turnPromptText(point.prompt),
         at: point.end?.ts_ms ?? point.start.ts_ms,
         files: [],
         range: { from: point.start.commit, to: point.end?.commit ?? null, shared: list.shared },
@@ -178,78 +188,108 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
         </label>
       )}
       <ol className="aw-turns-list">
-        {entries.map((t) => (
-          <li key={t.n} className={`aw-turn ${t.running ? "aw-turn-running" : ""}`}>
-            <span className="aw-turn-dot" aria-hidden />
-            <div className="aw-turn-body">
-              <div className="aw-turn-head">
-                <span className="aw-turn-n">{builder ? `Step ${t.n}` : `Turn ${t.n}`}</span>
-                <span className="aw-turn-time">{clock(t.startedMs ?? t.endedMs)}</span>
-                {t.running && <span className="loose-chip">working</span>}
-                {irreversible.has(t.n) && (
-                  <span
-                    className="loose-chip aw-turn-irreversible"
-                    title={`Approved and run during this turn — restoring files won't reverse it:\n${irreversible.get(t.n)!.join("\n")}`}
-                  >
-                    can't be undone
+        {entries.map((t, i) => {
+          const view = readTurnPrompt(t.prompt, { builder, subagents });
+          const open = picked === undefined ? i === 0 : picked === t.n;
+          const summary = matchStepSummary(summaries, t.startedMs);
+          const said = turnPromptText(t.prompt) || null;
+          return (
+            <li
+              key={t.n}
+              className={`aw-turn ${t.running ? "aw-turn-running" : ""} ${open ? "aw-turn-open" : ""} ${
+                view && view.kind !== "you" && view.kind !== "queued" ? "aw-turn-auto" : ""
+              }`}
+            >
+              <span className="aw-turn-dot" aria-hidden />
+              <div className="aw-turn-body">
+                <button
+                  type="button"
+                  className="aw-turn-toggle"
+                  aria-expanded={open}
+                  title={open ? undefined : "Show this turn's actions"}
+                  onClick={() => setPicked(open ? null : t.n)}
+                >
+                  <span className="aw-turn-head">
+                    <span className="aw-turn-n">{builder ? `Step ${t.n}` : `Turn ${t.n}`}</span>
+                    <span className="aw-turn-time">{clock(t.startedMs ?? t.endedMs)}</span>
+                    {t.running && <span className="loose-chip">working</span>}
+                    {view && <TurnChips view={view} />}
+                    {irreversible.has(t.n) && (
+                      <span
+                        className="loose-chip aw-turn-irreversible"
+                        title={`Approved and run during this turn — restoring files won't reverse it:\n${irreversible.get(t.n)!.join("\n")}`}
+                      >
+                        can't be undone
+                      </span>
+                    )}
                   </span>
+                  {view?.text && <span className="aw-turn-prompt">{view.text}</span>}
+                </button>
+                {summary && (
+                  <div className="aw-turn-summary" title={`${summary.title}: ${summary.whatChanged}`}>
+                    <strong>{summary.title}</strong> {summary.whatChanged}{" "}
+                    <span className="aw-turn-risk">{RISK_LABEL[summary.risk]}</span>
+                  </div>
+                )}
+                {open && (
+                  <div className="aw-turn-actions">
+                    {t.undo && (
+                      <Button
+                        size="sm"
+                        title={t.undo.caveat ?? "Preview, then restore the files to how they were before this turn"}
+                        onClick={() => setPending({ label: words.undo, action: t.undo! })}
+                      >
+                        {words.undo}
+                      </Button>
+                    )}
+                    {t.backToHere && !t.running && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Preview, then restore the files to how this turn left them"
+                        onClick={() => setPending({ label: words.back, action: t.backToHere! })}
+                      >
+                        {words.back}
+                      </Button>
+                    )}
+                    {!summary && !t.running && t.startedMs != null && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={summarizing.has(t.n)}
+                        onClick={() => summarize(t.n)}
+                        title="Ask your brain to describe what this turn changed, in plain words"
+                      >
+                        {summarizing.has(t.n) ? "Describing…" : "Describe"}
+                      </Button>
+                    )}
+                    {onSummarize && !t.running && (
+                      <>
+                        <span className="aw-turn-sep" aria-hidden />
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title="Free up context: condense this turn and everything after it, keep what came before in detail"
+                          onClick={() => onSummarize("from", { n: t.n, prompt: said })}
+                        >
+                          Summarize from here
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title="Free up context: condense everything up to this turn, keep what came after in detail"
+                          onClick={() => onSummarize("upto", { n: t.n, prompt: said })}
+                        >
+                          Summarize up to here
+                        </Button>
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
-              {t.prompt && (
-                <div className="aw-turn-prompt" title={t.prompt}>
-                  {t.prompt}
-                </div>
-              )}
-              <TurnSummary
-                summary={matchStepSummary(summaries, t.startedMs)}
-                busy={summarizing.has(t.n)}
-                canAsk={!t.running && t.startedMs != null}
-                onAsk={() => summarize(t.n)}
-              />
-              <div className="aw-turn-actions">
-                {t.undo && (
-                  <Button
-                    size="sm"
-                    title={t.undo.caveat ?? "Preview, then restore the files to how they were before this turn"}
-                    onClick={() => setPending({ label: words.undo, action: t.undo! })}
-                  >
-                    {words.undo}
-                  </Button>
-                )}
-                {t.backToHere && !t.running && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    title="Preview, then restore the files to how this turn left them"
-                    onClick={() => setPending({ label: words.back, action: t.backToHere! })}
-                  >
-                    {words.back}
-                  </Button>
-                )}
-                {onSummarize && !t.running && (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      title="Free up context: condense this turn and everything after it, keep what came before in detail"
-                      onClick={() => onSummarize("from", { n: t.n, prompt: t.prompt ?? null })}
-                    >
-                      Summarize from here
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      title="Free up context: condense everything up to this turn, keep what came after in detail"
-                      onClick={() => onSummarize("upto", { n: t.n, prompt: t.prompt ?? null })}
-                    >
-                      Summarize up to here
-                    </Button>
-                  </>
-                )}
-              </div>
-            </div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ol>
       <div className="aw-turns-note">{IRREVERSIBLE_NOTE}</div>
       {pending && (
@@ -271,32 +311,21 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
   );
 }
 
-/** One turn's brain summary, or a button to ask for it. Written
- *  automatically for builder-lens projects; anywhere else it's on request. */
-function TurnSummary({
-  summary,
-  busy,
-  canAsk,
-  onAsk,
-}: {
-  summary: ReturnType<typeof matchStepSummary>;
-  busy: boolean;
-  canAsk: boolean;
-  onAsk: () => void;
-}) {
-  if (summary) {
-    return (
-      <div className="aw-turn-summary" title={`${summary.title}: ${summary.whatChanged}`}>
-        <strong>{summary.title}</strong> {summary.whatChanged}{" "}
-        <span className="aw-turn-risk">{RISK_LABEL[summary.risk]}</span>
-      </div>
-    );
-  }
-  if (!canAsk) return null;
+/** Where a turn came from and how it ended, as chips beside its number. */
+function TurnChips({ view }: { view: TurnPromptView }) {
   return (
-    <Button size="sm" variant="ghost" className="aw-turn-summarize" disabled={busy} onClick={onAsk} title="Ask your brain to describe this turn in plain words">
-      {busy ? "Summarising…" : "Summarise"}
-    </Button>
+    <>
+      {view.label && <span className="loose-chip aw-turn-chip">{view.label}</span>}
+      {view.status && (
+        <span className={`loose-chip aw-turn-chip aw-turn-chip-${view.tone ?? "ok"}`}>{view.status}</span>
+      )}
+      {view.images > 0 && (
+        <span className="loose-chip aw-turn-chip">
+          {view.images} image{view.images === 1 ? "" : "s"}
+        </span>
+      )}
+      {view.pasted && <span className="loose-chip aw-turn-chip">pasted</span>}
+    </>
   );
 }
 

@@ -137,6 +137,16 @@ describe("snapshot triggers", () => {
     expect(turnSnapshot.mock.calls[1][0]).toMatchObject({ kind: "end", prompt: undefined });
   });
 
+  it("stores a background task's outcome ahead of its ids and temp path", async () => {
+    const note =
+      "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<output-file>/private/tmp/x/tasks/b1.output</output-file>\n<status>completed</status>\n<summary>Background command \"Wait for CI\" completed (exit code 0)</summary>\n</task-notification>";
+    observeTurnEvents([{ ...ev("UserPromptSubmit"), prompt: note }], 42);
+    await vi.waitFor(() => expect(turnSnapshot).toHaveBeenCalledTimes(1));
+    expect(turnSnapshot.mock.calls[0][0].prompt).toBe(
+      '<task-notification><status>completed</status><summary>Background command "Wait for CI" completed (exit code 0)</summary><tool-use-id>toolu_1</tool-use-id><task-id>b1</task-id>',
+    );
+  });
+
   it("takes nothing when the setting is off", async () => {
     updateSettings({ turnRollback: false });
     observeTurnEvents([ev("UserPromptSubmit")]);

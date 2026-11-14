@@ -18,6 +18,7 @@ import * as ipc from "./ipc";
 import { eventAgentId, type AgentEventData } from "../shared/notifications";
 import { getSettings } from "./settings";
 import { supportsTurnRollback } from "./harness";
+import { condenseTurnPrompt } from "./turnPrompt";
 
 /** Fired after a snapshot lands, so an open timeline refreshes. `detail` is
  *  the session id. */
@@ -60,7 +61,8 @@ export function observeTurnEvents(
           cwd: e.cwd,
           sessionId,
           kind,
-          prompt: kind === "start" ? e.prompt : undefined,
+          // Stored cut to 200 characters; keep the part worth reading.
+          prompt: kind === "start" ? condenseTurnPrompt(e.prompt) : undefined,
           observedMs,
         }),
       )

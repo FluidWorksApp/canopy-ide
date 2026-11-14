@@ -10,6 +10,7 @@
 // summaries are cached by lensCheckpoints.ts (memory + ledger), so the
 // engineer lens's turn list (TurnTimeline) reads the same ones.
 
+import { turnPromptText } from "./turnPrompt";
 import { onAgentTurnEnd, type AgentTurnEnd } from "./agentTurns";
 import { getSettings } from "./settings";
 import { queryLedger } from "./ledger";
@@ -90,7 +91,7 @@ export function stepOf(turn: AgentTurnEnd): LensStep {
   return {
     key: `turn:${turn.turnId}`,
     kind: "step",
-    goal: turn.prompt?.trim() ?? "",
+    goal: turnPromptText(turn.prompt),
     at: turn.endedAt,
     files: turn.filesTouched,
     sessionId: turn.sessionId,
