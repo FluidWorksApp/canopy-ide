@@ -179,6 +179,68 @@ fn link_grant_refusal(canonical: &Path, home: Option<&Path>) -> Option<&'static 
     None
 }
 
+/// The most a hover preview ever reads. A preview shows a picture or the top
+/// of a file; it is not a way to pull a large file through the renderer.
+const PREVIEW_MAX_BYTES: u64 = 256 * 1024;
+
+/// Read the start of a regular file anywhere on this computer, for a hover
+/// preview of something an agent listed (a screenshot in its scratch folder, a
+/// draft outside the repo). Read only, bounded, and refused for credential
+/// locations exactly as a terminal link is, whatever the Privacy setting says:
+/// the setting is about opening a file for editing, this only looks.
+/// `home` is the canonical home directory; pure so it can be tested.
+fn read_preview_file(
+    path: &str,
+    home: Option<&Path>,
+    max_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let requested = Path::new(path);
+    if !requested.is_absolute() {
+        return Err("Only an absolute path can be previewed.".into());
+    }
+    // Symlinks are resolved first, so a link into a credential folder is
+    // judged by where it leads.
+    let canonical = requested.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical.is_file() {
+        return Err("That is not a file.".into());
+    }
+    if let Some(reason) = link_grant_refusal(&canonical, home) {
+        return Err(reason.into());
+    }
+    let limit = max_bytes
+        .unwrap_or(PREVIEW_MAX_BYTES)
+        .min(PREVIEW_MAX_BYTES);
+    let mut file = std::fs::File::open(&canonical).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// Hover preview of a file that may be outside every project. Local desktop
+/// only: it is not part of the remote host adapter, so a remote or phone
+/// client cannot use it to read this computer's files.
+#[tauri::command]
+pub async fn fs_read_preview(
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<tauri::ipc::Response, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())
+        .and_then(|h| h.canonicalize().ok());
+    tauri::async_runtime::spawn_blocking(move || {
+        read_preview_file(&path, home.as_deref(), max_bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(tauri::ipc::Response::new)
+}
+
 /// Let the editor open this one file, named by a click on a terminal link.
 /// Refused unless the Privacy setting is on; the grant is that exact file for
 /// this app run, never its folder (see `grant_file`).
@@ -1773,6 +1835,73 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    fn preview_dir(tag: &str) -> std::path::PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("canopy-preview-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_preview_reads_a_file_outside_every_project_and_stops_at_the_limit() {
+        let dir = preview_dir("read");
+        let file = dir.join("shot.png");
+        std::fs::write(&file, vec![7u8; 1000]).unwrap();
+        let path = file.to_string_lossy().to_string();
+        assert_eq!(
+            super::read_preview_file(&path, None, None).unwrap().len(),
+            1000
+        );
+        assert_eq!(
+            super::read_preview_file(&path, None, Some(10))
+                .unwrap()
+                .len(),
+            10
+        );
+        // A caller cannot ask for more than the cap.
+        let big = dir.join("big.bin");
+        std::fs::write(&big, vec![1u8; super::PREVIEW_MAX_BYTES as usize + 5000]).unwrap();
+        let got = super::read_preview_file(&big.to_string_lossy(), None, Some(u64::MAX)).unwrap();
+        assert_eq!(got.len() as u64, super::PREVIEW_MAX_BYTES);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_preview_never_reads_credential_locations() {
+        let home = preview_dir("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(home.join(".ssh/config"), "secret").unwrap();
+        std::fs::write(home.join("notes.txt"), "fine").unwrap();
+        std::fs::write(home.join("id_rsa"), "key").unwrap();
+        let refused = |p: &std::path::Path| {
+            super::read_preview_file(&p.to_string_lossy(), Some(&home), None).is_err()
+        };
+        assert!(refused(&home.join(".ssh/config")));
+        assert!(refused(&home.join("id_rsa"))); // by name, wherever it is
+        assert!(!refused(&home.join("notes.txt")));
+        // A link into a credential folder is judged by where it leads.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(home.join(".ssh/config"), home.join("innocent.txt"))
+                .unwrap();
+            assert!(refused(&home.join("innocent.txt")));
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_preview_wants_an_absolute_path_to_a_real_file() {
+        let dir = preview_dir("shape");
+        assert!(super::read_preview_file("relative/shot.png", None, None).is_err());
+        assert!(super::read_preview_file(&dir.to_string_lossy(), None, None).is_err());
+        assert!(
+            super::read_preview_file(&dir.join("missing.png").to_string_lossy(), None, None)
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn credential_locations_are_never_granted_from_a_link() {
         let home = std::path::Path::new("/Users/me");

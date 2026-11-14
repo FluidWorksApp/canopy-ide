@@ -986,6 +986,7 @@ pub fn run() {
             fsx::workspace_list,
             fsx::fs_read_dir,
             fsx::fs_read_file,
+            fsx::fs_read_preview,
             fsx::fs_write_file,
             fsx::fs_write_file_confined,
             fsx::fs_stat,

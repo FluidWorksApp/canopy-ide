@@ -1610,6 +1610,22 @@ export async function fsReadFile(
     : Uint8Array.from(data);
 }
 
+/** The start of a file for a hover preview, even one outside every project
+ *  (an agent's scratch folder, a draft elsewhere). Read only and capped; the
+ *  desktop refuses credential locations such as ~/.ssh. On this computer only:
+ *  a workspace on another machine has no such command, so this rejects there
+ *  and the caller shows its "open it" note. */
+export async function fsReadPreview(
+  path: string,
+  maxBytes?: number,
+): Promise<Uint8Array> {
+  const data = await invoke<ArrayBuffer | number[]>("fs_read_preview", {
+    path,
+    maxBytes,
+  });
+  return data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data);
+}
+
 const textDecoder = new TextDecoder();
 export async function fsReadText(
   path: string,
