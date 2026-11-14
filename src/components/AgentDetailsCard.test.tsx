@@ -417,6 +417,20 @@ describe("AgentDetailsCard", () => {
     );
   });
 
+  it("offers Commit & raise PR again once this branch's PR is merged", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "fix/hub-prefetch-scrcpy",
+      entries: [{}, {}],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 79, title: "Hub prefetch", branch: "fix/hub-prefetch-scrcpy", base: "main", state: "MERGED", draft: false, additions: 4, deletions: 1, checks: "", url: "https://example.test/pr/79" },
+    ] as never);
+    setup({ repo: "/merged", cwd: "/merged" });
+    await screen.findByRole("button", { name: "Commit & raise PR" });
+    expect(screen.queryByRole("button", { name: "Commit & push" })).toBeNull();
+  });
+
   it("does not offer Commit & push into a PR from another branch", async () => {
     vi.mocked(ipc.gitStatus).mockResolvedValue({
       is_repo: true,
