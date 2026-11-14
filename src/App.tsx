@@ -155,6 +155,7 @@ import * as clipboardStore from "./clipboardStore";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { TitleBar } from "./components/TitleBar";
+import { useProjectIcons } from "./useProjectIcons";
 import {
   FreezeOverlay,
   HibernationView,
@@ -3616,6 +3617,8 @@ export default function App() {
         .filter((p): p is Project => Boolean(p)),
     [ws.openIds, ws.projects],
   );
+  // Each open tab's own icon, found in its folders (projectIcon.ts).
+  const projectIcons = useProjectIcons(openProjects, hibernated);
   // The companion's reach: EVERY project, not just the open ones. That is the
   // whole point of it — "which repos have unpushed work" is a question about
   // the workspace, and answering only for the tabs that happen to be open
@@ -4473,7 +4476,7 @@ export default function App() {
         onStopCollab={stopCollab}
         onNewProject={newProject}
         onManageProjects={openManager}
-
+        projectIcons={projectIcons}
       />
 
       <div className="app-body">

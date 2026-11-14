@@ -178,3 +178,107 @@ describe("TitleBar lens switch placement", () => {
     expect(css).toMatch(/\.titlebar-context\s*{[^}]*margin-left:\s*auto;/s);
   });
 });
+
+describe("TitleBar project icons", () => {
+  const FOUND = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=";
+  const PICKED = "data:image/png;base64,iVBORw0KGgo=";
+
+  const renderTabs = (
+    open: Project[],
+    opts: { icons?: Record<string, string>; asleep?: string[] } = {},
+  ) => {
+    const onCloseProject = vi.fn();
+    const onSelectProject = vi.fn();
+    render(
+      <TitleBar
+        projects={open}
+        openProjects={open}
+        activeId={open[0].id}
+        pendingCount={() => 0}
+        collabActive={false}
+        tabDragId={null}
+        tabDragOffsetX={0}
+        tabDragItemProps={(id) => ({ "data-drag-id": id, onPointerDown: () => {} })}
+        hibernated={Object.fromEntries((opts.asleep ?? []).map((id) => [id, {}]))}
+        showHints={false}
+        notifCount={0}
+        notifUrgency="low"
+        onOpenNotifications={() => {}}
+        onOpenProject={() => {}}
+        onSelectProject={onSelectProject}
+        onCloseProject={onCloseProject}
+        onHibernateProject={() => {}}
+        onTogglePinProject={() => {}}
+        onWakeProject={() => {}}
+        onToggleVibe={() => {}}
+        onEditProject={() => {}}
+        onStopCollab={() => {}}
+        onNewProject={() => {}}
+        onManageProjects={() => {}}
+        projectIcons={opts.icons}
+      />,
+    );
+    return { onCloseProject, onSelectProject };
+  };
+  const tab = (name: string) => screen.getByText(name).closest(".project-tab") as HTMLElement;
+
+  it("shows the detected icon before the name, as an <img>", () => {
+    renderTabs([project("a", "Acme Widgets")], { icons: { a: FOUND } });
+    const img = tab("Acme Widgets").querySelector("img.project-tab-icon") as HTMLImageElement;
+    expect(img).not.toBeNull();
+    expect(img.getAttribute("src")).toBe(FOUND);
+    expect(img.nextElementSibling?.textContent).toBe("Acme Widgets");
+    // Never inlined: no <svg> from the project lands in the page.
+    const svgs = [...tab("Acme Widgets").querySelectorAll("svg")];
+    expect(svgs.every((svg) => svg.closest(".tab-close"))).toBe(true);
+  });
+
+  it("keeps today's text-only tab when nothing was found", () => {
+    renderTabs([project("a", "Acme Widgets")], { icons: {} });
+    expect(tab("Acme Widgets").querySelector(".project-tab-icon")).toBeNull();
+  });
+
+  it("falls back to text when the icon fails to load", () => {
+    renderTabs([project("a", "Acme Widgets")], { icons: { a: FOUND } });
+    const img = tab("Acme Widgets").querySelector("img.project-tab-icon")!;
+    fireEvent.error(img);
+    expect(tab("Acme Widgets").querySelector(".project-tab-icon")).toBeNull();
+    expect(screen.getByText("Acme Widgets")).toBeTruthy();
+  });
+
+  it("lets the user's choice win over the detected icon", () => {
+    renderTabs(
+      [
+        { ...project("a", "Glyph Co"), icon: { kind: "emoji", emoji: "🚀" } },
+        { ...project("b", "Plain Co"), icon: { kind: "none" } },
+        { ...project("c", "Picked Co"), icon: { kind: "image", dataUrl: PICKED } },
+      ],
+      { icons: { a: FOUND, b: FOUND, c: FOUND } },
+    );
+    expect(tab("Glyph Co").querySelector(".project-tab-glyph")?.textContent).toBe("🚀");
+    expect(tab("Glyph Co").querySelector("img")).toBeNull();
+    expect(tab("Plain Co").querySelector(".project-tab-icon")).toBeNull();
+    expect(tab("Picked Co").querySelector("img.project-tab-icon")?.getAttribute("src")).toBe(PICKED);
+  });
+
+  it("keeps the hibernation frost and the close button working", () => {
+    const { onCloseProject, onSelectProject } = renderTabs(
+      [project("a", "Awake Co"), project("z", "Sleepy Co")],
+      { icons: { a: FOUND, z: FOUND }, asleep: ["z"] },
+    );
+    const sleepy = tab("Sleepy Co");
+    expect(sleepy.classList.contains("project-tab-asleep")).toBe(true);
+    expect(sleepy.querySelector(".project-tab-frost")).not.toBeNull();
+    expect(sleepy.querySelector("img.project-tab-icon")).not.toBeNull();
+    fireEvent.click(sleepy.querySelector(".tab-close")!);
+    expect(onCloseProject).toHaveBeenCalledWith("z");
+    expect(onSelectProject).not.toHaveBeenCalled();
+  });
+
+  it("sizes the icon to a fixed small box and keeps the name the only classless span", () => {
+    const css = readFileSync(join(process.cwd(), "src/index.css"), "utf8");
+    expect(css).toMatch(/\.project-tab-icon\s*{[^}]*flex:\s*0 0 auto;[^}]*width:\s*14px;[^}]*height:\s*14px;/s);
+    renderTabs([project("a", "Acme Widgets")], { icons: { a: FOUND } });
+    expect(tab("Acme Widgets").querySelectorAll(":scope > span:not([class])")).toHaveLength(1);
+  });
+});

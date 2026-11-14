@@ -13,6 +13,9 @@ import {isRemoteHost} from "../host";
 import {Dialog} from "./Dialog";
 import {DirectoryPicker} from "../remoteExecution/DirectoryPicker";
 import { PlacementPicker } from "./PlacementPicker";
+import { ProjectIconPicker } from "./ProjectIconPicker";
+import { normalizeProjectIcon, type ProjectIcon } from "../projectIcon";
+import { readableCommand } from "../readableCommand";
 import { getProjectPreference, setProjectPreference } from "../placement/preferences";
 import { inheritPreference, type DisplayTarget, type Preference } from "../placement/types";
 
@@ -42,6 +45,7 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
     return () => { live = false; };
   }, []);
   const [name, setName] = useState(existing?.name ?? "");
+  const [icon, setIcon] = useState<ProjectIcon | undefined>(() => normalizeProjectIcon(existing?.icon));
   const [components, setComponents] = useState<Component[]>(
     existing?.components ?? [],
   );
@@ -174,7 +178,7 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
   </Dialog>;
   return (
     <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal pd-modal" onClick={(e) => e.stopPropagation()}>
         <h3>{existing ? "Edit project" : "New project"}</h3>
         <div className="modal-body">
         <label className="field">
@@ -186,18 +190,15 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
             onChange={(e) => setName(e.target.value)}
           />
         </label>
-        {/* Two visual levels, because the flat version read as a wall of
-            identical boxes: directory CARDS (folder glyph + name + dimmed
-            path) contain an indented, labeled "Run commands" zone whose ▶
-            marks match the play buttons those commands become in the
-            sidebar. */}
+        {/* A folder is a card: its name and path on top, then its run commands
+            as plain rows (name, command) with a hairline between them. What a
+            run command is gets said once, in the section head, not per card. */}
         <div className="pd-section">
           <div className="pd-section-head">
             <span>Directories</span>
             <small>
-              The folders this project is made of — one repo, or several
-              (frontend, backend, …). Each gets its own file tree and
-              terminals.
+              The folders this project is made of. Each gets its own files,
+              terminals and run commands, which show as ▶ in the sidebar.
             </small>
           </div>
           {components.map((c, i) => (
@@ -212,10 +213,11 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
                     onChange={(e) => patch(i, e.target.value)}
                   />
                   <span className="pd-dir-path" title={c.path}>
-                    {c.path}
+                    <bdi>{c.path}</bdi>
                   </span>
                 </div>
-                <Button icon
+                <Button icon variant="ghost" className="pd-remove"
+                  aria-label={`Remove ${c.label || "folder"} from project`}
                   title="Remove from project — the folder on disk is untouched"
                   onClick={() =>
                     setComponents((prev) => prev.filter((_, j) => j !== i))
@@ -224,34 +226,35 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
                 </Button>
               </div>
               <div className="pd-cmds">
-                <div className="pd-cmds-head">
-                  <span>Run commands</span>
-                  <small>
-                    Servers and tasks for this folder — they show up as ▶ play
-                    buttons in the sidebar.
-                  </small>
-                </div>
                 {(c.commands ?? []).map((cmd, k) => (
                   <div key={cmd.id} className="pd-cmd-row">
-                    <span className="pd-cmd-play">▶</span>
+                    <span className="pd-cmd-play" aria-hidden>▶</span>
                     <input
                       className="pd-cmd-name"
                       placeholder="name — e.g. web"
+                      aria-label="Command name"
                       value={cmd.name}
                       onChange={(e) => patchCommand(i, k, "name", e.target.value)}
                     />
                     <input
                       className="pd-cmd-cmd"
                       placeholder="command — e.g. pnpm run dev"
-                      value={cmd.command}
+                      aria-label="Command"
+                      spellCheck={false}
+                      // Detected commands are stored as quoted words; shown
+                      // plain, and saved unchanged unless edited.
+                      value={readableCommand(cmd.command)}
                       onChange={(e) => patchCommand(i, k, "command", e.target.value)}
                     />
-                    <Button icon onClick={() => removeCommand(i, k)}>
+                    <Button icon variant="ghost" className="pd-remove"
+                      aria-label={`Remove command ${cmd.name || k + 1}`}
+                      title="Remove command"
+                      onClick={() => removeCommand(i, k)}>
                       ✕
                     </Button>
                   </div>
                 ))}
-                <Button size="sm" onClick={() => addCommand(i)}>
+                <Button size="sm" variant="ghost" onClick={() => addCommand(i)}>
                   ＋ Add command
                 </Button>
               </div>
@@ -359,6 +362,13 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
           </div>
         )}
         {existing && (
+          <ProjectIconPicker
+            roots={components.map((c) => c.path)}
+            value={icon}
+            onChange={setIcon}
+          />
+        )}
+        {existing && (
           <PlacementPicker
             label="Run agents on"
             value={placement}
@@ -387,6 +397,7 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
                 id: existing?.id ?? newProjectId(),
                 name: name.trim(),
                 components,
+                icon: existing ? icon : undefined,
                 ...(knownVibe
                   ? {
                       vibe: {
