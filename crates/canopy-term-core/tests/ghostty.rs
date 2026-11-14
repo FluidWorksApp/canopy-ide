@@ -293,6 +293,30 @@ fn a_screen_moves_between_threads_and_is_used_from_many() {
 }
 
 #[test]
+fn the_first_read_from_any_thread_sees_every_staged_byte() {
+    // Readers race to be first after an `advance`: whichever one flushes the
+    // staged bytes, none may be answered from a screen they have not reached.
+    for round in 0..200 {
+        let mut s = Screen::new(20, 3);
+        s.advance(b"staged");
+        let shared = std::sync::Arc::new(s);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let (s, start) = (shared.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    row_text(&s, 0)
+                })
+            })
+            .collect();
+        for h in handles {
+            assert_eq!(h.join().unwrap(), "staged", "round {round}");
+        }
+    }
+}
+
+#[test]
 fn dropping_a_screen_with_queued_work_does_not_hang() {
     for _ in 0..20 {
         let mut s = Screen::new(80, 24);

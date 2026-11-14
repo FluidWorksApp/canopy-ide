@@ -422,20 +422,29 @@ impl Screen {
     }
 
     /// Queue staged bytes (if any) for the engine thread.
+    ///
+    /// The staging lock is held until the bytes are queued. Taking them out
+    /// and queuing them after the lock was released let another thread's read
+    /// see an empty buffer, queue its own command first, and be answered from
+    /// a screen the bytes had not reached yet.
     fn flush(&self) {
-        let data = {
-            let mut st = self.staged.lock().unwrap_or_else(|e| e.into_inner());
-            if st.is_empty() {
-                return;
-            }
-            std::mem::take(&mut *st)
-        };
+        let mut st = self.staged.lock().unwrap_or_else(|e| e.into_inner());
+        if st.is_empty() {
+            return;
+        }
+        let data = std::mem::take(&mut *st);
         self.send_raw(Box::new(move |e| e.feed(&data)));
     }
 
-    /// Queue a command behind everything `advance`d so far.
+    /// Queue a command behind everything `advance`d so far. The staged bytes
+    /// and the command are queued under one hold of the staging lock, so no
+    /// other thread's command can land between them or ahead of them.
     fn send(&self, cmd: Cmd) {
-        self.flush();
+        let mut st = self.staged.lock().unwrap_or_else(|e| e.into_inner());
+        if !st.is_empty() {
+            let data = std::mem::take(&mut *st);
+            self.send_raw(Box::new(move |e| e.feed(&data)));
+        }
         self.send_raw(cmd);
     }
 
