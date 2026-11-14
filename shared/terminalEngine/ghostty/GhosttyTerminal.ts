@@ -1346,7 +1346,7 @@ export class GhosttyTerminal {
     area.spellcheck = false;
     area.tabIndex = 0;
     area.style.cssText =
-      "position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;padding:0;margin:0;border:0;resize:none;overflow:hidden;white-space:nowrap;z-index:-5;caret-color:transparent;";
+      "position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;line-height:1;padding:0;margin:0;border:0;resize:none;overflow:hidden;white-space:nowrap;z-index:-5;caret-color:transparent;";
     const thumb = doc.createElement("div");
     thumb.className = "canopy-term-scrollbar";
     thumb.style.cssText = `position:absolute;right:1px;top:0;width:${SCROLLBAR_WIDTH - 4}px;border-radius:3px;background:currentColor;opacity:0;transition:opacity 120ms;pointer-events:none;`;
@@ -1774,7 +1774,7 @@ export class GhosttyTerminal {
     this.stats.lastPaintMs = elapsed;
     this.stats.lastPaintRows = drawn;
     this.placeScrollbar();
-    if (this.composing) this.placeTextarea();
+    this.placeTextarea();
   }
 
   private placeScrollbar(): void {
@@ -1794,15 +1794,23 @@ export class GhosttyTerminal {
     thumb.style.opacity = "0.35";
   }
 
-  /** Put the hidden input at the cursor so an input method's candidate
-   *  window opens beside the text being composed. */
+  /** Keep the hidden input on the cursor cell, always (xterm does the same).
+   *  macOS dictation and input-method candidate windows anchor to the focused
+   *  input's caret, so an input parked at the corner puts them there. */
   private placeTextarea(): void {
     const area = this.textarea;
     const renderer = this.renderer;
     if (!area || !renderer) return;
     const m = renderer.metrics;
-    area.style.left = `${this.cursorState[1] * m.cellWidth}px`;
-    area.style.top = `${(this.cursorState[0] + this.scrollOffset) * m.cellHeight}px`;
+    const left = `${this.cursorState[1] * m.cellWidth}px`;
+    const top = `${(this.cursorState[0] + this.scrollOffset) * m.cellHeight}px`;
+    const width = `${m.cellWidth}px`;
+    const height = `${m.cellHeight}px`;
+    const st = area.style;
+    if (st.left !== left) st.left = left;
+    if (st.top !== top) st.top = top;
+    if (st.width !== width) st.width = width;
+    if (st.height !== height) st.height = height;
   }
 }
 
