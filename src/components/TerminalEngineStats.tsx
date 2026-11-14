@@ -21,7 +21,7 @@ function megabytes(bytes: number): string {
 
 export function statsLines(
   stats: TerminalStats,
-  previous: { bytes: number; paints: number },
+  previous: { bytes: number; paints: number; parseMs: number; paintMs: number },
   seconds: number,
   engineMemory: number,
 ): string[] {
@@ -34,10 +34,22 @@ export function statsLines(
   const rate = seconds > 0 ? (stats.bytes - previous.bytes) / seconds : 0;
   const output = `out ${rate >= 1048576 ? `${(rate / 1048576).toFixed(1)} MB/s` : `${Math.round(rate / 1024)} KB/s`}`;
   if (stats.engine === "ghostty") {
-    const parse = stats.parseMs > 0 ? stats.bytes / 1048576 / (stats.parseMs / 1000) : 0;
-    const fps = seconds > 0 ? Math.round((stats.paints - previous.paints) / seconds) : 0;
-    lines.push(`${output} · parses ${parse >= 100 ? Math.round(parse) : parse.toFixed(1)} MB/s`);
-    lines.push(`paint ${stats.lastPaintMs.toFixed(1)} ms (${stats.lastPaintRows} rows) · ${fps} fps`);
+    // Over the last sample only: a lifetime average swings with every
+    // keystroke echo and freezes at idle. No parsing in the window is "idle",
+    // not a stale number.
+    const parsedMs = stats.parseMs - previous.parseMs;
+    const parse = parsedMs > 0 ? (stats.bytes - previous.bytes) / 1048576 / (parsedMs / 1000) : 0;
+    const frames = stats.paints - previous.paints;
+    const paintAvg = frames > 0 ? (stats.paintMs - previous.paintMs) / frames : 0;
+    const fps = seconds > 0 ? Math.round(frames / seconds) : 0;
+    lines.push(
+      `${output} · parses ${parsedMs > 0 ? `${parse >= 100 ? Math.round(parse) : parse.toFixed(1)} MB/s` : "idle"}`,
+    );
+    lines.push(
+      frames > 0
+        ? `paint ${paintAvg.toFixed(1)} ms avg, ${stats.lastPaintMs.toFixed(1)} last · ${fps} paints/s`
+        : "paint idle",
+    );
     lines.push(`engine memory ${megabytes(engineMemory)}, all terminals`);
     if (stats.recoveries) lines.push(`engine rebuilt ${stats.recoveries}×`);
   } else {
@@ -49,7 +61,7 @@ export function statsLines(
 export function TerminalEngineStats({ stats }: { stats: TerminalStats | null }) {
   const on = useSyncExternalStore(subscribeSettings, () => getSettings().terminalEngineStats);
   const [, setTick] = useState(0);
-  const previous = useRef({ bytes: 0, paints: 0, at: 0 });
+  const previous = useRef({ bytes: 0, paints: 0, parseMs: 0, paintMs: 0, at: 0 });
   const shown = useRef<string[]>([]);
   useEffect(() => {
     if (!on || !stats) return;
@@ -57,7 +69,13 @@ export function TerminalEngineStats({ stats }: { stats: TerminalStats | null }) 
       const now = performance.now();
       const last = previous.current;
       shown.current = statsLines(stats, last, last.at ? (now - last.at) / 1000 : 0, ghosttyMemoryBytes());
-      previous.current = { bytes: stats.bytes, paints: stats.paints, at: now };
+      previous.current = {
+        bytes: stats.bytes,
+        paints: stats.paints,
+        parseMs: stats.parseMs,
+        paintMs: stats.paintMs,
+        at: now,
+      };
       setTick((n) => n + 1);
     };
     sample();
