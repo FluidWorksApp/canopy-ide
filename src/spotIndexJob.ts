@@ -14,8 +14,9 @@
 // exist". Maintenance that only happens when someone searches is maintenance
 // that is missing precisely when the index is stale.
 //
-// So: a pass a minute after launch, then every minute while a backlog is
-// shrinking, then a slow heartbeat (half an hour) once there isn't. Opening the
+// So: a pass a minute after launch, then every 15 s while a backlog is
+// shrinking (a pass that finds nothing new is now cheap), then a slow heartbeat
+// (half an hour) once there isn't. Opening the
 // palette brings the index up to date itself, so the heartbeat is only the
 // pruning and the "nobody searched today" case, and does not need to be
 // often. Every pass is incremental and budgeted by the backend — a warm index is a few thousand stats and no reads —
@@ -24,9 +25,9 @@ import { runIngest } from "./spotIndex";
 
 export interface JobPace {
   /** Between passes while transcript is still unread. Short, because the
-   *  backlog only shrinks by one budget per pass. A minute apart, a fresh
-   *  install still catches up in the background, and the palette brings the
-   *  index up to date itself whenever it is opened. */
+   *  backlog only shrinks by one budget per pass, so a machine with years of
+   *  history needs hundreds of them. Only used while the backlog is shrinking
+   *  (see `nextDelay`), so it cannot run forever. */
   catchUpMs: number;
   /** Between passes once everything on disk has been read. This is the pruning
    *  heartbeat as much as the reading one. */
@@ -39,7 +40,7 @@ export interface JobPace {
 }
 
 export const DEFAULT_PACE: JobPace = {
-  catchUpMs: 60_000,
+  catchUpMs: 15_000,
   idleMs: 30 * 60_000,
   backoffMs: 60_000,
   maxBackoffMs: 10 * 60_000,

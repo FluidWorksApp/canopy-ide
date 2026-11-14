@@ -355,8 +355,20 @@ fn sync_docs(conn: &Connection, kind: &str, docs: Vec<SyncDoc>) -> Result<usize,
         })
         .map_err(err)?;
 
+    // Every stamp must point at a row that is really that document. Counts
+    // alone are not enough: an older build sharing this index (a downgrade, a
+    // development build) rewrites research with new row ids and leaves the
+    // count unchanged, and the next edit would delete somebody else's row.
+    let pointing: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM doc_stamps s JOIN docs d ON d.rowid = s.rowid_in_docs
+             WHERE s.kind = ?1 AND d.kind = s.kind AND d.key = s.key",
+            [kind],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
     let mut kept: HashMap<String, (i64, i64)> = stamped;
-    if stored != kept.len() as i64 {
+    if stored != kept.len() as i64 || pointing != kept.len() as i64 {
         conn.execute("DELETE FROM docs WHERE kind = ?1", [kind])
             .map_err(err)?;
         conn.execute("DELETE FROM doc_stamps WHERE kind = ?1", [kind])
@@ -1337,6 +1349,45 @@ mod tests {
         assert_eq!(
             sync_docs(&conn, "research", vec![doc("a/1", "fresh")]).unwrap(),
             0
+        );
+    }
+
+    /// An older build rewrote the table under the same count: the row ids in
+    /// the stamps now point at other documents, and trusting them would delete
+    /// the wrong row on the next edit.
+    #[test]
+    fn stamps_pointing_at_other_rows_are_rebuilt_not_trusted() {
+        let conn = memory_index();
+        sync_docs(
+            &conn,
+            "research",
+            vec![doc("a/1", "one"), doc("a/2", "two")],
+        )
+        .unwrap();
+        // What an older build does: same documents, new rows.
+        conn.execute("DELETE FROM docs WHERE kind = 'research'", [])
+            .unwrap();
+        for (k, b) in [("a/2", "two"), ("a/1", "one")] {
+            conn.execute(
+                "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
+                 VALUES ('research', ?1, 'research', '/p', 't', ?2, '/dir', 7)",
+                rusqlite::params![k, b],
+            )
+            .unwrap();
+        }
+        let written = sync_docs(
+            &conn,
+            "research",
+            vec![doc("a/1", "one, edited"), doc("a/2", "two")],
+        )
+        .unwrap();
+        assert_eq!(written, 2); // rebuilt, not patched in place
+        assert_eq!(
+            bodies(&conn, "research"),
+            vec![
+                ("a/1".into(), "one, edited".into()),
+                ("a/2".into(), "two".into())
+            ]
         );
     }
 
