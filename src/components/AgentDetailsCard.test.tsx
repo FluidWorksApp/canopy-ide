@@ -934,7 +934,9 @@ describe("raising a PR from the card", () => {
     );
     void onNotice;
   });
-  describe("brain-drafted text", () => {
+  // Each test waits up to 5 s inside waitFor, so the default 5 s test timeout
+  // fired first on a loaded runner (it did on #859's run).
+  describe("brain-drafted text", { timeout: 30_000 }, () => {
     const draft = {
       title: "Hub prefetch keeps scrcpy alive",
       message: "Hub prefetch keeps scrcpy alive\n\nWhy it matters.",

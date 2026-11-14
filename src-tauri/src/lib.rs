@@ -33,6 +33,7 @@ mod devicehub_proxy;
 mod dictation;
 mod execution;
 mod mirror;
+mod privacy;
 mod remote_download;
 mod remote_upload;
 mod teleport;
@@ -1166,6 +1167,8 @@ pub fn run() {
             desk::desk_respond,
             desk::desk_permissions,
             desk::desk_request_permission,
+            privacy::privacy_status,
+            privacy::privacy_open_settings,
             desk::desk_send_input,
             desk::desk_end,
             desk::desk_status,

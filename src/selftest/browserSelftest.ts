@@ -201,7 +201,7 @@ async function clearTheStage() {
     // deliberately later in the surface matrix.
     document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     const backdrop = document.querySelector(
-      ".confirm-backdrop, .dlg-scrim, .modal-backdrop, .palette-backdrop, .coach-layer",
+      ".confirm-backdrop, .dlg-scrim, .modal-backdrop, .palette-backdrop, .coach-layer, .ob-flow",
     );
     if (!backdrop) return;
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));

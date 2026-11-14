@@ -5046,6 +5046,16 @@ export interface DeskPerms {
 export const deskPermissions = () => invoke<DeskPerms>("desk_permissions");
 export const deskRequestPermission = (kind: "screen" | "input") =>
   invoke<void>("desk_request_permission", { kind });
+/** A permission desk.rs does not answer. "unasked": macOS has not asked yet
+ *  and will on first use. "unknown": could not tell. */
+export type PrivacyGrant = "granted" | "denied" | "unasked" | "unknown";
+export interface PrivacyStatus {
+  full_disk: PrivacyGrant;
+  microphone: PrivacyGrant;
+}
+export const privacyStatus = () => invoke<PrivacyStatus>("privacy_status");
+export const privacyOpenSettings = (kind: "full_disk" | "microphone" | "notifications") =>
+  invoke<void>("privacy_open_settings", { kind });
 export const deskEnd = (session: string) =>
   invoke<void>("desk_end", { session });
 export const deskStatus = () =>
