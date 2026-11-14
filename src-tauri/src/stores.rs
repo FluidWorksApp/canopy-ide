@@ -1058,6 +1058,63 @@ pub fn digests(
     wanted: &dyn Fn(&str) -> bool,
     skip: &dyn Fn(&str) -> bool,
 ) -> Vec<Value> {
+    digests_walked(roots, wanted)
+        .into_iter()
+        .filter(|d| {
+            let id = d["session_id"].as_str().unwrap_or("");
+            !id.is_empty() && !skip(id)
+        })
+        .collect()
+}
+
+/// How long a walk's result is reused. Every consumer re-asks whenever any
+/// agent's hook fires, so with several agents running the stores were walked
+/// (every transcript on the machine statted, twice) continuously: about a core
+/// of CPU on a machine with 29,000 transcript files. Store-only CLIs, the only
+/// digests this walk is the source of, are polled every 30 s anyway, so a few
+/// seconds of age is invisible.
+const DIGEST_WALK_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+type WalkMemo = Option<(std::time::Instant, String, Vec<Value>)>;
+static DIGEST_WALK: std::sync::Mutex<WalkMemo> = std::sync::Mutex::new(None);
+
+fn walk_ttl() -> std::time::Duration {
+    // Unit tests write a file and ask again at once.
+    if cfg!(test) {
+        std::time::Duration::ZERO
+    } else {
+        DIGEST_WALK_TTL
+    }
+}
+
+/// Every digest the stores hold for these roots and agents, before any are
+/// skipped, reused for [`DIGEST_WALK_TTL`].
+fn digests_walked(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Value> {
+    let key = format!(
+        "{}|{}",
+        roots.join("\n"),
+        STORE_AGENTS
+            .iter()
+            .filter(|a| wanted(a))
+            .copied()
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    {
+        let memo = DIGEST_WALK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, k, out)) = memo.as_ref() {
+            if *k == key && at.elapsed() < walk_ttl() {
+                return out.clone();
+            }
+        }
+    }
+    let out = digests_uncached(roots, wanted);
+    *DIGEST_WALK.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), key, out.clone()));
+    out
+}
+
+fn digests_uncached(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Value> {
     let files = source_files(roots, wanted);
     let mut guard = DIGEST_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(Default::default);
@@ -1101,7 +1158,7 @@ pub fn digests(
         };
         for d in &parsed {
             let id = d["session_id"].as_str().unwrap_or("");
-            if !id.is_empty() && !skip(id) {
+            if !id.is_empty() {
                 out.push(d.clone());
             }
         }

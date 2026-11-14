@@ -76,6 +76,16 @@ fn create(conn: &Connection) -> Result<(), String> {
          CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
              kind UNINDEXED, key UNINDEXED, agent UNINDEXED, cwd UNINDEXED,
              title, body, meta UNINDEXED, ts UNINDEXED
+         );
+         -- What was last written for each research entry and note: a hash of
+         -- everything stored, and the row it went to (the full-text table
+         -- cannot find a row by key without reading every row).
+         CREATE TABLE IF NOT EXISTS doc_stamps (
+             kind TEXT NOT NULL,
+             key TEXT NOT NULL,
+             stamp INTEGER NOT NULL,
+             rowid_in_docs INTEGER NOT NULL,
+             PRIMARY KEY (kind, key)
          );",
     )
     .map_err(|e| e.to_string())
@@ -90,13 +100,19 @@ fn open_db() -> Result<Connection, String> {
     // a cache: a crash can lose the last commits, and this index is rebuilt
     // from files on disk anyway, which is what SCHEMA_VERSION already assumes.
     let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    // The WAL file keeps the size of its largest transaction until it is told
+    // otherwise, and the purge below measures the file, not what is in it: one
+    // big pass left a 300 MB log that read as an oversized index.
+    let _ = conn.execute_batch("PRAGMA journal_size_limit = 67108864;");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap_or(0);
     if version != SCHEMA_VERSION {
         // Not a migration: the index is a cache of files on disk, and the
         // cheapest correct answer to "the shape changed" is to read them again.
-        conn.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS sources;")
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS sources; DROP TABLE IF EXISTS doc_stamps;",
+        )
             .map_err(|e| e.to_string())?;
         create(&conn)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -267,6 +283,133 @@ fn purge_legacy_shape(conn: &Connection) -> Result<usize, String> {
         )
         .map_err(|e| e.to_string())?;
     Ok(pruned)
+}
+
+/// One research entry or note, as it is stored in the index.
+struct SyncDoc {
+    key: String,
+    agent: String,
+    cwd: String,
+    title: String,
+    body: String,
+    meta: String,
+    ts: i64,
+}
+
+/// FNV-1a over every column that is stored, with a separator that cannot occur
+/// inside the text, so a change to any of them changes the stamp.
+fn doc_stamp(d: &SyncDoc) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    };
+    feed(d.agent.as_bytes());
+    feed(d.cwd.as_bytes());
+    feed(d.title.as_bytes());
+    feed(d.body.as_bytes());
+    feed(d.meta.as_bytes());
+    feed(&d.ts.to_le_bytes());
+    hash as i64
+}
+
+/// Make the index hold exactly `docs` for `kind`, writing only what differs:
+/// a new or edited entry is replaced, a removed one is deleted, an unchanged
+/// one is not touched. Returns how many entries were written.
+///
+/// Rows are found by the rowid kept in `doc_stamps`, because the full-text
+/// table has no index on `key`: looking one up that way reads every row. If the
+/// bookkeeping and the table ever disagree (rows from an older build, a stamp
+/// with no row), the kind is rebuilt from scratch once rather than trusted.
+fn sync_docs(conn: &Connection, kind: &str, docs: Vec<SyncDoc>) -> Result<usize, String> {
+    use std::collections::HashMap;
+    let err = |e: rusqlite::Error| e.to_string();
+
+    // Last one wins, so a repeated key cannot make the counts below disagree
+    // on every pass.
+    let mut unique: HashMap<String, SyncDoc> = HashMap::new();
+    for d in docs {
+        unique.insert(d.key.clone(), d);
+    }
+
+    let stamped: HashMap<String, (i64, i64)> = {
+        let mut stmt = conn
+            .prepare("SELECT key, stamp, rowid_in_docs FROM doc_stamps WHERE kind = ?1")
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([kind], |r| {
+                Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+            })
+            .map_err(err)?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+    let stored: i64 = conn
+        .query_row("SELECT count(*) FROM docs WHERE kind = ?1", [kind], |r| {
+            r.get(0)
+        })
+        .map_err(err)?;
+
+    let mut kept: HashMap<String, (i64, i64)> = stamped;
+    if stored != kept.len() as i64 {
+        conn.execute("DELETE FROM docs WHERE kind = ?1", [kind])
+            .map_err(err)?;
+        conn.execute("DELETE FROM doc_stamps WHERE kind = ?1", [kind])
+            .map_err(err)?;
+        kept.clear();
+    }
+
+    // Gone from the set: delete the row and its stamp.
+    let gone: Vec<String> = kept
+        .keys()
+        .filter(|k| !unique.contains_key(*k))
+        .cloned()
+        .collect();
+    for key in gone {
+        if let Some((_, rowid)) = kept.remove(&key) {
+            conn.execute("DELETE FROM docs WHERE rowid = ?1", [rowid])
+                .map_err(err)?;
+        }
+        conn.execute(
+            "DELETE FROM doc_stamps WHERE kind = ?1 AND key = ?2",
+            rusqlite::params![kind, key],
+        )
+        .map_err(err)?;
+    }
+
+    let mut written = 0usize;
+    for (key, d) in unique {
+        let stamp = doc_stamp(&d);
+        if let Some((old, _)) = kept.get(&key) {
+            if *old == stamp {
+                continue;
+            }
+        }
+        if let Some((_, rowid)) = kept.get(&key) {
+            conn.execute("DELETE FROM docs WHERE rowid = ?1", [*rowid])
+                .map_err(err)?;
+        }
+        conn.execute(
+            "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![kind, key, d.agent, d.cwd, d.title, d.body, d.meta, d.ts],
+        )
+        .map_err(err)?;
+        let rowid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO doc_stamps (kind, key, stamp, rowid_in_docs) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(kind, key) DO UPDATE SET stamp = ?3, rowid_in_docs = ?4",
+            rusqlite::params![kind, key, stamp, rowid],
+        )
+        .map_err(err)?;
+        written += 1;
+    }
+    Ok(written)
 }
 
 #[derive(Serialize)]
@@ -649,67 +792,49 @@ pub async fn spot_ingest(
             }
         }
 
-        // ---- research ----
-        // Small, and rewritten in place rather than appended to, so it is
-        // re-read whole on every ingest and the doc set is replaced outright.
-        // That also makes deletion free: an entry the user threw away simply
-        // isn't in the new set. Cheap enough to be unconditional — tens of
-        // entries, each a few KB, against transcripts measured in megabytes.
-        let docs = crate::research::index_docs();
-        conn.execute("DELETE FROM docs WHERE kind = 'research'", [])
-            .map_err(|e| e.to_string())?;
-        for doc in &docs {
-            conn.execute(
-                "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
-                 VALUES ('research', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    // Project-qualified, because entry numbers restart per
-                    // project and `key` has to be unique across the index.
-                    format!("{}/{}", doc.project_id, doc.id),
-                    if doc.agent.is_empty() {
-                        "research"
-                    } else {
-                        doc.agent.as_str()
-                    },
-                    // The cwd the research was done in, which is what
-                    // under_roots() scopes a hit by — research inherits the
-                    // project scoping the rest of the index already has.
-                    doc.cwd,
-                    doc.title,
-                    doc.body,
-                    doc.dir,
-                    doc.ts.max(0),
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        let research = docs.len();
+        // ---- research and notes ----
+        // Re-read whole on every ingest, but written only where something
+        // changed. They used to be deleted and inserted again every pass on the
+        // reasoning that there were tens of entries; a machine with 6,400
+        // research documents (54 MB) pushed all of it through the full-text
+        // index each time, which is how one process wrote 137 GB in 73 minutes.
+        let research_docs: Vec<SyncDoc> = crate::research::index_docs()
+            .into_iter()
+            .map(|doc| SyncDoc {
+                // Project-qualified, because entry numbers restart per
+                // project and `key` has to be unique across the index.
+                key: format!("{}/{}", doc.project_id, doc.id),
+                agent: if doc.agent.is_empty() {
+                    "research".to_string()
+                } else {
+                    doc.agent
+                },
+                // The cwd the research was done in, which is what
+                // under_roots() scopes a hit by.
+                cwd: doc.cwd,
+                title: doc.title,
+                body: doc.body,
+                meta: doc.dir,
+                ts: doc.ts.max(0),
+            })
+            .collect();
+        let research = research_docs.len();
+        sync_docs(conn, "research", research_docs)?;
 
-        // ---- notes ----
-        // Same treatment as research above, and for the same reasons: a small
-        // set, rewritten rather than appended to, so replacing it outright is
-        // both cheap and how a deleted note leaves the index.
-        let note_docs = crate::notes::index_docs();
-        conn.execute("DELETE FROM docs WHERE kind = 'note'", [])
-            .map_err(|e| e.to_string())?;
-        for doc in &note_docs {
-            conn.execute(
-                "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
-                 VALUES ('note', ?1, 'note', ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    // Project-qualified: note numbers restart per project and
-                    // `key` has to be unique across the index.
-                    format!("{}/{}", doc.project_id, doc.id),
-                    doc.cwd,
-                    doc.title,
-                    doc.body,
-                    doc.dir,
-                    doc.ts.max(0),
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+        let note_docs: Vec<SyncDoc> = crate::notes::index_docs()
+            .into_iter()
+            .map(|doc| SyncDoc {
+                key: format!("{}/{}", doc.project_id, doc.id),
+                agent: "note".to_string(),
+                cwd: doc.cwd,
+                title: doc.title,
+                body: doc.body,
+                meta: doc.dir,
+                ts: doc.ts.max(0),
+            })
+            .collect();
         let notes = note_docs.len();
+        sync_docs(conn, "note", note_docs)?;
 
         let report = SpotIngestReport {
             more,
@@ -1077,6 +1202,183 @@ fn free_path(dir: &std::path::Path, stamp: i64, prefix: &str, ext: &str) -> Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn memory_index() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        create(&conn).unwrap();
+        conn
+    }
+
+    fn doc(key: &str, body: &str) -> SyncDoc {
+        SyncDoc {
+            key: key.into(),
+            agent: "research".into(),
+            cwd: "/p".into(),
+            title: format!("title {key}"),
+            body: body.into(),
+            meta: "/dir".into(),
+            ts: 7,
+        }
+    }
+
+    fn bodies(conn: &Connection, kind: &str) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT key, body FROM docs WHERE kind = ?1 ORDER BY key")
+            .unwrap();
+        stmt.query_map([kind], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// The bug: every ingest deleted and re-inserted all of research, so 54 MB
+    /// went through the full-text index on every pass. A pass over the same
+    /// entries must write nothing.
+    #[test]
+    fn a_second_pass_over_unchanged_entries_writes_nothing() {
+        let conn = memory_index();
+        let set = || vec![doc("a/1", "one"), doc("a/2", "two"), doc("b/1", "three")];
+        assert_eq!(sync_docs(&conn, "research", set()).unwrap(), 3);
+        let before = conn.total_changes();
+        assert_eq!(sync_docs(&conn, "research", set()).unwrap(), 0);
+        assert_eq!(
+            conn.total_changes(),
+            before,
+            "an unchanged pass touched rows"
+        );
+        assert_eq!(bodies(&conn, "research").len(), 3);
+    }
+
+    #[test]
+    fn an_edited_entry_is_replaced_and_the_others_are_left_alone() {
+        let conn = memory_index();
+        sync_docs(
+            &conn,
+            "research",
+            vec![doc("a/1", "one"), doc("a/2", "two")],
+        )
+        .unwrap();
+        let rowid_of = |key: &str| -> i64 {
+            conn.query_row(
+                "SELECT rowid_in_docs FROM doc_stamps WHERE kind = 'research' AND key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let untouched = rowid_of("a/2");
+        let written = sync_docs(
+            &conn,
+            "research",
+            vec![doc("a/1", "one, edited"), doc("a/2", "two")],
+        )
+        .unwrap();
+        assert_eq!(written, 1);
+        assert_eq!(rowid_of("a/2"), untouched);
+        assert_eq!(
+            bodies(&conn, "research"),
+            vec![
+                ("a/1".into(), "one, edited".into()),
+                ("a/2".into(), "two".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_removed_entry_leaves_the_index_and_its_stamp() {
+        let conn = memory_index();
+        sync_docs(&conn, "note", vec![doc("p/1", "keep"), doc("p/2", "drop")]).unwrap();
+        assert_eq!(
+            sync_docs(&conn, "note", vec![doc("p/1", "keep")]).unwrap(),
+            0
+        );
+        assert_eq!(bodies(&conn, "note"), vec![("p/1".into(), "keep".into())]);
+        let stamps: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM doc_stamps WHERE kind = 'note'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamps, 1);
+        // Emptied out entirely.
+        sync_docs(&conn, "note", vec![]).unwrap();
+        assert!(bodies(&conn, "note").is_empty());
+    }
+
+    #[test]
+    fn kinds_do_not_touch_each_other() {
+        let conn = memory_index();
+        sync_docs(&conn, "research", vec![doc("a/1", "r")]).unwrap();
+        sync_docs(&conn, "note", vec![doc("a/1", "n")]).unwrap();
+        sync_docs(&conn, "note", vec![]).unwrap();
+        assert_eq!(bodies(&conn, "research"), vec![("a/1".into(), "r".into())]);
+    }
+
+    /// Rows with no stamps (an index written by an older build) or stray rows
+    /// are rebuilt once, never left as duplicates.
+    #[test]
+    fn rows_the_bookkeeping_does_not_know_about_are_rebuilt_not_duplicated() {
+        let conn = memory_index();
+        conn.execute(
+            "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
+             VALUES ('research', 'a/1', 'research', '/p', 't', 'old build row', '/d', 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            sync_docs(&conn, "research", vec![doc("a/1", "fresh")]).unwrap(),
+            1
+        );
+        assert_eq!(
+            bodies(&conn, "research"),
+            vec![("a/1".into(), "fresh".into())]
+        );
+        assert_eq!(
+            sync_docs(&conn, "research", vec![doc("a/1", "fresh")]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_repeated_key_cannot_make_every_pass_rebuild() {
+        let conn = memory_index();
+        let set = || vec![doc("a/1", "first"), doc("a/1", "last")];
+        sync_docs(&conn, "research", set()).unwrap();
+        assert_eq!(
+            bodies(&conn, "research"),
+            vec![("a/1".into(), "last".into())]
+        );
+        assert_eq!(sync_docs(&conn, "research", set()).unwrap(), 0);
+    }
+
+    /// Any stored column changing must change the stamp, not just the body.
+    #[test]
+    fn every_stored_column_is_part_of_the_stamp() {
+        let base = doc("a/1", "b");
+        let s0 = doc_stamp(&base);
+        let mut m = doc("a/1", "b");
+        m.cwd = "/q".into();
+        assert_ne!(doc_stamp(&m), s0);
+        let mut m = doc("a/1", "b");
+        m.title = "x".into();
+        assert_ne!(doc_stamp(&m), s0);
+        let mut m = doc("a/1", "b");
+        m.meta = "/other".into();
+        assert_ne!(doc_stamp(&m), s0);
+        let mut m = doc("a/1", "b");
+        m.ts = 8;
+        assert_ne!(doc_stamp(&m), s0);
+        let mut m = doc("a/1", "b");
+        m.agent = "claude".into();
+        assert_ne!(doc_stamp(&m), s0);
+        // "ab"+"" and "a"+"b" must not collide.
+        let mut x = doc("k", "");
+        x.title = "ab".into();
+        let mut y = doc("k", "b");
+        y.title = "a".into();
+        assert_ne!(doc_stamp(&x), doc_stamp(&y));
+    }
 
     #[test]
     fn footprint_counts_db_plus_wal_and_delete_takes_the_whole_set() {

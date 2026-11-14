@@ -59,17 +59,28 @@ export interface PassOutcome {
 }
 
 /** When the next pass should run. Pure, so the pacing is a thing that can be
- *  tested rather than a thing that is watched. */
+ *  tested rather than a thing that is watched.
+ *
+ *  The catch-up pace is for a backlog that is shrinking. `previousPending` is
+ *  what the pass before this one left; a backlog that is not smaller than that
+ *  is not catching up, and re-running at catch-up speed only repeats the work
+ *  (a file that cannot be finished, a store that keeps changing) every
+ *  `catchUpMs` for as long as the app is open. Such a backlog gets the
+ *  heartbeat instead. With no earlier pass to compare to, a backlog is
+ *  presumed to be shrinking. */
 export function nextDelay(
   outcome: PassOutcome,
   failures: number,
   pace: JobPace = DEFAULT_PACE,
+  previousPending?: number,
 ): number {
   if (!outcome.ok) {
     const doubled = pace.backoffMs * 2 ** Math.max(0, failures - 1);
     return Math.min(doubled, pace.maxBackoffMs);
   }
-  return outcome.pending > 0 ? pace.catchUpMs : pace.idleMs;
+  if (outcome.pending <= 0) return pace.idleMs;
+  const shrinking = previousPending === undefined || outcome.pending < previousPending;
+  return shrinking ? pace.catchUpMs : pace.idleMs;
 }
 
 /** Start the job. Returns the stop function, so it mounts as
@@ -86,6 +97,7 @@ export function startSpotIndexJob(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   let failures = 0;
+  let lastPending: number | undefined;
 
   const tick = async () => {
     if (stopped) return;
@@ -98,8 +110,10 @@ export function startSpotIndexJob(
       // live sources answer without it, and the next pass may well work.
     }
     failures = outcome.ok ? 0 : failures + 1;
+    const delay = nextDelay(outcome, failures, pace, lastPending);
+    if (outcome.ok) lastPending = outcome.pending;
     if (stopped) return;
-    timer = setTimeout(() => void tick(), nextDelay(outcome, failures, pace));
+    timer = setTimeout(() => void tick(), delay);
   };
 
   timer = setTimeout(() => void tick(), firstPassMs);
