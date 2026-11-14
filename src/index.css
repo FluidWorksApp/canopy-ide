@@ -7239,6 +7239,12 @@ body.dragging-tab * {
   padding: 0 4px;
   max-height: 240px;
   overflow-y: auto;
+  /* Scrolls, with no bar: an overlay scrollbar sat on top of each row's
+     close button and took its clicks. */
+  scrollbar-width: none;
+}
+.agent-card-tasks::-webkit-scrollbar {
+  display: none;
 }
 .agent-card-task {
   display: grid;
