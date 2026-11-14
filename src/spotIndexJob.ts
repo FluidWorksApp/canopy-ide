@@ -14,16 +14,19 @@
 // exist". Maintenance that only happens when someone searches is maintenance
 // that is missing precisely when the index is stale.
 //
-// So: a pass a few seconds after launch, then quickly while there is a backlog,
-// then a slow heartbeat once there isn't. Every pass is incremental and
-// budgeted by the backend — a warm index is a few thousand stats and no reads —
+// So: a pass a minute after launch, then every minute while a backlog is
+// shrinking, then a slow heartbeat (half an hour) once there isn't. Opening the
+// palette brings the index up to date itself, so the heartbeat is only the
+// pruning and the "nobody searched today" case, and does not need to be
+// often. Every pass is incremental and budgeted by the backend — a warm index is a few thousand stats and no reads —
 // and the pacing below is the only decision this file makes.
 import { runIngest } from "./spotIndex";
 
 export interface JobPace {
   /** Between passes while transcript is still unread. Short, because the
-   *  backlog only shrinks by one budget per pass and a fresh install should be
-   *  searchable in minutes rather than over a week of palette opens. */
+   *  backlog only shrinks by one budget per pass. A minute apart, a fresh
+   *  install still catches up in the background, and the palette brings the
+   *  index up to date itself whenever it is opened. */
   catchUpMs: number;
   /** Between passes once everything on disk has been read. This is the pruning
    *  heartbeat as much as the reading one. */
@@ -36,8 +39,8 @@ export interface JobPace {
 }
 
 export const DEFAULT_PACE: JobPace = {
-  catchUpMs: 15_000,
-  idleMs: 5 * 60_000,
+  catchUpMs: 60_000,
+  idleMs: 30 * 60_000,
   backoffMs: 60_000,
   maxBackoffMs: 10 * 60_000,
 };
@@ -49,7 +52,7 @@ export const PASSES_PER_TICK = 2;
 
 /** Long enough after launch that the first pass is not competing with opening
  *  the workspace, restoring tabs and spawning shells. */
-export const FIRST_PASS_MS = 10_000;
+export const FIRST_PASS_MS = 60_000;
 
 export interface PassOutcome {
   /** The pass completed — it may still have read nothing. */
