@@ -74,10 +74,9 @@
   max-height: 5.5em;
   overflow: auto;
 }
-.brain-connect-choices {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+/* Re-check sits at the end of the status line it re-checks. */
+.brain-connect-check {
+  margin-left: 6px;
 }
 .brain-badge {
   margin-left: 6px;
