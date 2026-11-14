@@ -3035,12 +3035,69 @@ function TailscaleSettings() {
 /** The portal is served under /remote. */
 const remotePath = (u: string) => (u.endsWith("/remote") ? u : `${u.replace(/\/+$/, "")}/remote`);
 
+/** Phone access over the Tailscale already on this Mac: the portal listens on
+ *  this machine's tailnet address too, so a phone on the same tailnet reaches
+ *  it from anywhere. Shown with the address to open, a QR for it, and the PIN. */
+function PhoneOverTailscale({ status }: { status: ipc.RemoteStatus }) {
+  const [view, setView] = useState<ipc.TailscaleView | null>(null);
+  const [qr, setQr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      void ipc
+        .tailscaleStatus()
+        .then((v) => live && setView(v))
+        .catch(() => live && setView(null));
+    read();
+    const t = setInterval(read, 30_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  const me = view?.kind === "running" ? view.thisMachine : null;
+  // The MagicDNS name when there is one (it survives an address change), else
+  // the tailnet address.
+  const host = me ? me.dnsName.replace(/\.$/, "") || me.ip : null;
+  const url = host ? `http://${host}:${status.port}/remote` : null;
+
+  useEffect(() => {
+    if (!url) {
+      setQr(null);
+      return;
+    }
+    void ipc.remoteQr(url).then(setQr).catch(() => setQr(null));
+  }, [url]);
+
+  return (
+    <Item name="Open on your phone" desc="Over Tailscale, from anywhere.">
+      {url ? (
+        <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
+          {qr && (
+            <div
+              style={{ width: 128, height: 128, padding: 7, background: "#fff", borderRadius: 10, flex: "none" }}
+              dangerouslySetInnerHTML={{ __html: qr }}
+            />
+          )}
+          <div style={{ display: "grid", gap: 10, minWidth: 0, flex: 1 }}>
+            <Copyable text={url} />
+            {status.pin && <Copyable text={status.pin} big />}
+          </div>
+        </div>
+      ) : (
+        <span className="set-note">Needs Tailscale running on this Mac and on your phone. Set it up below.</span>
+      )}
+    </Item>
+  );
+}
+
 function CanopyLinkSettings() {
   const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
   const [tunnel, setTunnel] = useState<ipc.TunnelState>({ running: false, provider: null, url: null, message: null });
   const [busy, setBusy] = useState(false);
   const [qr, setQr] = useState<string | null>(null);
-  const [showLan, setShowLan] = useState(false);
 
   useEffect(() => {
     void ipc.remoteStatus().then(setStatus).catch(() => setStatus(null));
@@ -3089,15 +3146,16 @@ function CanopyLinkSettings() {
     void op.then(setStatus).catch(() => {}).finally(() => setBusy(false));
   };
 
+  // Only what is true of the Canopy link when it is there. While Canopy's
+  // server does not offer links yet (`pending`) the link says nothing: phone
+  // access is the Tailscale block below, which does not depend on it.
   const state = !on
     ? null
     : connected
       ? "Connected. Open it on your phone and sign in to Canopy."
-      : pending
-        ? "Not live yet — use On this network."
-        : failed
-          ? serverFeatureError(tunnel.message, "Your Canopy link").message
-          : (tunnel.message ?? "Connecting…");
+      : failed && !pending
+        ? serverFeatureError(tunnel.message, "Your Canopy link").message
+        : null;
 
   return (
     <>
@@ -3136,20 +3194,7 @@ function CanopyLinkSettings() {
         </Item>
       )}
 
-      {on && status && (
-        <Item name="On this network" desc="Local address, with PIN.">
-          {showLan ? (
-            <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
-              {status.urls?.[0] && <Copyable text={status.urls[0]} />}
-              {status.pin && <Copyable text={status.pin} big />}
-            </div>
-          ) : (
-            <Button size="sm" onClick={() => setShowLan(true)}>
-              Show address and PIN
-            </Button>
-          )}
-        </Item>
-      )}
+      {on && status && <PhoneOverTailscale status={status} />}
     </>
   );
 }

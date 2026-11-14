@@ -78,7 +78,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "privacy", name: "Crash reporting", desc: "Send crash details anonymously.", keywords: ["telemetry", "diagnostics", "errors", "privacy"] },
   { tab: "remote", name: "Remote access", desc: "Use your agents from your phone.", keywords: ["phone", "mobile", "tunnel", "pairing"] },
   { tab: "remote", name: "Your link", desc: "Permanent link.", keywords: ["url", "bookmark", "phone", "share"] },
-  { tab: "remote", name: "On this network", desc: "Local address, with PIN.", keywords: ["lan", "pin", "local address", "wifi"] },
+  { tab: "remote", name: "Open on your phone", desc: "Over Tailscale, from anywhere.", keywords: ["tailscale", "phone", "pin", "address", "qr", "scan"] },
   { tab: "remote", name: "Remote access", desc: "Phone access behind a PIN. Sign in to Canopy for your own link.", keywords: ["phone", "mobile", "tunnel", "pairing"] },
   { tab: "remote", name: "Reach", keywords: ["internet", "tunnel", "access", "exposure"] },
   { tab: "remote", name: "Public link", desc: "One tunnel, shared with internet team sessions.", keywords: ["tunnel", "cloudflare", "ngrok", "tailscale", "share"] },
