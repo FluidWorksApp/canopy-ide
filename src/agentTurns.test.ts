@@ -4,6 +4,7 @@ vi.mock("./ipc", () => ({ ledgerRoot: vi.fn(), agentEdits: vi.fn() }));
 
 import type { AgentEventData } from "../shared/notifications";
 import {
+  closingOf,
   filesInWindow,
   observeAgentPtyExit,
   observeAgentTurns,
@@ -184,5 +185,29 @@ describe("agent turns", () => {
 
   it("windows journal seconds against turn milliseconds", () => {
     expect(filesInWindow([{ ts: 9, path: "a" }, { ts: 10, path: "b" }, { ts: 23, path: "c" }], 10_500, 20_200)).toEqual(["a", "b"]);
+  });
+});
+
+
+describe("the reply's closing words", () => {
+  it("keep the end of a long reply, where the summary of what was finished is", async () => {
+    const ends: AgentTurnEnd[] = [];
+    onAgentTurnEnd((t) => ends.push(t));
+    const long = `${"I'll start by reading the code. ".repeat(400)}Done: the PRs now point at the release.`;
+    observeAgentTurns([ev("UserPromptSubmit", { prompt: "point the PRs" })], 100_000);
+    observeAgentTurns([ev("Stop", { lastAssistantMessage: long })], 101_000);
+    await flush();
+    expect(ends).toHaveLength(1);
+    // The start is still the start (receipts and live rooms read that)...
+    expect(ends[0].lastMessage?.startsWith("I'll start by reading")).toBe(true);
+    expect(ends[0].lastMessage).not.toContain("Done: the PRs");
+    // ...and the closing words carry the summary.
+    expect(ends[0].closing?.endsWith("Done: the PRs now point at the release.")).toBe(true);
+    expect(ends[0].closing!.length).toBeLessThanOrEqual(6001);
+  });
+
+  it("is the whole message when it is short, and marks a cut start", () => {
+    expect(closingOf("All done.")).toBe("All done.");
+    expect(closingOf("abcdef", 3)).toBe("…def");
   });
 });

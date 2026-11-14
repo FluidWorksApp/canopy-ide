@@ -222,7 +222,9 @@ export function startRequestTasks(): () => void {
     if (s.prompt) void enqueue(s.sessionId, () => handlePrompt(s.sessionId, s.prompt!));
   });
   const off2 = onAgentTurnEnd((e) => {
-    if (e.lastMessage) void enqueue(e.sessionId, () => handleReply(e.sessionId, e.lastMessage!));
+    // The end of the reply, where the agent says what it finished.
+    const reply = e.closing ?? e.lastMessage;
+    if (reply) void enqueue(e.sessionId, () => handleReply(e.sessionId, reply));
   });
   return () => {
     off1();
