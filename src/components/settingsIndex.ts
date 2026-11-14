@@ -70,7 +70,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "terminal", name: "Automatic session names", desc: "Agent callsign words.", tag: "New terminals only", keywords: ["titles", "rename", "tab names"] },
   { tab: "terminal", name: "Font and cursor", desc: "Monospace fonts found on this machine.", tag: "New terminals only", keywords: ["font size", "typeface", "cursor style", "blink", "line height"] },
   { tab: "terminal", name: "Engine", desc: "Ghostty is Canopy's own terminal. New terminals only.", tag: "Beta", keywords: ["ghostty", "xterm", "classic", "renderer", "native terminal", "beta"] },
-  { tab: "terminal", name: "Benchmark engines", desc: "Time the same output on Ghostty and Classic, here, about 20 seconds.", keywords: ["performance", "speed", "compare", "xterm", "latency", "fps"] },
+  { tab: "terminal", name: "Benchmark engines", desc: "Time the same output on Ghostty and Classic, here, about 10 seconds.", keywords: ["performance", "speed", "compare", "xterm", "latency", "fps"] },
   { tab: "terminal", name: "Show engine stats", desc: "Engine, speed and memory on each terminal.", keywords: ["performance", "debug", "developer", "fps", "overlay", "usage"] },
   { tab: "terminal", name: "Scrollback", desc: "Lines kept per terminal. New terminals only.", keywords: ["history", "buffer", "lines", "memory"] },
   { tab: "terminal", name: "Keep terminals running after quit", desc: "Terminals and agents stay alive for 2 hours after you quit or update, and reconnect on next launch. Applies after restart. Mac and Linux.", keywords: ["persistent", "quit", "update", "background", "reconnect", "survive", "host"] },

@@ -29,20 +29,29 @@ describe("terminal benchmark", () => {
   it("runs on both engines and reports every number", async () => {
     const seen: string[] = [];
     const results = await runTerminalBenchmark(
-      { bytes: 200000, chunk: 16384, echoes: 3, cols: 80, rows: 24 },
+      { bytes: 200000, chunk: 16384, echoes: 3, cols: 80, rows: 24, runs: 2 },
       (engine) => seen.push(engine),
     );
-    expect(seen).toEqual(["ghostty", "xterm", "ghostty"]);
-    expect(results.map((r) => r.ran)).toEqual(["ghostty", "xterm", "ghostty"]);
+    // A warm-up for each, then alternating measured runs.
+    expect(seen).toEqual(["ghostty", "xterm", "ghostty", "xterm", "ghostty", "xterm"]);
+    expect(results.map((r) => r.ran)).toEqual(["ghostty", "xterm"]);
     for (const r of results) {
+      expect(r.runs).toBe(2);
       expect(r.bytes).toBeGreaterThanOrEqual(200000);
-      expect(r.dumpMs).toBeGreaterThan(0);
       expect(r.dumpMBps).toBeGreaterThan(0);
       expect(Number.isFinite(r.echoP95)).toBe(true);
     }
     expect(results[0].engineMB).toBeGreaterThan(0);
     const text = formatBenchmark(results);
-    expect(text).toHaveLength(4);
-    expect(text[2]).toMatch(/^xterm/);
+    expect(text[0]).toContain("median of 2 runs");
+    expect(text.some((l) => l.startsWith("xterm:"))).toBe(true);
+    expect(Math.max(...text.map((l) => l.length))).toBeLessThan(100);
+  }, 60000);
+
+  it("counts UTF-8 bytes, not characters", async () => {
+    const [ghostty] = await runTerminalBenchmark({ bytes: 5000, chunk: 1000, echoes: 1, runs: 1 });
+    const chars = workload(5000).join("");
+    expect(ghostty.bytes).toBe(new TextEncoder().encode(chars).length);
+    expect(ghostty.bytes).toBeGreaterThan(chars.length);
   }, 60000);
 });

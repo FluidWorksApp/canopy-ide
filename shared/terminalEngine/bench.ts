@@ -9,15 +9,17 @@ export interface BenchResult {
   engine: TerminalEngine;
   /** The engine really used (Ghostty falls back to xterm when it cannot load). */
   ran: TerminalEngine;
+  /** UTF-8 bytes of the dump. */
   bytes: number;
-  /** Wall time for the whole dump to be parsed, in chunks, as a PTY delivers it. */
+  /** Wall time from the first write to the last one being parsed (not painted). */
   dumpMs: number;
   dumpMBps: number;
   /** Frame gaps while the dump ran (ms): the page staying responsive. */
   frameP50: number;
   frameP95: number;
   frameMax: number;
-  /** A one-line write, to the next painted frame (ms), at idle. */
+  /** A one-line write, to the engine having parsed it (ms), at idle: the wait
+   *  a keystroke's echo has before the engine can draw it. */
   echoP50: number;
   echoP95: number;
   /** Wasm memory after the run (Ghostty only; 0 otherwise). */
@@ -25,12 +27,14 @@ export interface BenchResult {
 }
 
 export interface BenchOptions {
-  /** Bytes of generated output (default 8 MiB). */
+  /** Bytes of generated output per measured run (default 4 MiB). */
   bytes?: number;
   chunk?: number;
   echoes?: number;
   cols?: number;
   rows?: number;
+  /** Measured runs per engine, after a discarded warm-up (default 3). */
+  runs?: number;
 }
 
 /** Deterministic output: plain lines, SGR colours, wide characters, and a
@@ -76,7 +80,7 @@ async function runOne(engine: TerminalEngine, opts: Required<BenchOptions>): Pro
   // On the page and laid out (so it paints like a real tab), out of sight.
   host.style.cssText = `position:fixed;left:-10000px;top:0;width:900px;height:600px;`;
   document.body.appendChild(host);
-  const created = createTerminal({ engine, scrollback: 10000, cols: opts.cols, rows: opts.rows });
+  const created = createTerminal({ engine, scrollback: 1000, cols: opts.cols, rows: opts.rows });
   try {
     const { term } = created;
     term.open(host);
@@ -96,34 +100,37 @@ async function runOne(engine: TerminalEngine, opts: Required<BenchOptions>): Pro
       }
     })();
 
-    // As a PTY delivers it: chunks, each fed after the last was parsed.
+    // Chunks queued back to back, as a PTY reader does; the engine's own write
+    // buffer paces them. Awaiting each chunk would time the engine's timer
+    // instead of its parser.
+    const encoder = new TextEncoder();
     let sent = 0;
-    const started = performance.now();
     let batch = "";
-    const flush = () =>
-      new Promise<void>((resolve) => {
-        const data = batch;
-        batch = "";
-        term.write(data, resolve);
-      });
+    let last: Promise<void> = Promise.resolve();
+    const started = performance.now();
+    const flush = () => {
+      const data = batch;
+      sent += encoder.encode(data).length;
+      batch = "";
+      last = new Promise<void>((resolve) => term.write(data, resolve));
+    };
     for (const line of lines) {
       batch += line;
-      sent += line.length;
-      if (batch.length >= opts.chunk) await flush();
+      if (batch.length >= opts.chunk) flush();
     }
-    if (batch) await flush();
+    if (batch) flush();
+    await last;
     const dumpMs = performance.now() - started;
     running = false;
     await watcher;
 
-    // Idle round trips: write one line, wait for the next painted frame.
+    // Idle round trips: write one line, wait until the engine has parsed it.
     const echoes: number[] = [];
     for (let i = 0; i < opts.echoes; i++) {
       await frame();
       await frame();
       const t0 = performance.now();
       await new Promise<void>((resolve) => term.write(`echo ${i}\r\n`, resolve));
-      await frame();
       echoes.push(performance.now() - t0);
     }
 
@@ -148,39 +155,80 @@ async function runOne(engine: TerminalEngine, opts: Required<BenchOptions>): Pro
   }
 }
 
-/** Run the same workload on each engine, one after the other. */
+const median = (values: number[]) => percentile([...values].sort((x, y) => x - y), 50);
+
+export interface BenchSummary {
+  engine: TerminalEngine;
+  ran: TerminalEngine;
+  runs: number;
+  dumpMBps: number;
+  frameP95: number;
+  frameMax: number;
+  echoP50: number;
+  echoP95: number;
+  engineMB: number;
+  bytes: number;
+}
+
+function summarise(engine: TerminalEngine, results: BenchResult[]): BenchSummary {
+  const med = (pick: (r: BenchResult) => number) => median(results.map(pick));
+  return {
+    engine,
+    ran: results[0].ran,
+    runs: results.length,
+    bytes: results[0].bytes,
+    dumpMBps: med((r) => r.dumpMBps),
+    frameP95: med((r) => r.frameP95),
+    frameMax: med((r) => r.frameMax),
+    echoP50: med((r) => r.echoP50),
+    echoP95: med((r) => r.echoP95),
+    engineMB: Math.max(...results.map((r) => r.engineMB)),
+  };
+}
+
+/** The same workload on each engine. Each gets a short discarded warm-up
+ *  (compiling, growing memory), then the measured runs alternate between the
+ *  engines so drift in the machine's load hits both alike; the median is
+ *  reported. */
 export async function runTerminalBenchmark(
   options: BenchOptions = {},
   onProgress?: (engine: TerminalEngine) => void,
-): Promise<BenchResult[]> {
+): Promise<BenchSummary[]> {
   const opts: Required<BenchOptions> = {
-    bytes: options.bytes ?? 8 * 1048576,
+    bytes: options.bytes ?? 4 * 1048576,
     chunk: options.chunk ?? 65536,
-    echoes: options.echoes ?? 40,
+    echoes: options.echoes ?? 30,
     cols: options.cols ?? 120,
     rows: options.rows ?? 40,
+    runs: options.runs ?? 3,
   };
-  const out: BenchResult[] = [];
-  // Ghostty first, then xterm, then Ghostty again: the first run pays for
-  // warm-up, so the second one is the fair comparison.
-  for (const engine of ["ghostty", "xterm", "ghostty"] as const) {
+  const engines = ["ghostty", "xterm"] as const;
+  const warm = { ...opts, bytes: Math.min(opts.bytes, 1048576), echoes: 2 };
+  for (const engine of engines) {
     onProgress?.(engine);
-    out.push(await runOne(engine, opts));
+    await runOne(engine, warm);
   }
-  return out;
+  const results: Record<TerminalEngine, BenchResult[]> = { ghostty: [], xterm: [] };
+  for (let i = 0; i < opts.runs; i++) {
+    for (const engine of engines) {
+      onProgress?.(engine);
+      results[engine].push(await runOne(engine, opts));
+    }
+  }
+  return engines.map((engine) => summarise(engine, results[engine]));
 }
 
-export function formatBenchmark(results: BenchResult[]): string[] {
-  const ms = (n: number) => `${n.toFixed(1)}`;
-  const rows = results.map((r, i) => {
-    const name =
-      r.engine === "ghostty"
-        ? `${r.ran === "ghostty" ? "Ghostty" : "Ghostty→xterm"}${i === 2 ? " (warm)" : ""}`
-        : "xterm";
-    return `${name.padEnd(16)} ${r.dumpMBps.toFixed(1).padStart(6)} MB/s  frames p50 ${ms(r.frameP50)} p95 ${ms(r.frameP95)} max ${ms(r.frameMax)}  echo p50 ${ms(r.echoP50)} p95 ${ms(r.echoP95)} ms`;
-  });
-  return [
-    `${(results[0].bytes / 1048576).toFixed(0)} MiB of generated output, 64 KiB chunks. Higher MB/s is better; lower ms is better.`,
-    ...rows,
+export function formatBenchmark(summaries: BenchSummary[]): string[] {
+  const ms = (n: number) => n.toFixed(1);
+  const first = summaries[0];
+  const lines = [
+    `${(first.bytes / 1048576).toFixed(1)} MiB generated, median of ${first.runs} runs after a warm-up. Dump ends when parsed, not painted.`,
   ];
+  for (const r of summaries) {
+    const name = r.engine === "ghostty" ? (r.ran === "ghostty" ? "Ghostty" : "Ghostty→xterm") : "xterm";
+    lines.push(`${name}: ${r.dumpMBps.toFixed(1)} MB/s dump`);
+    lines.push(`  frame gap p95 ${ms(r.frameP95)} ms, worst ${ms(r.frameMax)} ms`);
+    lines.push(`  echo to parsed p50 ${ms(r.echoP50)} ms, p95 ${ms(r.echoP95)} ms`);
+  }
+  return lines;
 }

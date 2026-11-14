@@ -2559,7 +2559,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Benchmark engines"
-                  desc="Time the same output on Ghostty and Classic, here, about 20 seconds."
+                  desc="Time the same output on Ghostty and Classic, here, about 10 seconds."
                 >
                   <EngineBenchmark />
                 </Item>
