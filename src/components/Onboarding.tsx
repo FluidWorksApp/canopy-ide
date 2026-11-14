@@ -1,417 +1,312 @@
-// First-run walkthrough. A centered carousel of a few slides; Skip is always reachable,
-// Esc closes, and the last slide hands off to "New project" so the very next
-// thing after the intro is the actual entry point. Each slide carries a small
-// animated mock of the *actual* panel it describes — real labels, rows, status
-// colours and buttons, with a cursor that moves in, clicks, and the result
-// reveals — so the copy stays to a title and one line. All CSS-driven, no deps;
-// prefers-reduced-motion stops the motion and shows the resting state.
+// First-run setup. Five full-window steps, each one real setup rather than a
+// tour: meet Canopy, connect the agent that powers it (BrainConnect.tsx),
+// pick how you work / your keys / the look, see what the OS has allowed, and
+// open a project.
 //
-// The first slide is the one live step: connecting the brain. Every smart
-// feature runs on one agent CLI the person is already signed in to, so the tour
-// starts by finding it, checking it answers, and fixing it if it doesn't
-// (BrainConnect.tsx). Everything after it is static and offline. Skip still
-// works from the first slide — files and terminals need no brain — and the
-// status-bar chip keeps offering the step until it is done.
-import { useState } from "react";
-import { BrainConnectPanel } from "./BrainConnect";
+// Always true: Skip and Esc leave from any step, nothing waits on the agent,
+// Back keeps every choice (each one is saved as it is made), and the keyboard
+// drives it: Enter continues, arrows move inside a group of choices.
+//
+// An install or sign-in opens a terminal in the app behind this. The flow
+// steps aside to a "Continue setup" button instead of closing, so the person
+// can finish there and come back to the same step.
+import { useEffect, useRef, useState } from "react";
+import { agentHooksInstalled } from "../ipc";
+import { useBrainConnection } from "../brainConnect";
 import { useEscape } from "../useEscape";
-import { Button, Checkbox, Select } from "./ui";
 import {
+  THEMES,
   type DefaultProjectLens,
-  type DictationTriggerMode,
   type Settings,
-  formatHotkey,
+  type Theme,
+  applyTheme,
   getSettings,
   updateSettings,
 } from "../settings";
 import { currentPlatform, format, SHORTCUT_PROFILES } from "../shortcuts";
+import { skinDef } from "../skins/registry";
+import { Ash } from "./Ash";
+import { BrainConnectPanel } from "./BrainConnect";
+import { OnboardingPermissions } from "./OnboardingPermissions";
+import { Button } from "./ui";
+import "./onboarding.css";
 
 interface OnboardingProps {
-  /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
+  /** Called when setup is dismissed any way (Skip, Esc, Look around first). */
   onClose: () => void;
   /** Called instead of onClose when the user finishes and wants to start. */
   onCreateProject: () => void;
 }
 
-interface Slide {
-  icon: string;
-  title: string;
-  body: React.ReactNode;
-  /** Animated mock of the relevant screen. */
-  mock: React.ReactNode | ((settings: Settings) => React.ReactNode);
-}
-
-/** Shared pointer: an arrow that follows the scene's --cx/--cy vars, plus a
- *  click ripple at the target. Both animations share the scene's --dur. */
-function Cursor() {
-  return (
-    <>
-      <div className="ob-cursor" aria-hidden>
-        <svg viewBox="0 0 12 12" width="15" height="15">
-          <path className="ob-cursor-arrow" d="M1 1 L1 10 L3.5 7.5 L5.5 11 L7 10 L5 6.7 L8.5 6.7 Z" />
-        </svg>
-      </div>
-      <div className="ob-click" aria-hidden />
-    </>
-  );
-}
-
-/** A framed mini-screen: window chrome, a body, and the shared cursor.
- *  `vars` sets the cursor start (--cx0/--cy0) and target (--cx1/--cy1). */
-function Scene({
-  vars,
-  chrome,
-  children,
-}: {
-  vars: React.CSSProperties;
-  chrome?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="ob-scene" style={vars} aria-hidden>
-      <div className="ob-chrome">
-        <i />
-        <i />
-        <i />
-        {chrome && <span>{chrome}</span>}
-      </div>
-      <div className="ob-body">{children}</div>
-      <Cursor />
-    </div>
-  );
-}
-
-/** A CLI brand chip — a coloured square with a glyph, standing in for the
- *  real SVG marks the app uses. */
-function Logo({ bg, glyph, fg = "#fff" }: { bg: string; glyph: string; fg?: string }) {
-  return <span className="ob-logo" style={{ background: bg, color: fg }}>{glyph}</span>;
-}
+const STEPS = ["Welcome", "Connect your agent", "Make it yours", "Permissions", "First project"] as const;
 
 const PLATFORM = currentPlatform();
 const PLATFORM_LABEL = PLATFORM === "macos" ? "macOS" : PLATFORM === "windows" ? "Windows" : "Linux";
 
-const SLIDES: Slide[] = [
-  {
-    icon: "✳",
-    title: "Connect your brain",
-    body: "One agent CLI you're already signed in to powers every smart feature in Canopy.",
-    mock: (
-      <Scene chrome="new project" vars={{ "--cx0": "240px", "--cy0": "24px", "--cx1": "78px", "--cy1": "44px" } as React.CSSProperties}>
-        <div className="ob-cards">
-          <div className="ob-card"><Logo bg="#2a2e42" glyph="›_" fg="#c9d1d9" /><span>Shell</span></div>
-          <div className="ob-card sel"><Logo bg="#d97757" glyph="✳" /><span>Claude Code</span></div>
-          <div className="ob-card"><Logo bg="#10a37f" glyph="◇" /><span>Codex CLI</span><span className="ob-card-badge">install</span></div>
-          <div className="ob-card"><Logo bg="#f34e3f" glyph="A" /><span>Amp</span></div>
-          <div className="ob-card"><Logo bg="#3b6fd6" glyph="»" /><span>Aider</span><span className="ob-card-badge">install</span></div>
-        </div>
-        <div className="ob-term ob-reveal">
-          <span className="ob-mono muted">$ claude</span>
-          <span className="ob-mono" style={{ color: "var(--ok)" }}>▍ ready</span>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "⌨",
-    title: "Keep your muscle memory",
-    body: "Start with the shortcuts you already know.",
-    mock: (settings) => (
-      <Scene chrome="keyboard shortcuts" vars={{ "--cx0": "248px", "--cy0": "22px", "--cx1": "150px", "--cy1": "67px" } as React.CSSProperties}>
-        <div className="ob-col" style={{ gap: 5 }}>
-          {([
-            ["quick-open", "Quick open"],
-            ["spot-search", "Search everything"],
-            ["settings", "Settings"],
-          ] as const).map(([id, label]) => (
-            <div className="ob-row" key={id}>
-              <span className="grow">{label}</span>
-              <kbd
-                className="ob-chip ob-mono"
-                data-shortcut={id}
-                style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
-              >
-                {format(id, PLATFORM, settings.keymapProfile)}
-              </kbd>
-            </div>
-          ))}
-          <div className="ob-row" style={{ border: 0, background: "none", paddingBlock: 2 }}>
-            <span className="grow">
-              {SHORTCUT_PROFILES.find(({ id }) => id === settings.keymapProfile)?.label}
-            </span>
-            <span className="ob-chip" data-shortcut-platform>
-              shortcuts shown for {PLATFORM_LABEL}
-            </span>
-          </div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "♻️",
-    title: "Sessions and projects",
-    body: "Load projects with every frontend, backend, worker, and other component side by side.",
-    mock: (
-      <Scene vars={{ "--cx0": "60px", "--cy0": "22px", "--cx1": "168px", "--cy1": "12px" } as React.CSSProperties}>
-        <div className="ob-ptabs">
-          <span className="ob-ptab ob-taboff">canopy</span>
-          <span className="ob-ptab ob-tabon">banana-app</span>
-          <span className="ob-ptab-add">＋</span>
-        </div>
-        <div className="ob-cmphead">COMPONENTS</div>
-        <div className="ob-cmp">▾ FRONTEND</div>
-        <div className="ob-tree">├ src/App.tsx</div>
-        <div className="ob-row ob-reveal" style={{ marginTop: 6 }}>
-          <Logo bg="#d97757" glyph="✳" />
-          <span className="grow ob-mono" style={{ overflow: "hidden", whiteSpace: "nowrap" }}>"add auth to the api"</span>
-          <span className="ob-btn">Resume</span>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "🔀",
-    title: "Git, PRs and issues",
-    body: "Branches, diffs and tickets, built in.",
-    mock: (
-      <Scene chrome="Git" vars={{ "--cx0": "250px", "--cy0": "24px", "--cx1": "60px", "--cy1": "96px" } as React.CSSProperties}>
-        <div className="ob-branchbar">
-          <span className="ob-branch">⎇ fix/onboarding</span>
-          <span style={{ color: "var(--ok)" }}>↑2</span><span className="muted">↓0</span>
-          <span className="grow" /><span className="ob-chip">Push</span>
-        </div>
-        <div className="ob-gittabs"><span className="sel">Changes 2</span><span>Branches</span><span>PRs</span><span>Issues</span></div>
-        <div className="ob-gfile"><span className="ob-gcode ok">M </span>src/App.tsx</div>
-        <div className="ob-gfile"><span className="ob-gcode ok">M </span>src/index.css</div>
-        <div style={{ position: "absolute", right: 9, bottom: 8 }}><span className="ob-btn">Commit 2</span></div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "🎙️",
-    title: "Dictate, don't type",
-    body: "Speak your prompts. Local, offline.",
-    mock: (
-      <Scene chrome="dictation" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "40px", "--cy1": "44px" } as React.CSSProperties}>
-        <div className="ob-row" style={{ alignItems: "flex-start", minHeight: 34 }}>
-          <span className="ob-mono ob-type" style={{ "--tw": "168px" } as React.CSSProperties}>add error handling to the parser</span>
-        </div>
-        <div className="ob-dictpill">
-          <span className="ob-recdot" />
-          <span>
-            Listening —{" "}
-            <span className="ob-mono">{formatHotkey(getSettings().dictationHotkey)}</span> inserts,
-            Esc cancels
-          </span>
-        </div>
-        <div className="ob-chip muted" style={{ position: "absolute", right: 9, bottom: 8 }}>Parakeet v3 · on-device</div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "🤝",
-    title: "Your team, anywhere",
-    body: "Join by code, drive agents from your phone, send a file.",
-    mock: (
-      <Scene chrome="Team" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "244px", "--cy1": "98px" } as React.CSSProperties}>
-        <div className="ob-row" style={{ border: "none", background: "none", padding: "2px 0" }}>
-          <span className="ob-dot ok" /><span style={{ color: "var(--ok)" }}>Hosting — you are the relay</span>
-        </div>
-        <div className="ob-code">123 4567</div>
-        <div className="ob-card2" style={{ marginTop: 4 }}>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--text)" }}>
-            <span className="ob-lmark" style={{ background: "var(--accent)" }} />Review PR #42<span className="grow" />
-            <span className="ob-btn">Open</span><span className="ob-chip">Dismiss</span>
-          </div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "🔎",
-    title: "One search for everything",
-    body: (
-      <>
-        <span className="ob-mono">{format("spot-search")}</span> finds anything, anywhere.
-      </>
-    ),
-    mock: (
-      <Scene chrome={format("spot-search")} vars={{ "--cx0": "250px", "--cy0": "22px", "--cx1": "120px", "--cy1": "58px" } as React.CSSProperties}>
-        <div className="ob-row" style={{ borderColor: "var(--accent)" }}>
-          <span className="ob-mono ob-type" style={{ "--tw": "96px" } as React.CSSProperties}>auth</span>
-        </div>
-        <div className="ob-row ob-reveal" style={{ marginTop: 5 }}>
-          <Logo bg="#d97757" glyph="✳" /><span className="grow">"add auth to the api"</span><span className="ob-chip">session</span>
-        </div>
-        <div className="ob-row ob-reveal" style={{ marginTop: 4 }}>
-          <span className="ob-mono grow">src/auth.rs</span><span className="ob-chip">file</span>
-        </div>
-        <div className="ob-row ob-reveal" style={{ marginTop: 4 }}>
-          <span className="grow">Auth rewrite — what we decided</span><span className="ob-chip">note</span>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "📓",
-    title: "Research and scratchpad",
-    body: "Findings and parked thoughts — run from here.",
-    mock: (
-      <Scene chrome="Research" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "250px", "--cy1": "50px" } as React.CSSProperties}>
-        <div className="ob-head">RESEARCH<span className="ob-badge">2</span></div>
-        <div className="ob-row">
-          <span className="ob-tid">0008</span>
-          <span className="grow">why the tab dot and the tile disagree</span>
-          <span className="ob-chip" style={{ color: "var(--ok)", borderColor: "var(--ok)" }}>implemented</span>
-        </div>
-        <div className="ob-subhead" style={{ marginTop: 6 }}>SCRATCHPAD</div>
-        <div className="ob-row ob-reveal">
-          <span className="ob-tid">0005</span>
-          <span className="grow">bring the rail tooltips back</span>
-          <span className="ob-btn">Hand to an agent</span>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "🪶",
-    title: "That's the tour",
-    body: "Local-first — nothing leaves your machine.",
-    mock: (
-      <Scene vars={{ "--cx0": "250px", "--cy0": "22px", "--cx1": "150px", "--cy1": "80px" } as React.CSSProperties}>
-        <div className="ob-col" style={{ justifyContent: "center", alignItems: "center", height: "100%", gap: 10 }}>
-          <div style={{ fontSize: 20 }}>🪶</div>
-          <div className="ob-btn" style={{ padding: "6px 14px", fontSize: 11 }}>Create a project</div>
-        </div>
-      </Scene>
-    ),
-  },
+const LENSES: [DefaultProjectLens, string, string][] = [
+  ["build", "I build with AI", "Plain words, fewer panels"],
+  ["engineer", "I'm an engineer", "Code, git and terminals up front"],
 ];
+
+/** A skin's swatch colours. Auto follows the OS, so it shows both ends. */
+function swatch(theme: Theme): React.CSSProperties {
+  if (theme === "auto") {
+    const dark = skinDef("gotham").preview.bg;
+    const light = skinDef("daylight").preview.bg;
+    return { background: `linear-gradient(135deg, ${dark} 50%, ${light} 50%)` };
+  }
+  const p = skinDef(theme).preview;
+  return { background: p.bg, "--ob-swatch-accent": p.accent } as React.CSSProperties;
+}
+
+/** A labelled group of native radios drawn as cards or pills. Native, so the
+ *  arrow keys move the choice without any key handling here. */
+function Choices<T extends string>({
+  name,
+  label,
+  value,
+  options,
+  onChange,
+  className = "",
+}: {
+  name: string;
+  label: string;
+  value: T;
+  options: readonly { id: T; label: string; hint?: string; style?: React.CSSProperties }[];
+  onChange: (id: T) => void;
+  className?: string;
+}) {
+  return (
+    <div className={`ob-choices ${className}`.trim()} role="radiogroup" aria-label={label}>
+      {options.map((o) => (
+        <label key={o.id} className={`ob-choice${o.id === value ? " is-on" : ""}`} style={o.style} title={o.style ? o.label : undefined}>
+          <input
+            type="radio"
+            name={name}
+            checked={o.id === value}
+            onChange={() => onChange(o.id)}
+            aria-label={o.label}
+          />
+          {!o.style && (
+            <span>
+              <strong>{o.label}</strong>
+              {o.hint && <small>{o.hint}</small>}
+            </span>
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** Says the agent's hooks are in place only when the check says so. */
+function HooksLine() {
+  const conn = useBrainConnection();
+  const cli = conn.state === "connected" ? conn.cli : null;
+  const [ready, setReady] = useState<string | null>(null);
+  useEffect(() => {
+    if (!cli) return;
+    let live = true;
+    agentHooksInstalled(cli)
+      .then((ok) => live && setReady(ok ? cli : null))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [cli]);
+  if (!cli || ready !== cli) return null;
+  return (
+    <p className="ob-hint">
+      <span className="ob-state is-ok">Canopy's hooks and tools are set up in {conn.label ?? "your agent"}</span>
+    </p>
+  );
+}
 
 export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
   const [step, setStep] = useState(0);
+  const [paused, setPaused] = useState(false);
   const [settings, setSettings] = useState(getSettings);
-  useEscape(onClose, true);
+  const root = useRef<HTMLDivElement>(null);
+  useEscape(onClose, !paused);
 
-  const last = step === SLIDES.length - 1;
-  const slide = SLIDES[step];
+  const last = step === STEPS.length - 1;
   const patch = (next: Partial<Settings>) => setSettings(updateSettings(next));
+  const pickTheme = (theme: Theme) => {
+    patch({ theme });
+    applyTheme(theme, settings.customAccent);
+  };
+  const next = () => (last ? onCreateProject() : setStep((s) => s + 1));
+
+  // Each step starts on its main action, so Enter moves on.
+  useEffect(() => {
+    if (!paused) root.current?.querySelector<HTMLButtonElement>(".ob-next")?.focus();
+  }, [step, paused]);
+
+  if (paused) {
+    return (
+      <button type="button" className="ob-resume" onClick={() => setPaused(false)}>
+        <Ash state="idle" size={18} />
+        Continue setup
+      </button>
+    );
+  }
+
+  const profile = SHORTCUT_PROFILES.find(({ id }) => id === settings.keymapProfile);
 
   return (
-    <div className="confirm-backdrop" onMouseDown={onClose}>
-      <div
-        className="confirm onboarding"
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-label="Welcome to Canopy"
-      >
-        <button className="onboarding-skip" onClick={onClose} title="Skip the intro">
-          Skip
-        </button>
-
-        <div className="onboarding-slide">
-          <div className="onboarding-mock">
-            {typeof slide.mock === "function" ? slide.mock(settings) : slide.mock}
-          </div>
-          <div className="set-head onboarding-title">
-            <span aria-hidden>{slide.icon}</span> {slide.title}
-          </div>
-          <p className="onboarding-body">{slide.body}</p>
-          <div className="onboarding-config">
-            {step === 0 && <BrainConnectPanel onTerminalOpened={onClose} />}
-            {step === 1 && (
-              <>
-                <span className="onboarding-config-label">Which sounds like you?</span>
-                <div className="onboarding-persona" role="radiogroup" aria-label="Your experience with code">
-                  {([
-                    ["build", "I build with AI", "Open projects in the Builder lens"],
-                    ["engineer", "I'm an engineer", "Open projects in the Engineer lens"],
-                  ] as const).map(([lens, label, hint]) => (
-                    <button
-                      key={lens}
-                      type="button"
-                      role="radio"
-                      aria-checked={settings.defaultProjectLens === lens}
-                      className={`onboarding-persona-choice ${settings.defaultProjectLens === lens ? "selected" : ""}`}
-                      onClick={() => patch({ defaultProjectLens: lens as DefaultProjectLens })}
-                    >
-                      <strong>{label}</strong>
-                      <span>{hint}</span>
-                    </button>
-                  ))}
-                </div>
-                <span className="onboarding-config-label">Choose your shortcut profile</span>
-                <Select
-                  width="lg"
-                  aria-label="Keyboard shortcut profile"
-                  value={settings.keymapProfile}
-                  onChange={(e) => patch({ keymapProfile: e.target.value as Settings["keymapProfile"] })}
-                >
-                  {SHORTCUT_PROFILES.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label} — {option.description}
-                    </option>
-                  ))}
-                </Select>
-              </>
-            )}
-            {step === 4 && (
-              <>
-                <span className="onboarding-config-label">Choose how dictation starts</span>
-                <Select
-                  width="lg"
-                  aria-label="Dictation trigger"
-                  value={settings.dictationTriggerMode}
-                  onChange={(e) => patch({ dictationTriggerMode: e.target.value as DictationTriggerMode })}
-                >
-                  <option value="hold">Hold a modifier — push to talk</option>
-                  <option value="doubleTap">Double-tap a modifier</option>
-                  <option value="combo">Key combo</option>
-                </Select>
-              </>
-            )}
-            {step === 6 && (
-              <Checkbox
-                checked={settings.spotSearchAllProjects}
-                onChange={(spotSearchAllProjects) => patch({ spotSearchAllProjects })}
-                label="Search across every project by default"
-                hint="Off keeps searches inside the project you are viewing."
+    <div
+      ref={root}
+      className="ob-flow"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Welcome to Canopy"
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" || e.defaultPrevented) return;
+        // A button, link or text field keeps its own Enter.
+        const el = e.target as HTMLElement;
+        const radio = el instanceof HTMLInputElement && el.type === "radio";
+        if (!radio && el.closest("button, a, input, select, textarea")) return;
+        e.preventDefault();
+        next();
+      }}
+    >
+      <header className="ob-top" data-tauri-drag-region>
+        <ol className="ob-progress" aria-label="Setup progress">
+          {STEPS.map((title, i) => (
+            <li key={title}>
+              <button
+                type="button"
+                className={i <= step ? "is-on" : ""}
+                aria-label={`Step ${i + 1}: ${title}`}
+                aria-current={i === step ? "step" : undefined}
+                onClick={() => setStep(i)}
               />
-            )}
-          </div>
-        </div>
-
-        <div className="onboarding-dots" role="tablist" aria-label="Walkthrough progress">
-          {SLIDES.map((s, i) => (
-            <button
-              key={s.title}
-              className={`onboarding-dot ${i === step ? "onboarding-dot-on" : ""}`}
-              aria-label={`Go to slide ${i + 1}: ${s.title}`}
-              aria-selected={i === step}
-              role="tab"
-              onClick={() => setStep(i)}
-            />
+            </li>
           ))}
-        </div>
+        </ol>
+        <button type="button" className="ob-skip" onClick={onClose}>
+          Skip setup <kbd>esc</kbd>
+        </button>
+      </header>
 
-        <div className="onboarding-actions">
-          <Button
-            disabled={step === 0}
-            onClick={() => setStep((s) => Math.max(0, s - 1))}>
-            Back
-          </Button>
-          {last ? (
-            <Button variant="accent"
-              onClick={onCreateProject}
-              title="Close the intro and create your first project">
-              Create a project
-            </Button>
-          ) : (
-            <Button variant="accent" onClick={() => setStep((s) => s + 1)}>
-              Next
-            </Button>
-          )}
+      <main className="ob-step" data-step={step}>
+        <div className="ob-step-in" key={step}>
+        {step === 0 && (
+          <>
+            <Ash state="idle" size={132} />
+            <h1>Welcome to Canopy</h1>
+            <p className="ob-lead">
+              Two minutes to connect your agent, pick your keys and open a project. Change any of it later in
+              Settings.
+            </p>
+          </>
+        )}
+
+        {step === 1 && (
+          <>
+            <h1 className="ob-h">Connect your agent</h1>
+            <p className="ob-lead">Canopy runs on an agent you already use. Summaries, titles and PR text come from it.</p>
+            <div className="ob-panel">
+              <BrainConnectPanel hideModels onTerminalOpened={() => setPaused(true)} />
+            </div>
+            <HooksLine />
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <h1 className="ob-h">Make it yours</h1>
+            <p className="ob-lead">Three choices. Each applies as you pick it.</p>
+            <div className="ob-cards">
+              <section className="ob-card">
+                <h2>How you work</h2>
+                <Choices
+                  name="ob-lens"
+                  label="How you work"
+                  value={settings.defaultProjectLens}
+                  options={LENSES.map(([id, label, hint]) => ({ id, label, hint }))}
+                  onChange={(defaultProjectLens) => patch({ defaultProjectLens })}
+                />
+              </section>
+              <section className="ob-card">
+                <h2>Shortcuts</h2>
+                <Choices
+                  name="ob-keys"
+                  label="Shortcut profile"
+                  className="ob-pills"
+                  value={settings.keymapProfile}
+                  options={SHORTCUT_PROFILES.map(({ id, label }) => ({ id, label }))}
+                  onChange={(keymapProfile) => patch({ keymapProfile })}
+                />
+                <p className="ob-keys">
+                  {(
+                    [
+                      ["quick-open", "Quick open"],
+                      ["spot-search", "Search everything"],
+                      ["settings", "Settings"],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <span key={id}>
+                      {label} <kbd data-shortcut={id}>{format(id, PLATFORM, settings.keymapProfile)}</kbd>
+                    </span>
+                  ))}
+                </p>
+                <small data-shortcut-platform>
+                  {profile?.description.replace(/\.$/, "")}. Shown for {PLATFORM_LABEL}.
+                </small>
+              </section>
+              <section className="ob-card">
+                <h2>Look</h2>
+                <Choices
+                  name="ob-skin"
+                  label="Look"
+                  className="ob-swatches"
+                  value={settings.theme}
+                  options={THEMES.map((t) => ({ id: t.id, label: t.label, style: swatch(t.id) }))}
+                  onChange={pickTheme}
+                />
+                <small>{THEMES.find((t) => t.id === settings.theme)?.label}. The window changes as you pick.</small>
+              </section>
+            </div>
+          </>
+        )}
+
+        {step === 3 && (
+          <>
+            <h1 className="ob-h">Permissions</h1>
+            <p className="ob-lead">What Canopy and your agents can use on this computer, as it stands now.</p>
+            <OnboardingPermissions />
+          </>
+        )}
+
+        {step === 4 && (
+          <>
+            <Ash state="celebrating" size={88} />
+            <h1 className="ob-h">You're set</h1>
+            <p className="ob-lead">
+              A project is a folder, or several that belong together. Open one from this computer or clone a
+              repository.
+            </p>
+          </>
+        )}
         </div>
-      </div>
+      </main>
+
+      <footer className="ob-foot">
+        {step > 0 && (
+          <Button className="ob-back" aria-label="Back" onClick={() => setStep((s) => s - 1)}>
+            ←
+          </Button>
+        )}
+        <Button variant="accent" className="ob-next" onClick={next}>
+          {step === 0 ? "Get started" : last ? "Create a project" : "Continue"} <kbd>↵</kbd>
+        </Button>
+        {last && (
+          <Button className="ob-later" onClick={onClose}>
+            Look around first
+          </Button>
+        )}
+      </footer>
     </div>
   );
 }
