@@ -1610,6 +1610,24 @@ export async function fsReadFile(
     : Uint8Array.from(data);
 }
 
+/** The start of a file for a hover preview, even one outside every project
+ *  (an agent's screenshot or draft in its scratch folder). Read only and capped; the
+ *  desktop reads only an agent's scratch folders (~/.canopy/sessions and
+ *  ~/.canopy/spot, the system temp folders) and refuses credentials there too.
+ *  On this computer only: it rejects on a workspace host. */
+export async function fsReadPreview(
+  path: string,
+  maxBytes?: number,
+): Promise<Uint8Array> {
+  // Never sent to a workspace host: its paths are not this computer's files.
+  if (isRemoteHost()) throw new Error("no preview outside a workspace on this computer");
+  const data = await invoke<ArrayBuffer | number[]>("fs_read_preview", {
+    path,
+    maxBytes,
+  });
+  return data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data);
+}
+
 const textDecoder = new TextDecoder();
 export async function fsReadText(
   path: string,
