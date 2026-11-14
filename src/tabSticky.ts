@@ -61,6 +61,34 @@ export function expandedStackScroll(scrollLeft: number, groupLeft: number): numb
 
 /** Attribute a run element carries so the strip can be measured by run. */
 export const GROUP_ATTR = "data-group-key";
+/** The run of pinned tabs. It has no chip: it is held at the strip's left edge
+ *  itself, and the status chips stick just after it. */
+export const PINNED_GROUP = "pinned";
+
+/** How far in from the strip's left edge a tab has to be to be seen: the pinned
+ *  tabs held at the edge, plus the section chip that owns it. A tab that is
+ *  itself pinned needs nothing, since it is never scrolled out of view. */
+export function revealClearance(
+  chipWidth: number,
+  pinnedWidth: number,
+  inPinnedGroup: boolean,
+): number {
+  return inPinnedGroup ? 0 : chipWidth + pinnedWidth;
+}
+
+function pinnedGroupOf(root: HTMLElement): HTMLElement | null {
+  return root.querySelector<HTMLElement>(`[${GROUP_ATTR}="${PINNED_GROUP}"]`);
+}
+
+/** Width of the pinned tabs held at the left edge, 0 with none. */
+export function pinnedWidthOf(root: HTMLElement): number {
+  return pinnedGroupOf(root)?.offsetWidth ?? 0;
+}
+
+/** Is this element one of the pinned tabs? */
+export function isInPinnedGroup(root: HTMLElement, el: HTMLElement): boolean {
+  return pinnedGroupOf(root)?.contains(el) ?? false;
+}
 /** Zero-width marker at a section's natural start. */
 export const ANCHOR_ATTR = "data-pin-anchor";
 
@@ -89,12 +117,17 @@ export function useStickyLayout(
     if (!root || root.offsetParent === null) return;
     const anchors = [...root.querySelectorAll<HTMLElement>(`[${ANCHOR_ATTR}]`)];
     const sections = stickySections(root);
+    // The pinned tabs hold the left edge; the chips stick just after them.
+    const pinned = pinnedWidthOf(root);
+    if (root.style.getPropertyValue("--tab-pinned-width") !== `${pinned}px`) {
+      root.style.setProperty("--tab-pinned-width", `${pinned}px`);
+    }
     sections.forEach(({ group }, i) => {
       // Align section i where its header first touches section i-1's sticky
       // header, not where both headers would overlap at the scrollport edge.
-      group.style.scrollMarginInlineStart = i === 0
-        ? "0px"
-        : `${sections[i - 1].chip.offsetWidth}px`;
+      group.style.scrollMarginInlineStart = `${
+        pinned + (i === 0 ? 0 : sections[i - 1].chip.offsetWidth)
+      }px`;
     });
     // Enough room for the final header to reach the edge, and no dead space on
     // a strip already long enough to get it there.
