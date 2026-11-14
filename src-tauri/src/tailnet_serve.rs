@@ -33,6 +33,11 @@
 //! into it, which is a shell as this user. There is no per-terminal scope or
 //! view-only mode. Reachable only while the app runs.
 //!
+//! Allow also signs the machine in to the phone portal without its PIN, while
+//! Remote access is on (portal.rs asks [`TailnetServe::admits_peer`], the same
+//! gate, about requests from tailnet addresses). There it can do what a PIN
+//! sign-in can, including starting agents. Allow off ends that within seconds.
+//!
 //! Nothing here logs a tailnet name, address, peer identity or key.
 
 use crate::pty::{PtyEvent, PtyManager, SessionKind};

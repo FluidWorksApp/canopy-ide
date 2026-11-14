@@ -292,16 +292,76 @@ struct Portal {
     verbs: Arc<VerbRouter>,
     sockets: Arc<SocketMetrics>,
     /// Tokens signed in by an allowed tailnet machine's identity rather than
-    /// the PIN. Each is checked again when it asks for a socket ticket, so a
-    /// machine whose Allow is switched off is signed out the next time its
-    /// socket connects.
-    tailnet_tokens: Arc<Mutex<HashSet<String>>>,
+    /// the PIN, with that machine's address. Each is checked again at every
+    /// socket ticket and, while its socket is open, every few seconds, so a
+    /// machine whose Allow is switched off is signed out within seconds.
+    tailnet_tokens: TailnetTokens,
+    /// The tailnet identity check (tailnet_serve.rs), for those re-checks.
+    admit: Admit,
+}
+
+type TailnetTokens = Arc<Mutex<HashMap<String, std::net::IpAddr>>>;
+
+/// How often an open socket signed in by tailnet identity is checked again.
+const TAILNET_RECHECK: Duration = Duration::from_secs(5);
+
+/// Remember how a token was signed in: by an allowed tailnet machine (its
+/// address is kept for the re-checks), or by the PIN or the Canopy link.
+fn record_sign_in(
+    tailnet_tokens: &TailnetTokens,
+    token: &str,
+    owner: bool,
+    tailnet: Option<std::net::IpAddr>,
+) {
+    if let (true, Some(ip)) = (owner, tailnet) {
+        tailnet_tokens.lock().unwrap().insert(token.to_string(), ip);
+    }
+}
+
+/// Whether a token is still good for a socket ticket. A token signed in by
+/// tailnet identity is good only while the request is admitted the same way;
+/// otherwise it is revoked here, from both sets. Any other token is untouched.
+fn ticket_allowed(
+    tokens: &Tokens,
+    tailnet_tokens: &TailnetTokens,
+    token: &str,
+    admitted_now: bool,
+) -> bool {
+    if admitted_now {
+        return true;
+    }
+    if tailnet_tokens.lock().unwrap().remove(token).is_some() {
+        tokens.lock().unwrap().remove(token);
+        return false;
+    }
+    true
+}
+
+/// Whether an open socket's token is still good. Only a token signed in by
+/// tailnet identity is asked about, by its machine's address; one that is
+/// refused now is revoked from both sets and the socket closes.
+fn socket_still_admitted(
+    tokens: &Tokens,
+    tailnet_tokens: &TailnetTokens,
+    token: &str,
+    admit: &dyn Fn(std::net::IpAddr) -> bool,
+) -> bool {
+    let Some(ip) = tailnet_tokens.lock().unwrap().get(token).copied() else {
+        return true;
+    };
+    if admit(ip) {
+        return true;
+    }
+    tailnet_tokens.lock().unwrap().remove(token);
+    tokens.lock().unwrap().remove(token);
+    false
 }
 
 /// Set alongside `EdgeAuth` on a request from an allowed tailnet machine
-/// (`tailnet_admission`), so the session answer and the token can say so.
+/// (`tailnet_admission`), with that machine's address, so the session answer
+/// can say so and a token signed in this way can be checked again later.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TailnetAdmitted;
+pub(crate) struct TailnetAdmitted(pub std::net::IpAddr);
 
 /// Set on requests that reached the portal through Canopy's edge
 /// (canopy_link.rs), or from an allowed tailnet machine (`tailnet_admission`).
@@ -368,7 +428,8 @@ async fn tailnet_admission(
             .unwrap_or(false);
         if admitted {
             req.extensions_mut().insert(EdgeAuth { owner: true });
-            req.extensions_mut().insert(TailnetAdmitted);
+            req.extensions_mut()
+                .insert(TailnetAdmitted(ip.to_canonical()));
         }
     }
     next.run(req).await
@@ -474,6 +535,12 @@ pub async fn remote_enable(
         listeners.push(id);
     }
 
+    let admit_app = app.clone();
+    let admit: Admit = Arc::new(move |ip| {
+        admit_app
+            .try_state::<Arc<crate::tailnet_serve::TailnetServe>>()
+            .is_some_and(|serve| serve.admits_peer(ip))
+    });
     let portal = Portal {
         app: app.clone(),
         pin: Arc::new(pin.clone()),
@@ -487,6 +554,7 @@ pub async fn remote_enable(
         verbs: Arc::new(VerbRouter::default()),
         sockets: mgr.sockets.clone(),
         tailnet_tokens: Default::default(),
+        admit: admit.clone(),
     };
     let router = Router::new()
         .route("/remote/auth", post(auth_handler))
@@ -527,12 +595,6 @@ pub async fn remote_enable(
     // The TCP listener's router gains tailnet admission; the stored router
     // (served for the Canopy link's streams) does not, since the link sets its
     // own EdgeAuth.
-    let admit_app = app.clone();
-    let admit: Admit = Arc::new(move |ip| {
-        admit_app
-            .try_state::<Arc<crate::tailnet_serve::TailnetServe>>()
-            .is_some_and(|serve| serve.admits_peer(ip))
-    });
     let serve_router = router.clone().layer(axum::middleware::from_fn_with_state(
         admit,
         tailnet_admission,
@@ -720,9 +782,7 @@ async fn auth_handler(
     }
     let token = gen_token();
     p.tokens.lock().unwrap().insert(token.clone());
-    if owner && tailnet.is_some() {
-        p.tailnet_tokens.lock().unwrap().insert(token.clone());
-    }
+    record_sign_in(&p.tailnet_tokens, &token, owner, tailnet.map(|t| t.0 .0));
     Json(json!({ "token": token })).into_response()
 }
 
@@ -746,8 +806,7 @@ async fn ws_ticket_handler(
     // A token a tailnet machine got by being allowed is good only while it
     // still is: Allow off, or the request no longer coming from that machine,
     // ends it here and the page drops back to its sign-in.
-    if tailnet.is_none() && p.tailnet_tokens.lock().unwrap().remove(token) {
-        p.tokens.lock().unwrap().remove(token);
+    if !ticket_allowed(&p.tokens, &p.tailnet_tokens, token, tailnet.is_some()) {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
     let ticket = gen_token();
@@ -902,10 +961,27 @@ async fn ws_conn(
     let mut attaches: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
     let idle = tokio::time::sleep(PORTAL_IDLE_TIMEOUT);
     tokio::pin!(idle);
+    // A socket signed in by tailnet identity is asked about again while open,
+    // so Allow off ends it within seconds instead of at its next reconnect.
+    let mut recheck = tokio::time::interval(TAILNET_RECHECK);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    recheck.tick().await;
 
     loop {
         tokio::select! {
             () = &mut idle => break,
+            _ = recheck.tick(), if p.tailnet_tokens.lock().unwrap().contains_key(&principal) => {
+                let (tokens, tailnet_tokens, admit, token) =
+                    (p.tokens.clone(), p.tailnet_tokens.clone(), p.admit.clone(), principal.clone());
+                let still = tokio::task::spawn_blocking(move || {
+                    socket_still_admitted(&tokens, &tailnet_tokens, &token, &*admit)
+                })
+                .await
+                .unwrap_or(false);
+                if !still {
+                    break;
+                }
+            }
             inbound = socket.recv() => {
                 // Anything from the client — a ping, a pong, a keystroke —
                 // proves it is still there.
@@ -1757,6 +1833,67 @@ mod tailnet_admission_tests {
             asked.fetch_add(1, Ordering::SeqCst);
             answer
         }
+    }
+
+    fn sets() -> (Tokens, TailnetTokens) {
+        (Default::default(), Default::default())
+    }
+
+    #[test]
+    fn only_identity_sign_ins_are_remembered_for_re_checks() {
+        let (_, tailnet) = sets();
+        record_sign_in(&tailnet, "pin-token", false, None);
+        record_sign_in(&tailnet, "link-token", true, None);
+        record_sign_in(&tailnet, "phone-token", true, Some(ip("100.101.102.103")));
+        let held = tailnet.lock().unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held.get("phone-token"), Some(&ip("100.101.102.103")));
+    }
+
+    #[test]
+    fn a_tailnet_token_gets_tickets_only_while_its_machine_is_admitted() {
+        let (tokens, tailnet) = sets();
+        tokens.lock().unwrap().insert("phone".into());
+        record_sign_in(&tailnet, "phone", true, Some(ip("100.101.102.103")));
+        assert!(ticket_allowed(&tokens, &tailnet, "phone", true));
+        assert!(tokens.lock().unwrap().contains("phone"));
+        // Allow switched off: the next ticket request is refused and the token
+        // is gone from both sets, so a retry is refused too.
+        assert!(!ticket_allowed(&tokens, &tailnet, "phone", false));
+        assert!(!tokens.lock().unwrap().contains("phone"));
+        assert!(!tailnet.lock().unwrap().contains_key("phone"));
+    }
+
+    #[test]
+    fn a_pin_token_is_never_touched_by_the_tailnet_checks() {
+        let (tokens, tailnet) = sets();
+        tokens.lock().unwrap().insert("pin".into());
+        assert!(ticket_allowed(&tokens, &tailnet, "pin", false));
+        assert!(socket_still_admitted(&tokens, &tailnet, "pin", &|_| false));
+        assert!(tokens.lock().unwrap().contains("pin"));
+    }
+
+    #[test]
+    fn an_open_socket_is_closed_once_its_machine_is_refused() {
+        let (tokens, tailnet) = sets();
+        tokens.lock().unwrap().insert("phone".into());
+        record_sign_in(&tailnet, "phone", true, Some(ip("100.101.102.103")));
+        let asked = Arc::new(AtomicUsize::new(0));
+        assert!(socket_still_admitted(
+            &tokens,
+            &tailnet,
+            "phone",
+            &admit_with(true, asked.clone())
+        ));
+        assert!(!socket_still_admitted(
+            &tokens,
+            &tailnet,
+            "phone",
+            &admit_with(false, asked.clone())
+        ));
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        assert!(!tokens.lock().unwrap().contains("phone"));
+        assert!(!tailnet.lock().unwrap().contains_key("phone"));
     }
 
     #[test]
