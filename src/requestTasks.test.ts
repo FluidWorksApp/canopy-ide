@@ -4,6 +4,7 @@ import {
   enqueueForTests,
   handlePrompt,
   handleReply,
+  isNotification,
   requestTasksFor,
   setRequestTaskDepsForTests,
 } from "./requestTasks";
@@ -157,5 +158,82 @@ describe("ordering", () => {
     };
     await Promise.all([enqueueForTests(S, slow("first", 20)), enqueueForTests(S, slow("second", 1))]);
     expect(order).toEqual(["first", "second"]);
+  });
+});
+
+
+describe("where a job stopped (content-free trace)", () => {
+  const traced: string[] = [];
+  const stubTrace = (askBrain: ReturnType<typeof vi.fn>) =>
+    setRequestTaskDepsForTests({
+      decide: decideImpl as never,
+      askBrain: askBrain as never,
+      enabled: () => true,
+      trace: (s: string) => traced.push(s),
+    });
+  beforeEach(() => {
+    traced.length = 0;
+  });
+  const done = (scores: Record<string, number>) =>
+    ok(Object.fromEntries(Object.entries(scores).map(([k, v]) => [k, { type: "noul", noul: v } as Answer])));
+  const seed = async () => {
+    stubTrace(brain({ tasks: ["A"] }));
+    decideImpl.mockResolvedValue(prompt("request"));
+    await handlePrompt(S, "do A");
+  };
+
+  it("a background task's report is never treated as the person's request", async () => {
+    const b = brain({ tasks: ["x"] });
+    stubTrace(b);
+    await handlePrompt(S, "<task-notification> <task-id>b1</task-id> done </task-notification>");
+    expect(decideImpl).not.toHaveBeenCalled();
+    expect(b).not.toHaveBeenCalled();
+    expect(traced).toEqual(["prompt-notification-skipped"]);
+    expect(isNotification("please fix <task-notification> handling")).toBe(false);
+  });
+
+  it("names each step a reply check can stop at", async () => {
+    stubTrace(brain({ done: [] }));
+    await handleReply(S, "nothing open yet");
+    expect(traced.at(-1)).toBe("reply-no-open");
+
+    await seed();
+    decideImpl.mockResolvedValue({ ok: false, reason: "timeout" });
+    await handleReply(S, "x");
+    expect(traced.at(-1)).toBe("reply-s1-timeout");
+
+    decideImpl.mockResolvedValue(done({ done_0: 0.01 }));
+    await handleReply(S, "x");
+    expect(traced.at(-1)).toBe("reply-s1-none");
+
+    decideImpl.mockResolvedValue(done({ done_0: 0.9 }));
+    stubTrace(vi.fn(async () => ({ ok: false as const, reason: "timeout", message: "" })));
+    await handleReply(S, "x");
+    expect(traced.at(-1)).toBe("reply-s2-failed");
+
+    stubTrace(brain({ done: [] }));
+    await handleReply(S, "x");
+    expect(traced.at(-1)).toBe("reply-s2-none");
+
+    stubTrace(brain({ done: [0] }));
+    await handleReply(S, "A is done.");
+    expect(traced.at(-1)).toBe("reply-marked");
+    expect(requestTasksFor(S)[0].status).toBe("done");
+  });
+
+  it("every code it can send is one the backend keeps (lib.rs REQUEST_STAGES)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const lib = readFileSync(join(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
+    const codes = [
+      "prompt-notification-skipped",
+      "reply-no-open",
+      ...["unavailable", "timeout", "http", "invalid"].map((r) => `reply-s1-${r}`),
+      "reply-s1-none",
+      "reply-s2-failed",
+      "reply-s2-none",
+      "reply-marked",
+    ];
+    for (const c of codes) expect(lib).toContain(`"requests-stage:${c}"`);
   });
 });
