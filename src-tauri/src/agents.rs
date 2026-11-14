@@ -2568,25 +2568,44 @@ pub async fn session_digests(roots: Option<Vec<String>>) -> Result<Vec<serde_jso
         .join("sessions");
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(raw) = std::fs::read_to_string(entry.path()) {
-                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
+    {
+        let mut guard = SESSION_DIGEST_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cache = guard.get_or_insert_with(Default::default);
+        let now = std::time::Instant::now();
+        let mut present: std::collections::HashSet<std::path::PathBuf> = Default::default();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                present.insert(path.clone());
+                let stamp = (meta.len(), meta.modified().ok());
+                let loaded = cache.get_or_load(&path, stamp, now, SESSION_DIGEST_TTL, || {
+                    let raw = std::fs::read_to_string(&path).ok()?;
+                    let mut v = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
                     let (root, resumable) = resume_location(&v);
-                    if let Some(id) = v["session_id"].as_str() {
-                        seen.insert(id.to_string());
-                    }
                     if let Some(map) = v.as_object_mut() {
                         map.insert("resume_cwd".into(), serde_json::json!(root));
                         map.insert("resumable".into(), serde_json::json!(resumable));
+                    }
+                    Some(v)
+                });
+                if let Some(v) = loaded {
+                    if let Some(id) = v["session_id"].as_str() {
+                        seen.insert(id.to_string());
                     }
                     out.push(v);
                 }
             }
         }
+        // A file that is gone takes its entry with it.
+        cache.retain_present(&present);
     }
     let roots = roots.unwrap_or_default();
     out.extend(crate::stores::digests(&roots, &|_| true, &|id| {
@@ -2594,6 +2613,74 @@ pub async fn session_digests(roots: Option<Vec<String>>) -> Result<Vec<serde_jso
     }));
     Ok(out)
 }
+
+/// How long a digest's resume check is trusted. A file that changes is read
+/// again at once (its size or modified time moves); this only bounds how stale
+/// the check on disk can be: "is there a transcript to resume" turning true
+/// when one is written, or false when it is deleted.
+const SESSION_DIGEST_TTL: Duration = Duration::from_secs(60);
+
+/// What `session_digests` made of each hook digest file, so a call re-reads
+/// only the files that changed. It used to parse every file and, for each
+/// Claude session, list every project folder looking for its transcript, on
+/// every request, and every request is triggered by any agent's hook event: on
+/// a machine with 1,800 session files that was two cores of directory walking.
+type FileStamp = (u64, Option<std::time::SystemTime>);
+
+struct DigestFileEntry {
+    stamp: FileStamp,
+    at: std::time::Instant,
+    value: serde_json::Value,
+}
+
+#[derive(Default)]
+struct DigestFileCache {
+    entries: HashMap<std::path::PathBuf, DigestFileEntry>,
+}
+
+impl DigestFileCache {
+    /// The cached digest while the file is unchanged and the check is fresh,
+    /// else whatever `load` makes of it (and that is kept). A file `load` cannot
+    /// read or parse is dropped from the cache, as it is from the output.
+    fn get_or_load(
+        &mut self,
+        path: &std::path::Path,
+        stamp: FileStamp,
+        now: std::time::Instant,
+        ttl: Duration,
+        load: impl FnOnce() -> Option<serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        if let Some(e) = self.entries.get(path) {
+            if e.stamp == stamp && now.saturating_duration_since(e.at) < ttl {
+                return Some(e.value.clone());
+            }
+        }
+        match load() {
+            Some(value) => {
+                self.entries.insert(
+                    path.to_path_buf(),
+                    DigestFileEntry {
+                        stamp,
+                        at: now,
+                        value: value.clone(),
+                    },
+                );
+                Some(value)
+            }
+            None => {
+                self.entries.remove(path);
+                None
+            }
+        }
+    }
+
+    fn retain_present(&mut self, present: &std::collections::HashSet<std::path::PathBuf>) {
+        self.entries.retain(|p, _| present.contains(p));
+    }
+}
+
+static SESSION_DIGEST_CACHE: std::sync::Mutex<Option<DigestFileCache>> =
+    std::sync::Mutex::new(None);
 
 fn setup_claude_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, String> {
     let dir = std::path::PathBuf::from(cfg).join(".claude");
@@ -7863,5 +7950,105 @@ mod tests {
         // the store has never heard of is None, not zeros.
         assert_eq!(super::opencode_stats_for(root, "ses_b").unwrap().cost, None);
         assert!(super::opencode_stats_for(root, "ses_zz").is_none());
+    }
+}
+
+#[cfg(test)]
+mod digest_cache_tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::Path;
+    use std::time::{Instant, SystemTime};
+
+    const TTL: Duration = Duration::from_secs(60);
+
+    fn stamp(len: u64, secs: u64) -> FileStamp {
+        (
+            len,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+        )
+    }
+
+    /// The bug: every request re-parsed every file and re-searched the
+    /// transcript folders for each one. An unchanged file must not be loaded
+    /// again.
+    #[test]
+    fn an_unchanged_file_is_loaded_once() {
+        let mut cache = DigestFileCache::default();
+        let path = Path::new("/s/a.json");
+        let now = Instant::now();
+        let mut loads = 0;
+        for _ in 0..5 {
+            let v = cache.get_or_load(path, stamp(10, 1), now, TTL, || {
+                loads += 1;
+                Some(json!({"session_id": "a"}))
+            });
+            assert_eq!(v, Some(json!({"session_id": "a"})));
+        }
+        assert_eq!(loads, 1);
+    }
+
+    #[test]
+    fn a_changed_file_is_loaded_again_at_once() {
+        let mut cache = DigestFileCache::default();
+        let path = Path::new("/s/a.json");
+        let now = Instant::now();
+        cache.get_or_load(path, stamp(10, 1), now, TTL, || Some(json!({"v": 1})));
+        // Same size, newer modified time: still a change.
+        let v = cache.get_or_load(path, stamp(10, 2), now, TTL, || Some(json!({"v": 2})));
+        assert_eq!(v, Some(json!({"v": 2})));
+        // Different size.
+        let v = cache.get_or_load(path, stamp(11, 2), now, TTL, || Some(json!({"v": 3})));
+        assert_eq!(v, Some(json!({"v": 3})));
+    }
+
+    #[test]
+    fn the_resume_check_is_redone_after_the_ttl() {
+        let mut cache = DigestFileCache::default();
+        let path = Path::new("/s/a.json");
+        let t0 = Instant::now();
+        let loads = std::cell::Cell::new(0);
+        let mut ask = |at: Instant| {
+            cache.get_or_load(path, stamp(10, 1), at, TTL, || {
+                loads.set(loads.get() + 1);
+                Some(json!({}))
+            })
+        };
+        ask(t0);
+        ask(t0 + TTL - Duration::from_secs(1));
+        assert_eq!(loads.get(), 1);
+        ask(t0 + TTL);
+        assert_eq!(loads.get(), 2);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_dropped_and_tried_again() {
+        let mut cache = DigestFileCache::default();
+        let path = Path::new("/s/a.json");
+        let now = Instant::now();
+        cache.get_or_load(path, stamp(10, 1), now, TTL, || Some(json!({"ok": true})));
+        // It changed and no longer parses.
+        assert_eq!(
+            cache.get_or_load(path, stamp(5, 2), now, TTL, || None),
+            None
+        );
+        assert!(cache.entries.is_empty());
+        let v = cache.get_or_load(path, stamp(5, 2), now, TTL, || Some(json!({"ok": 2})));
+        assert_eq!(v, Some(json!({"ok": 2})));
+    }
+
+    #[test]
+    fn a_deleted_file_leaves_the_cache() {
+        let mut cache = DigestFileCache::default();
+        let now = Instant::now();
+        for name in ["a", "b"] {
+            let path = std::path::PathBuf::from(format!("/s/{name}.json"));
+            cache.get_or_load(&path, stamp(1, 1), now, TTL, || Some(json!({})));
+        }
+        let present: std::collections::HashSet<std::path::PathBuf> =
+            [std::path::PathBuf::from("/s/a.json")].into();
+        cache.retain_present(&present);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.entries.contains_key(Path::new("/s/a.json")));
     }
 }

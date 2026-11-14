@@ -8,6 +8,15 @@ describe("nextDelay", () => {
       DEFAULT_PACE.catchUpMs,
     );
     expect(nextDelay({ ok: true, pending: 0 }, 0)).toBe(DEFAULT_PACE.idleMs);
+  });
+
+  it("only catches up at speed while the backlog is shrinking", () => {
+    const left = (pending: number, previous?: number) =>
+      nextDelay({ ok: true, pending }, 0, DEFAULT_PACE, previous);
+    expect(left(900, 1000)).toBe(DEFAULT_PACE.catchUpMs); // falling
+    expect(left(1000, 1000)).toBe(DEFAULT_PACE.idleMs); // stuck
+    expect(left(1200, 1000)).toBe(DEFAULT_PACE.idleMs); // growing
+    expect(left(900)).toBe(DEFAULT_PACE.catchUpMs); // nothing to compare to
     // Caught up is not done: this cadence is what prunes deleted transcripts,
     // a switched-off agent and anything past the retention window.
     expect(DEFAULT_PACE.idleMs).toBeGreaterThan(DEFAULT_PACE.catchUpMs);
@@ -62,6 +71,26 @@ describe("startSpotIndexJob", () => {
     expect(calls).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(pace.idleMs);
     expect(calls).toHaveLength(3);
+    stop();
+  });
+
+  it("does not hammer at catch-up speed when the backlog never shrinks", async () => {
+    let calls = 0;
+    mockCommands({
+      spot_ingest: () => {
+        calls += 1;
+        return { more: false, pending: 500, messages: 0, terminals: 0, research: 0, pruned: 0 };
+      },
+    });
+    const stop = startSpotIndexJob(() => [], pace, 10);
+    await vi.advanceTimersByTimeAsync(10); // pass 1: nothing to compare to
+    await vi.advanceTimersByTimeAsync(pace.catchUpMs); // pass 2: same backlog
+    expect(calls).toBe(2);
+    // From here the backlog is not shrinking: no more passes at catch-up speed.
+    await vi.advanceTimersByTimeAsync(pace.catchUpMs * 5);
+    expect(calls).toBe(2);
+    await vi.advanceTimersByTimeAsync(pace.idleMs);
+    expect(calls).toBe(3);
     stop();
   });
 
