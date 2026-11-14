@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { expandedStackScroll, revealScroll } from "./tabSticky";
+import { expandedStackScroll, revealScroll, isInPinnedGroup, pinnedWidthOf, revealClearance } from "./tabSticky";
 
 // A chip 60px wide, followed by three 100px tabs — one run of the strip.
 const CHIP = 60;
@@ -38,5 +38,43 @@ describe("expandedStackScroll", () => {
   it("does not move a section that is already at or ahead of the viewport", () => {
     expect(expandedStackScroll(80, 80)).toBeNull();
     expect(expandedStackScroll(40, 80)).toBeNull();
+  });
+});
+
+describe("pinned tabs held at the left edge", () => {
+  const strip = () => {
+    const root = document.createElement("div");
+    root.innerHTML = `
+      <div data-group-key="pinned"><button id="pinned-tab"></button></div>
+      <div data-group-key="working"><span data-stack-chip></span><button id="other-tab"></button></div>`;
+    return root;
+  };
+  const width = (el: Element, px: number) =>
+    Object.defineProperty(el, "offsetWidth", { configurable: true, value: px });
+
+  it("measures the pinned group and nothing when there is none", () => {
+    const root = strip();
+    width(root.querySelector('[data-group-key="pinned"]')!, 212);
+    expect(pinnedWidthOf(root)).toBe(212);
+    const bare = document.createElement("div");
+    bare.innerHTML = `<div data-group-key="working"></div>`;
+    expect(pinnedWidthOf(bare)).toBe(0);
+  });
+
+  it("knows which tabs are pinned", () => {
+    const root = strip();
+    expect(isInPinnedGroup(root, root.querySelector("#pinned-tab")!)).toBe(true);
+    expect(isInPinnedGroup(root, root.querySelector("#other-tab")!)).toBe(false);
+    const bare = document.createElement("div");
+    bare.innerHTML = `<button id="x"></button>`;
+    expect(isInPinnedGroup(bare, bare.querySelector("#x")!)).toBe(false);
+  });
+
+  it("clears the pinned tabs and the chip for a tab that scrolls, and nothing for a pinned one", () => {
+    expect(revealClearance(90, 212, false)).toBe(302);
+    expect(revealClearance(0, 212, false)).toBe(212);
+    expect(revealClearance(90, 212, true)).toBe(0);
+    // A tab hidden under the pinned tabs is revealed to just past them.
+    expect(revealScroll(400, 800, 450, 100, revealClearance(0, 212, false))).toBe(450 - 212 - 8);
   });
 });
