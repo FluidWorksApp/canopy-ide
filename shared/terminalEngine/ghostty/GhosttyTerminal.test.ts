@@ -291,6 +291,55 @@ describe("GhosttyTerminal", () => {
     term.dispose();
   });
 
+  it("opens a clicked link even while the program tracks the mouse", async () => {
+    const activate = vi.fn();
+    const { term, host } = opened({ webLinks: { activate } });
+    const sent: string[] = [];
+    term.onData((data) => sent.push(data));
+    const root = host.firstElementChild as HTMLElement;
+    const move = () => root.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    const down = () => root.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    const up = () => document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+    await parsed(term, "https://example.test/pull/596 done");
+    move();
+    down();
+    up();
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(activate.mock.calls[0][1]).toBe("https://example.test/pull/596");
+
+    // An agent's screen tracks the mouse. The program still gets the click,
+    // and the link under it still opens.
+    await parsed(term, "\x1b[?1000h\x1b[?1006h");
+    move();
+    down();
+    up();
+    expect(sent).toEqual(["\x1b[<0;1;1M", "\x1b[<0;1;1m"]);
+    expect(activate).toHaveBeenCalledTimes(2);
+    term.dispose();
+  });
+
+  it("answers the copy command with the selection", async () => {
+    // The real event targets the focused textarea and bubbles up.
+    const { term, area } = opened();
+    const copy = () => {
+      const data = new Map<string, string>();
+      const event = new Event("copy", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", {
+        value: { setData: (type: string, text: string) => data.set(type, text) },
+      });
+      area.dispatchEvent(event);
+      return { event, text: data.get("text/plain") };
+    };
+    await parsed(term, "hello");
+    // Nothing selected: the command is left alone.
+    expect(copy().event.defaultPrevented).toBe(false);
+    term.selectAll();
+    const done = copy();
+    expect(done.event.defaultPrevented).toBe(true);
+    expect(done.text?.trim()).toBe("hello");
+    term.dispose();
+  });
+
   it("reports focus when the program asked", async () => {
     const { term, area } = opened();
     const sent: string[] = [];
