@@ -53,6 +53,7 @@ import { clearCompanionView, clearRun } from "../companionSession";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { ghosttyFailure } from "../terminalEngine";
+import { EngineBenchmark } from "./EngineBenchmark";
 import { notOnServerYet, serverFeatureError } from "../accountErrors";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 
@@ -2555,6 +2556,12 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     onChange={(terminalEngineStats) => patch({ terminalEngineStats })}
                     aria-label="Show engine stats"
                   />
+                </Item>
+                <Item
+                  name="Benchmark engines"
+                  desc="Time the same output on Ghostty and Classic, here, about 10 seconds."
+                >
+                  <EngineBenchmark />
                 </Item>
                 <Item
                   name="Scrollback"
