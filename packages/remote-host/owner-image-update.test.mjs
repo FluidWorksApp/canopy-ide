@@ -20,8 +20,10 @@ async function fixture({launch=true}={}){
   return {stdout:''};}});
  containers.set('canopy-ws-alice',{Id:'e'.repeat(64),Image:oldImage,Config:{Labels:{'canopy.workspace':'alice','canopy.image-channel':old},Image:old,User:'1000:1000',Env:[`CANOPY_RUNNER_TOKEN=${host.token('alice')}`,'CANOPY_ACCOUNTS=']},HostConfig:{Memory:2147483648,MemorySwap:3758096384,NanoCpus:2e9,RestartPolicy:{Name:'on-failure',MaximumRetryCount:3},PidsLimit:1024,CapDrop:['ALL'],CapAdd:[],NetworkMode:'canopy-net-alice',SecurityOpt:['no-new-privileges:true']},Mounts:[{Type:'volume',Destination:'/workspace',Name:'canopy-project-alice',RW:true},{Type:'volume',Destination:'/home/agent',Name:'canopy-home-alice',RW:true}],State:{Running:true},NetworkSettings:{Networks:{'canopy-net-alice':{IPAddress:'172.18.0.2'}},Ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'45000'}]}}});
  containers.set('canopy-ws-'+member,{Id:'2'.repeat(64),Config:{Labels:{'canopy.workspace':member}},HostConfig:{RestartPolicy:{Name:'on-failure',MaximumRetryCount:3}},State:{Running:true}});
- const fetch=globalThis.fetch;globalThis.fetch=async()=>Response.json([]);
- return {host,workspace,calls,containers,cleanup:async()=>{globalThis.fetch=fetch;await rm(directory,{recursive:true,force:true});}};
+ const sessions={owner:[],member:[]},fetch=globalThis.fetch;
+ globalThis.fetch=async url=>String(url).startsWith('http://alice.test')?Response.json(sessions.owner):String(url).startsWith('http://member.test')?Response.json(sessions.member):Response.json([]);
+ host.runtimes.set('alice',{workspace,runtime:{url:'http://alice.test',token:'t'}});host.runtimes.set(member,{workspace:{id:member},runtime:{url:'http://member.test',token:'t'}});
+ return {host,workspace,calls,containers,sessions,cleanup:async()=>{globalThis.fetch=fetch;await rm(directory,{recursive:true,force:true});}};
 }
 const owner=f=>f.containers.get('canopy-ws-alice');
 test('the owner container moves onto the release image; members stop and the previous container is kept',async()=>{
@@ -75,4 +77,56 @@ test('the owner report names the running image digest and the protocol its runne
   assert.deepEqual(await f.host.ownerRuntimeReport(f.workspace,{fetchImpl:async()=>{throw Error('unreachable');}}),{image:old,protocol:null});
   owner(f).State.Running=false;assert.deepEqual(await f.host.ownerRuntimeReport(f.workspace,{fetchImpl}),{image:null,protocol:null});
  }finally{await f.cleanup();}
+});
+
+const stopped=f=>f.calls.some(args=>['stop','rename','run'].includes(args[0]));
+test('running sessions defer the swap: nothing is stopped and the container keeps its image',async()=>{
+ const f=await fixture();
+ try{
+  f.sessions.owner=[{id:1,exitCode:null},{id:2,exitCode:0}];
+  const result=await f.host.updateOwnerImage(f.workspace,latest);
+  assert.equal(result.code,'deferred');assert.match(result.detail,/1 session still running/);
+  assert.equal(stopped(f),false);assert.equal(owner(f).Image,oldImage);assert.equal(owner(f).State.Running,true);
+  assert.equal(f.containers.get('canopy-ws-'+member).State.Running,true,'a member is not stopped either');
+  f.sessions.owner=[{id:2,exitCode:0}];
+  assert.equal((await f.host.updateOwnerImage(f.workspace,latest)).code,'updated','finished sessions do not block');
+ }finally{await f.cleanup();}
+});
+test('a running member session, or a runtime that cannot be asked, also defers',async()=>{
+ const f=await fixture();
+ try{
+  f.sessions.member=[{id:7,exitCode:null}];
+  assert.equal((await f.host.updateOwnerImage(f.workspace,latest)).code,'deferred');
+  f.sessions.member=[];f.host.runtimes.delete('alice');
+  const unknown=await f.host.updateOwnerImage(f.workspace,latest);
+  assert.equal(unknown.code,'deferred');assert.match(unknown.detail,/could not be asked/);
+  assert.equal(stopped(f),false);
+ }finally{await f.cleanup();}
+});
+test('a workspace that is already stopped is swapped without asking its sessions',async()=>{
+ const f=await fixture();
+ try{
+  owner(f).State.Running=false;f.sessions.owner=[{id:1,exitCode:null}];f.containers.get('canopy-ws-'+member).State.Running=false;
+  assert.equal((await f.host.updateOwnerImage(f.workspace,latest)).code,'updated');
+ }finally{await f.cleanup();}
+});
+test('with agent tracking, an open shell never defers the swap but a running agent does',async()=>{
+ const f=await fixture();
+ try{
+  f.sessions.owner=[{id:1,exitCode:null}];
+  const asked=[];f.host.runningAgents=async(target,runtime)=>{asked.push([target.id,runtime.url]);return 0;};
+  assert.equal((await f.host.updateOwnerImage(f.workspace,latest)).code,'updated','a shell is not an agent');
+  assert.deepEqual(asked[0],['alice','http://alice.test']);
+ }finally{await f.cleanup();}
+ const g=await fixture();
+ try{
+  g.host.runningAgents=async target=>target.id==='alice'?2:0;
+  const result=await g.host.updateOwnerImage(g.workspace,latest);
+  assert.equal(result.code,'deferred');assert.match(result.detail,/2 agents still running/);assert.equal(stopped(g),false);
+  g.host.runningAgents=async target=>target.id===member?1:0;
+  assert.match((await g.host.updateOwnerImage(g.workspace,latest)).detail,/member workspace has running or unknown agents/);
+  g.host.runningAgents=async()=>{throw Error('runner down');};
+  assert.match((await g.host.updateOwnerImage(g.workspace,latest)).detail,/could not be asked whether agents are running/);
+  assert.equal(stopped(g),false);
+ }finally{await g.cleanup();}
 });

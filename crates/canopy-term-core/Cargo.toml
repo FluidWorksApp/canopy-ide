@@ -1,0 +1,46 @@
+[package]
+name = "canopy-term-core"
+version = "0.1.0"
+description = "Terminal screen state and the frame contract between emulator and renderer"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+# Needed by libghostty-vt (edition 2024).
+rust-version = "1.90"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
+
+[dependencies]
+# The terminal engine: libghostty-vt (MIT OR Apache-2.0). Pinned exactly:
+# pre-1.0, breaking changes expected (it pins ghostty a887df42 in its build
+# script, so the engine version moves only with this line). Its types never
+# appear in this crate's public API. Needs Zig 0.15.2 at build time (the sys
+# crate's build script runs `zig build`) and Rust 1.90 (edition 2024); it
+# fetches ghostty and Zig packages unless GHOSTTY_SOURCE_DIR /
+# GHOSTTY_ZIG_SYSTEM_DIR are set. See README.md.
+libghostty-vt = "=0.2.2"
+
+# `cargo test` builds unoptimised by default; parse throughput numbers from an
+# unoptimised build mean nothing, so the dev profile is optimised. The crate is
+# its own workspace root, so this affects no other crate.
+[profile.dev]
+opt-level = 3
+
+# Debug assertions and overflow checks in dependencies would skew the
+# throughput numbers by however many asserts each crate happens to contain.
+[profile.dev.package."*"]
+opt-level = 3
+# libghostty-vt-sys picks Zig's optimize mode from the profile: debug info on
+# means a Zig Debug build (slow, safety checks that abort). Off gives
+# ReleaseFast, which is what a release build gets.
+debug = false
+debug-assertions = false
+overflow-checks = false
+
+# Report-only numbers for Screen (throughput, memory, per-frame cost), printed
+# as markdown rows to the CI log and copied into PERF.md.
+[[test]]
+name = "perf"
+harness = false

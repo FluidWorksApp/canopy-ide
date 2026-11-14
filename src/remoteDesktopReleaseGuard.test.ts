@@ -12,10 +12,10 @@ const windowsPackaging = readFileSync(
 describe("remote desktop release packaging", () => {
   it("enables native capture and input in both macOS release artifacts", () => {
     expect(release).toContain(
-      'args: "--target aarch64-apple-darwin --features desk-native"',
+      'args: "--target aarch64-apple-darwin --features desk-native --config src-tauri/tauri.release-macos.conf.json"',
     );
     expect(release).toContain(
-      'args: "--target x86_64-apple-darwin -- --no-default-features --features desk-native"',
+      'args: "--target x86_64-apple-darwin --config src-tauri/tauri.release-macos.conf.json -- --no-default-features --features desk-native"',
     );
   });
 

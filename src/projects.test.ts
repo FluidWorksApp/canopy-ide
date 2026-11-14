@@ -353,8 +353,8 @@ describe("dangerouslySkipPermissions", () => {
       resumeTemplate: "grok --resume __CANOPY_SESSION_ID__ --always-approve",
     });
     expect(rows.find((row) => row.id === "kiro")).toMatchObject({
-      command: "kiro-cli --agent canopy --trust-all-tools",
-      resumeTemplate: "kiro-cli --resume-id __CANOPY_SESSION_ID__ --agent canopy --trust-all-tools",
+      command: "kiro-cli chat --agent canopy --trust-all-tools",
+      resumeTemplate: "kiro-cli chat --resume-id __CANOPY_SESSION_ID__ --agent canopy --trust-all-tools",
     });
   });
 });
@@ -391,9 +391,28 @@ describe("unattended working mode", () => {
   });
 
   it("resumes Kiro by session id and reads the id back from the command", () => {
-    expect(restoreCommand("kiro", "abc-1")).toBe("kiro-cli --resume-id abc-1 --agent canopy");
-    expect(resumeSessionId("kiro-cli --resume-id abc-1 --agent canopy")).toBe("abc-1");
-    expect(resumeSessionId("kiro-cli --resume-id abc-1")).toBe("abc-1");
+    expect(restoreCommand("kiro", "abc-1")).toBe("kiro-cli chat --resume-id abc-1 --agent canopy");
+    expect(resumeSessionId("kiro-cli chat --resume-id abc-1 --agent canopy")).toBe("abc-1");
+    expect(resumeSessionId("kiro-cli chat --resume-id abc-1")).toBe("abc-1");
+    // The top-level spelling Canopy used to write still names its session.
+    expect(resumeSessionId("kiro-cli --resume-id abc-1 --agent canopy --trust-all-tools")).toBe("abc-1");
+  });
+
+  it("puts Kiro's session flags under `chat`, where kiro-cli accepts them", () => {
+    // `kiro-cli --agent canopy --trust-all-tools` fails: --trust-all-tools,
+    // --model and --effort are `chat` options, not top-level ones.
+    const kiro = AGENT_CLIS.find((c) => c.id === "kiro")!;
+    expect(launchCommand(kiro)).toBe("kiro-cli chat --agent canopy");
+    expect(startCommand("kiro", "hi", { model: "auto", effort: "high" })?.command)
+      .toBe("kiro-cli chat 'hi' --agent canopy --model 'auto' --effort 'high'");
+    updateSettings({ dangerouslySkipPermissions: true });
+    expect(launchCommand(kiro)).toBe("kiro-cli chat --agent canopy --trust-all-tools");
+    expect(restoreCommand("kiro", "abc-1")).toBe("kiro-cli chat --resume-id abc-1 --agent canopy --trust-all-tools");
+    // Terminals remembered from the broken top-level launch are rebuilt.
+    expect(rememberedAgentCommand("kiro-cli --agent canopy --trust-all-tools"))
+      .toBe("kiro-cli chat --agent canopy --trust-all-tools");
+    expect(rememberedAgentCommand("kiro-cli --resume-id abc-1 --agent canopy --trust-all-tools"))
+      .toBe("kiro-cli chat --resume-id abc-1 --agent canopy --trust-all-tools");
   });
 
   it("automates Aider confirmations and leaves Amp on its automatic default", () => {

@@ -1,0 +1,167 @@
+# MEASUREMENT ONLY. Runs, in the same job on the same stream and read sizes:
+# bare libghostty-vt vt_write (spike bench), GhosttyScreen::advance (canopy-term-core,
+# feature ghostty) and the old Screen::advance, interleaved, and prints a table
+# with ratios to the bare vt_write.
+# The spike branch is checked out into ./spike; its Zig setup is copied from
+# spike-ghostty.yml on that branch.
+name: perf-compare
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/canopy-term-core/**'
+      - 'crates/perf-compare/**'
+      - '.github/workflows/perf-compare.yml'
+      - '.github/actions/ghostty-vendor/**'
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.15.2
+  REPEATS: 5
+
+jobs:
+  compare:
+    name: compare (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            zig_target: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+          - os: macos-15
+            zig_target: aarch64-macos
+            zig_sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+    env:
+      OURS_MANIFEST: crates/perf-compare/Cargo.toml
+      SPIKE_MANIFEST: spike/crates/spike-ghostty-vt/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: spike/libghostty-vt
+          path: spike
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        run: |
+          set -euo pipefail
+          f="zig-${{ matrix.zig_target }}-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+          echo "${{ matrix.zig_sha256 }}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Versions
+        run: |
+          echo "RESULT zig $(zig version)"
+          echo "RESULT $(rustc --version)"
+          echo "RESULT runner os=$(uname -s) arch=$(uname -m)"
+          echo "RESULT ours head $(git rev-parse HEAD)"
+          echo "RESULT spike head $(git -C spike rev-parse HEAD)"
+
+      - name: Ghostty source and Zig package cache (no network clone in the build)
+        uses: ./.github/actions/ghostty-vendor
+
+      - name: Build ours (Screen::advance bench)
+        run: cargo build --release --locked --manifest-path "$OURS_MANIFEST" --bin ours
+
+      - name: Build GhosttyScreen bench (includes Zig)
+        run: cargo build --release --locked --manifest-path "$OURS_MANIFEST" --bin gscreen
+
+      - name: Build libghostty-vt bench (includes Zig)
+        run: cargo build --release --locked --manifest-path "$SPIKE_MANIFEST" --features ghostty --bin ghostty
+
+      - name: Calibrate libghostty-vt scrollback cap (bytes, not lines)
+        id: calib
+        run: |
+          out=$(spike/crates/spike-ghostty-vt/target/release/ghostty calib)
+          echo "$out"
+          echo "cap=$(echo "$out" | sed -n 's/^CAP=//p')" >> "$GITHUB_OUTPUT"
+
+      - name: Throughput, interleaved repeats (theirs, ours, theirs, ours, ...)
+        run: |
+          set -euo pipefail
+          G=spike/crates/spike-ghostty-vt/target/release/ghostty
+          O=crates/perf-compare/target/release/ours
+          S=crates/perf-compare/target/release/gscreen
+          : > "$RUNNER_TEMP/theirs.log"; : > "$RUNNER_TEMP/ours.log"; : > "$RUNNER_TEMP/gs.log"
+          for i in $(seq 1 "$REPEATS"); do
+            echo "--- repeat $i"
+            "$G" perf ${{ steps.calib.outputs.cap }} | tee -a "$RUNNER_TEMP/theirs.log"
+            "$S" perf | tee -a "$RUNNER_TEMP/gs.log"
+            "$O" perf | tee -a "$RUNNER_TEMP/ours.log"
+          done
+          python3 crates/perf-compare/summarize.py "$RUNNER_TEMP/theirs.log" "$RUNNER_TEMP/gs.log" "$RUNNER_TEMP/ours.log" "${{ matrix.os }}"
+
+      - name: Scrollback memory, 10k lines at 80 columns (peak RSS, one process each)
+        shell: bash
+        run: |
+          G=spike/crates/spike-ghostty-vt/target/release/ghostty
+          O=crates/perf-compare/target/release/ours
+          S=crates/perf-compare/target/release/gscreen
+          for eng in ghostty gscreen ours; do
+            for m in rss-idle rss-fill; do
+              case "$eng" in ghostty) bin="$G"; arg="${{ steps.calib.outputs.cap }}";; gscreen) bin="$S"; arg="";; *) bin="$O"; arg="";; esac
+              if [ "$(uname -s)" = Darwin ]; then
+                /usr/bin/time -l "$bin" "$m" $arg 2> "$RUNNER_TEMP/t.txt"
+                echo "RESULT $eng $m peak RSS (time -l): $(grep 'maximum resident set size' "$RUNNER_TEMP/t.txt" | awk '{print $1/1024}') KiB"
+              else
+                "$bin" "$m" $arg
+              fi
+            done
+          done
+
+      # Deterministic instruction-count profile (callgrind) of our side, ubuntu
+      # only. Never fails the job.
+      - name: Profile ours with callgrind (ubuntu)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          set -x
+          sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+          CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release --locked --manifest-path "$OURS_MANIFEST" --bin ours --target-dir "$RUNNER_TEMP/prof-target"
+          cd "$RUNNER_TEMP"
+          valgrind --tool=callgrind --callgrind-out-file=cg.out "$RUNNER_TEMP/prof-target/release/ours" profile 4
+          callgrind_annotate cg.out > cg-functions.txt
+          callgrind_annotate --auto=yes cg.out > cg-lines.txt
+          echo "=== top functions (self instructions)"
+          sed -n 1,70p cg-functions.txt
+          mkdir -p "$GITHUB_WORKSPACE/prof-out"
+          cp cg-functions.txt cg-lines.txt "$GITHUB_WORKSPACE/prof-out/"
+
+      # GhosttyScreen vs bare vt_write, instruction counts. No debug info on
+      # purpose: libghostty-vt-sys builds Zig in Debug mode when debug info is on,
+      # which would profile a different (slow, checked) engine. Function-level
+      # attribution only. `bare` is the same vt_write loop with no Screen around it.
+      - name: Profile GhosttyScreen and bare vt_write with callgrind (ubuntu)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq valgrind || (sudo apt-get update -qq && sudo apt-get install -y -qq valgrind)
+          cargo build --release --locked --manifest-path "$OURS_MANIFEST" --bin gscreen --target-dir "$RUNNER_TEMP/prof-g"
+          cd "$RUNNER_TEMP"
+          mkdir -p "$GITHUB_WORKSPACE/prof-out"
+          for how in bare end read; do
+            valgrind --tool=callgrind --callgrind-out-file=cgg-$how.out "$RUNNER_TEMP/prof-g/release/gscreen" profile 4 $how
+            callgrind_annotate cgg-$how.out > cgg-$how-functions.txt
+            echo "=== $how: top functions (self instructions)"
+            sed -n 1,45p cgg-$how-functions.txt
+            cp cgg-$how-functions.txt "$GITHUB_WORKSPACE/prof-out/"
+          done
+
+      - name: Upload profile text
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: callgrind-text
+          path: prof-out/

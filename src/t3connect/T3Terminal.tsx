@@ -1,9 +1,9 @@
-// A terminal on a T3 Code machine: xterm as RemoteTerminal.tsx uses it, wired
+// A terminal on a T3 Code machine: the same engine RemoteTerminal.tsx uses, wired
 // to terminal.open / attach / write / resize / close over the RPC socket.
 import { useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { createTerminal } from "../terminalEngine";
+import { getSettings } from "../settings";
 import { coalesced } from "../remoteExecution/coalesced";
 import type { T3RpcClient } from "./rpc";
 import { CANOPY_TERMINAL_THREAD_ID, t3 } from "./methods";
@@ -22,9 +22,13 @@ export function T3Terminal({ rpc, cwd, terminalId, writable, startup }: {
   const [status, setStatus] = useState("Opening…");
   useEffect(() => {
     const threadId = CANOPY_TERMINAL_THREAD_ID;
-    const term = new Terminal({ scrollback: 5000, disableStdin: !writable, theme: { background: "#0d0f12" } });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
+    const { term, fit } = createTerminal({
+      engine: getSettings().terminalEngine,
+      scrollback: 5000,
+      disableStdin: !writable,
+      theme: { background: "#0d0f12" },
+      xtermAddons: "fit",
+    });
     term.open(surface.current!);
     fit.fit();
     let disposed = false;

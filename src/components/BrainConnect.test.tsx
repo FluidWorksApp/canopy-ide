@@ -46,16 +46,16 @@ describe("BrainConnectPanel", () => {
   it("lists installed brains, recommends one and checks it on arrival", async () => {
     installed(claude.bin, codex.bin);
     render(<BrainConnectPanel />);
-    const radio = await screen.findByRole("radio", { name: new RegExp(claude.name) });
-    expect(radio).toBeChecked();
-    expect(screen.getByRole("radio", { name: new RegExp(codex.name) })).not.toBeChecked();
+    const picker = await screen.findByRole("combobox", { name: "Brain" });
+    expect(picker).toHaveValue(claude.id);
+    expect(screen.getByRole("option", { name: codex.name })).toBeInTheDocument();
     await waitFor(() => expect(checkMock).toHaveBeenCalledTimes(1));
   });
 
   it("switching brains stores the choice and checks again", async () => {
     installed(claude.bin, codex.bin);
     render(<BrainConnectPanel />);
-    await userEvent.click(await screen.findByRole("radio", { name: new RegExp(codex.name) }));
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: "Brain" }), codex.id);
     expect(getSettings().defaultAgent).toBe(codex.id);
     expect(checkMock).toHaveBeenCalled();
   });
@@ -64,7 +64,7 @@ describe("BrainConnectPanel", () => {
     installed(claude.bin, codex.bin);
     setState({ state: "error", cli: codex.id, label: codex.name, checkedAt: 1, message: "model_not_found" });
     render(<BrainConnectPanel />);
-    await screen.findByRole("radio", { name: new RegExp(claude.name) });
+    await screen.findByRole("combobox", { name: "Brain" });
     expect(screen.queryByText(/model_not_found/)).not.toBeInTheDocument();
     expect(screen.queryByText(new RegExp(`${codex.name} did not answer`))).not.toBeInTheDocument();
     await waitFor(() => expect(checkMock).toHaveBeenCalled());
@@ -140,6 +140,46 @@ describe("BrainConnectPanel", () => {
     render(<BrainConnectPanel />);
     await userEvent.click(await screen.findByRole("button", { name: `Use ${claude.name}` }));
     expect(getSettings().defaultAgent).toBe(claude.id);
+  });
+});
+
+describe("BrainConnectPanel layout", () => {
+  it("offers agents not in the list from one menu, and adds only the one picked", async () => {
+    // npx is how the Copilot, Qwen and adapter presets run.
+    installed(claude.bin, "npx", "gemini");
+    render(<BrainConnectPanel />);
+    const before = getSettings().customClis.length;
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add agent…" }));
+    expect(screen.getByText("Gemini CLI")).toBeInTheDocument();
+    expect(screen.getByText("GitHub Copilot CLI")).toBeInTheDocument();
+    // Claude Code is already in the list: its adapter adds nothing here.
+    expect(screen.queryByText("Claude (ACP adapter)")).not.toBeInTheDocument();
+    // Opening the menu adds nothing.
+    expect(getSettings().customClis.length).toBe(before);
+
+    await userEvent.click(screen.getByText("Gemini CLI"));
+    const rows = getSettings().customClis;
+    expect(rows.length).toBe(before + 1);
+    expect(getSettings().defaultAgent).toBe(rows[rows.length - 1].id);
+  });
+
+  it("has one re-check, on the status line", async () => {
+    installed(claude.bin);
+    setState({ state: "connected", cli: claude.id, label: claude.name, checkedAt: 1 });
+    render(<BrainConnectPanel />);
+    const check = await screen.findByRole("button", { name: "Check again" });
+    expect(check.closest('[role="status"]')).not.toBeNull();
+    expect(screen.getAllByRole("button", { name: /Check/ })).toHaveLength(1);
+  });
+
+  it("nothing installed: one install, the rest behind one menu", async () => {
+    installed();
+    setState({ state: "missing", cli: null, label: null, checkedAt: 1 });
+    render(<BrainConnectPanel />);
+    expect(await screen.findAllByRole("button", { name: /^Install / })).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Another agent…" }));
+    expect((await screen.findAllByText(/^Install /)).length).toBeGreaterThan(1);
   });
 });
 

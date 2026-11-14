@@ -61,21 +61,26 @@ for(const command of ['android_sdk_status','android_devices','android_avds','and
 for(const command of ['fs_set_link_grants','fs_grant_link_file','workspace_forward_probe','gates_set_global'])LOCAL_UI.add(command);
 // The LAN relay is hosted by the desktop app between people's computers; its
 // file offers use this computer's dialogs and paths. Its status goes with it.
-for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_permissions','desk_request_permission','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
+for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_permissions','desk_request_permission','privacy_status','privacy_open_settings','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
 // Public links expose this computer's own portal port (tunnel.rs); Linear is a
 // plain HTTPS API called with a key from this computer's settings.
 for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);
+// Tailscale is the one installed on this computer (tailnet.rs): its status,
+// this computer's allow list for machines that may connect in, and its app.
+for(const command of ['tailscale_status','tailscale_allow_set','tailscale_allowed_list','tailscale_open_app','tailnet_remote_list','tailnet_remote_open','tailnet_remote_close','tailnet_remote_reconnect'])LOCAL_UI.add(command);
 // This app's own diagnostics, self-test harness, `canopy` launcher, and
 // workspace files chosen in this computer's save/open dialogs.
 // Saved T3 Code machines are this computer's: their access tokens sit in its
 // credential store (t3_client.rs) and their RPC sockets are this computer's (t3_socket.rs).
 for(const command of ['t3_list','t3_describe','t3_pair','t3_remove','t3_socket_open','t3_socket_send','t3_socket_close'])LOCAL_UI.add(command);
 for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','cli_take_pending_targets','cli_take_pending_open','cli_take_pending_link','workspace_export','workspace_import'])LOCAL_UI.add(command);
+// Quitting is this computer's app; "Quit and Stop All" stops its terminals.
+for(const command of ['app_quit','pty_host_enabled','pty_host_setting','pty_host_set_setting'])LOCAL_UI.add(command);
 /** Desktop events that belong to the commands above. */
 const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','desk:state','relay:desk','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the
  *  host by name: terminals, preview forwarding, uploads and clone progress. */
-export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
+export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','execution_remote_download','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','launch_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
@@ -360,6 +365,7 @@ export class NativeWorkspaceHost implements Host {
     if(command==='notes_attach_file')return await this.attachWorkspaceFile(args) as T;
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
     if(command==='execution_remote_upload')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
+    if(command==='execution_remote_download')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
     if(command==='execution_remote_upload_cancel')return this.desktopCall<T>(command,args);
     // A device here, the project in the VM: android_run stages the VM's APK here first (androidBridge.ts).
     if(wantsWorkspaceAndroid(command,args))return await workspaceAndroid(command,args,(name,body)=>this.native(name,body),(name,body)=>this.desktopCall(name,body)) as T;
@@ -410,7 +416,7 @@ export class NativeWorkspaceHost implements Host {
       this.rendererGeneration=registration.generation;this.metadata=metadata;this.beginPoll();this.scheduleHostVersionCheck();
       value={generation:this.rendererGeneration,instance,sessions:sessions.filter(s=>s.exitCode==null).map(s=>this.summary(s))};
     }else if(command==='pty_renderer_sessions')value=(await this.sessions(INTERACTIVE)).filter(s=>s.exitCode==null).map(s=>this.summary(s));
-    else if(command==='instance_id')value=await this.instanceId();
+    else if(command==='instance_id'||command==='launch_id')value=await this.instanceId();
     else if(['pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached'].includes(command)){
       const cwd=String(args.cwd??'/workspace');if(cwd!=='/workspace'&&!cwd.startsWith('/workspace/'))throw Error('Choose a directory in the remote workspace');
       const env=(args.env??[]) as [string,string][];
@@ -574,7 +580,7 @@ export class NativeWorkspaceHost implements Host {
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level','ledger-appended',...COMPANION_DESKTOP_EVENTS,...DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','remote:download-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level','ledger-appended',...COMPANION_DESKTOP_EVENTS,...DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}

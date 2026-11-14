@@ -341,6 +341,13 @@ export interface Settings {
   terminalFontFamily: string;
   terminalCursorStyle: CursorStyle;
   terminalCursorBlink: boolean;
+  /** What draws a terminal tab: "ghostty" is Canopy's own engine (the one the
+   *  native Canopy Terminal uses, compiled for the webview), "xterm" is
+   *  xterm.js. New terminals only. A terminal falls back to xterm by itself
+   *  when the engine cannot run here (see shared/terminalEngine). */
+  terminalEngine: "ghostty" | "xterm";
+  /** A small badge over each terminal: its engine, speed and memory. */
+  terminalEngineStats: boolean;
   editorFontFamily: string;
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
@@ -678,6 +685,10 @@ export interface Settings {
    *  and "chrome" is Playwright (the user's Chrome session streamed into an
    *  iframe). Retired native-webview preferences migrate to Embedded. */
   browserEngine: BrowserEngine;
+  /** Preview tabs run in a real Chrome on this computer (previewHost.ts),
+   *  one persistent profile per project, so logins hold. Off is Embedded. A
+   *  computer without Chrome or Node falls back to Embedded on its own. */
+  previewChrome: boolean;
 
   /** What the preview's Screenshot button grabs when clicked without opening
    *  its menu. Remembered rather than fixed: whichever mode you picked last is
@@ -810,6 +821,8 @@ export const DEFAULTS: Settings = {
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
+  terminalEngine: "ghostty",
+  terminalEngineStats: false,
   editorFontFamily: EDITOR_FONT_DEFAULT,
   editorFontSize: 13,
   editorCursorStyle: "bar",
@@ -838,6 +851,7 @@ export const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "proxy",
+  previewChrome: true,
   previewCaptureMode: "visible",
   workspaceBasePort: 5173,
   workspacePorts: {},
@@ -950,6 +964,7 @@ export function getSettings(): Settings {
     const stored = JSON.parse(raw ?? "{}") as Partial<Settings>;
     value = { ...DEFAULTS, ...stored };
     value.scrollback = boundedScrollback(stored.scrollback);
+    if (value.terminalEngine !== "xterm") value.terminalEngine = "ghostty";
     if (!isSessionNameTheme(value.sessionNameTheme))
       value.sessionNameTheme = DEFAULTS.sessionNameTheme;
     if (stored.dictationTriggerRevision !== DICTATION_TRIGGER_REVISION) {
@@ -976,6 +991,7 @@ export function getSettings(): Settings {
     // established storage keys for the two remaining browsing options.
     // Every earlier browser choice lands on the one embedded engine.
     value.browserEngine = "proxy";
+    if (typeof value.previewChrome !== "boolean") value.previewChrome = true;
     // Per-agent account memory: a plain map of id to id, nothing else.
     {
       const raw = value.lastProfileByCli as unknown;

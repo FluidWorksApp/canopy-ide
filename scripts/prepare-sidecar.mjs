@@ -1,4 +1,5 @@
-// Builds the hook helper and stages it as a Tauri sidecar.
+// Builds the sidecars the app ships (the hook helper and the PTY host) and
+// stages them as Tauri externalBin entries.
 //
 // The helper uses its independent agent-hook crate, keeping Tauri application
 // resources and GUI dependencies out of its link. Neither `tauri dev` nor
@@ -15,15 +16,45 @@
 // Tauri resolves externalBin entries by appending the target triple, then drops
 // the file next to the app binary (Canopy.app/Contents/MacOS/canopy-hook),
 // which is exactly where install_hook_helper() looks.
+//
+// canopy-pty-host is the detached process that owns hosted terminals. It is a
+// member of the src-tauri workspace but is built through its own manifest, so
+// tauri-build never runs for it either. The app installs a copy of it outside
+// the bundle at runtime (src-tauri/src/pty_hosted/install.rs), so an update
+// that replaces the bundle never deletes the binary a running host came from.
+// On Windows it is the named-pipe host (the app does not launch it there yet);
+// it is staged so every bundle has it.
+//
+// canopy-term-app is the native terminal window (beta). It is built only for
+// --release and never for Windows (it has no Windows host yet), so `tauri dev`
+// and debug builds do not need Zig, which its engine (libghostty-vt-sys) runs
+// from its build script. Unlike the two above it is not in the base
+// tauri.conf.json: the release configs add it (tauri.release-linux.conf.json as
+// an externalBin, tauri.release-macos.conf.json as a signed bundle file), so
+// CI jobs that stub the base externalBin entries are unaffected. It is its own
+// workspace root, so cargo puts it in crates/canopy-term-app/target; the build
+// below asks cargo where it went. It finds canopy-pty-host beside its own exe.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const manifest = join(root, "packages", "agent-hook", "Cargo.toml");
 const release = process.argv.includes("--release");
 const profile = release ? "release" : "debug";
+
+// Every externalBin entry in src-tauri/tauri.conf.json, with the crate that
+// builds it.
+const SIDECARS = [
+  { name: "canopy-hook", manifest: join(root, "packages", "agent-hook", "Cargo.toml") },
+  { name: "canopy-pty-host", manifest: join(root, "crates", "canopy-pty-host", "Cargo.toml") },
+  {
+    name: "canopy-term-app",
+    manifest: join(root, "crates", "canopy-term-app", "Cargo.toml"),
+    // Needs Zig, and has no Windows host: release builds on macOS and Linux only.
+    wanted: (triple, release) => release && !triple.includes("-windows-"),
+  },
+];
 
 const hostTriple = () =>
   execFileSync("rustc", ["-vV"], { encoding: "utf8" })
@@ -42,63 +73,119 @@ if (!triple) {
 
 const ext = triple.includes("-windows-") ? ".exe" : "";
 const destDir = join(root, "src-tauri", "binaries");
-const dest = join(destDir, `canopy-hook-${triple}${ext}`);
 
-// No placeholder is needed: the independent helper crate does not run
-// tauri-build or validate the application's externalBin before it exists.
+// No placeholder is needed: neither crate runs tauri-build or validates the
+// application's externalBin before it exists.
 mkdirSync(destDir, { recursive: true });
 
-// Ask cargo where it put the binary rather than assuming
-// src-tauri/target/<triple>/<profile>/. A `[build] target-dir` in any
-// .cargo/config.toml — or CARGO_TARGET_DIR — relocates the whole output tree,
-// and this repo's worktrees share one build cache that way. Guessing the layout
-// makes the build fail right after a successful compile.
-const args = [
-  "build",
-  "--manifest-path",
-  manifest,
-  "--bin",
-  "canopy-hook",
-  "--target",
-  triple,
-  "--message-format",
-  "json-render-diagnostics",
-];
-if (release) args.push("--release");
-console.log(`prepare-sidecar: cargo ${args.join(" ")}`);
-// json-render-diagnostics keeps warnings and progress human-readable on stderr;
-// only the artifact stream needs capturing.
-const out = execFileSync("cargo", args, {
-  encoding: "utf8",
-  stdio: ["inherit", "pipe", "inherit"],
-  maxBuffer: 256 * 1024 * 1024,
-});
-
-let src = null;
-for (const line of out.split("\n")) {
-  if (!line.startsWith("{")) continue;
-  let msg;
-  try {
-    msg = JSON.parse(line);
-  } catch {
+for (const { name, manifest, wanted } of SIDECARS) {
+  if (wanted && !wanted(triple, release)) {
+    console.log(`prepare-sidecar: skipping ${name} (${profile}, ${triple})`);
     continue;
   }
-  if (msg.reason === "compiler-artifact" && msg.executable && msg.target?.name === "canopy-hook") {
-    src = msg.executable;
+  const dest = join(destDir, `${name}-${triple}${ext}`);
+
+  // Ask cargo where it put the binary rather than assuming
+  // src-tauri/target/<triple>/<profile>/. A `[build] target-dir` in any
+  // .cargo/config.toml — or CARGO_TARGET_DIR — relocates the whole output tree,
+  // and this repo's worktrees share one build cache that way. Guessing the
+  // layout makes the build fail right after a successful compile.
+  const args = [
+    "build",
+    "--manifest-path",
+    manifest,
+    "--bin",
+    name,
+    "--target",
+    triple,
+    "--message-format",
+    "json-render-diagnostics",
+  ];
+  if (release) args.push("--release");
+  console.log(`prepare-sidecar: cargo ${args.join(" ")}`);
+  // json-render-diagnostics keeps warnings and progress human-readable on
+  // stderr; only the artifact stream needs capturing.
+  const out = execFileSync("cargo", args, {
+    encoding: "utf8",
+    stdio: ["inherit", "pipe", "inherit"],
+    maxBuffer: 256 * 1024 * 1024,
+  });
+
+  let src = null;
+  for (const line of out.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (msg.reason === "compiler-artifact" && msg.executable && msg.target?.name === name) {
+      src = msg.executable;
+    }
+  }
+
+  // Fall back to the default layout: a fully cached build still reports the
+  // artifact, but don't let an unexpected message stream be fatal on its own.
+  if (!src) {
+    const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--manifest-path", manifest, "--no-deps", "--format-version", "1"], {encoding:"utf8"}));
+    src = join(metadata.target_directory, triple, profile, `${name}${ext}`);
+  }
+
+  if (!existsSync(src) || !statSync(src).isFile() || statSync(src).size === 0) {
+    console.error(`prepare-sidecar: expected ${src} after build`);
+    process.exit(1);
+  }
+
+  copyFileSync(src, dest);
+  console.log(`prepare-sidecar: staged ${dest} (${profile}, ${triple})`);
+
+  if (name === "canopy-pty-host" && release && triple.includes("-apple-darwin")) {
+    stageSigned(dest, "canopy-pty-host", "pty-host-entitlements.plist");
+  }
+  if (name === "canopy-term-app" && triple.includes("-apple-darwin")) {
+    stageSigned(dest, "canopy-term-app", "term-app-entitlements.plist");
   }
 }
 
-// Fall back to the default layout: a fully cached build still reports the
-// artifact, but don't let an unexpected message stream be fatal on its own.
-if (!src) {
-  const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--manifest-path", manifest, "--no-deps", "--format-version", "1"], {encoding:"utf8"}));
-  src = join(metadata.target_directory, triple, profile, `canopy-hook${ext}`);
+// tauri-bundler signs every externalBin entry with the app's own entitlements
+// (JIT, library-validation off, DYLD variables, microphone), one set for every
+// binary and no per-binary setting. The PTY host is a long-lived process that
+// needs none of them, so for macOS release builds it is not an externalBin:
+// this stages a copy signed here with src-tauri/pty-host-entitlements.plist, and
+// src-tauri/tauri.release-macos.conf.json (passed with --config by the release
+// build) places that copy at Contents/MacOS/canopy-pty-host. The bundler signs
+// only frameworks, externalBin and the app itself, never `macOS.files`, so
+// this signature is the one that ships.
+//
+// canopy-term-app is handled the same way with term-app-entitlements.plist
+// (also empty), placed at Contents/MacOS/canopy-term-app.
+//
+// With APPLE_SIGNING_IDENTITY unset the copy is staged unsigned, so a build
+// without signing still produces a complete bundle.
+function stageSigned(unsigned, name, plist) {
+  const staged = join(destDir, `${name}-signed`);
+  copyFileSync(unsigned, staged);
+  const identity = process.env.APPLE_SIGNING_IDENTITY;
+  if (!identity) {
+    console.log(`prepare-sidecar: APPLE_SIGNING_IDENTITY not set, staged ${name} unsigned`);
+    return;
+  }
+  execFileSync(
+    "codesign",
+    [
+      "--force",
+      "--options",
+      "runtime",
+      "--timestamp",
+      "--entitlements",
+      join(root, "src-tauri", plist),
+      "--sign",
+      identity,
+      staged,
+    ],
+    { stdio: "inherit" },
+  );
+  execFileSync("codesign", ["--verify", "--strict", staged], { stdio: "inherit" });
+  console.log(`prepare-sidecar: signed ${staged} with ${plist}`);
 }
-
-if (!existsSync(src) || !statSync(src).isFile() || statSync(src).size === 0) {
-  console.error(`prepare-sidecar: expected ${src} after build`);
-  process.exit(1);
-}
-
-copyFileSync(src, dest);
-console.log(`prepare-sidecar: staged ${dest} (${profile}, ${triple})`);

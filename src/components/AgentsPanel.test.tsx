@@ -461,3 +461,41 @@ describe("keyboard use", () => {
     expect(screen.getByText("prompt 0")).toBeTruthy();
   });
 });
+
+describe("settled agents", () => {
+  const entry = (over: Partial<import("../settledSessions").SettledSession> = {}) => ({
+    id: "s-1",
+    resumable: true,
+    agentId: "claude",
+    title: "Claude Code",
+    cwd: "/repo-wt-claude-1",
+    worktree: { repo: "/repo", root: "/repo-wt-claude-1" },
+    branch: "agent/claude-1",
+    settledAt: Date.now() - 2 * 3_600_000,
+    ...over,
+  });
+
+  it("lists them under Settled with when they clean up, and restores one", async () => {
+    const onRestoreSettled = vi.fn();
+    panel({ settled: [entry()], onRestoreSettled });
+    expect(screen.getByText("Settled")).toBeTruthy();
+    expect(screen.getByText("Cleans up in 22h")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Restore Claude Code" }));
+    expect(onRestoreSettled).toHaveBeenCalledWith(expect.objectContaining({ id: "s-1" }));
+  });
+
+  it("flags a kept worktree and discards only on the second press", async () => {
+    const onDiscardSettled = vi.fn();
+    panel({
+      settled: [entry({ unsaved: { dirty: 3, unpushed: 1 } })],
+      onDiscardSettled,
+    });
+    expect(screen.getByText("Kept: 3 uncommitted, 1 unpushed")).toBeTruthy();
+    const discard = screen.getByRole("button", { name: "Discard Claude Code" });
+    await userEvent.click(discard);
+    expect(onDiscardSettled).not.toHaveBeenCalled();
+    expect(screen.getByText("press x again to discard")).toBeTruthy();
+    await userEvent.click(discard);
+    expect(onDiscardSettled).toHaveBeenCalledOnce();
+  });
+});

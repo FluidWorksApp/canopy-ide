@@ -177,6 +177,19 @@ The sidecar is staged by `scripts/prepare-sidecar.mjs` because Tauri does not
 automatically build the crate's second binary. It is then bundled through
 `externalBin` in `src-tauri/tauri.conf.json`.
 
+The same script stages `canopy-pty-host` (`crates/canopy-pty-host`), the
+detached process that owns hosted terminals (on by default on Mac and Linux; Settings → Terminal, or `CANOPY_PTY_HOST=0/1` to force). The app runs
+it from a versioned copy outside the bundle, so an update does not remove it
+from under a running host. See `docs/persistent-pty-host.md`.
+
+Release builds on macOS and Linux also stage `canopy-term-app`
+(`crates/canopy-term-app`), the native terminal window (beta, not yet launched
+from the UI). Its engine needs the pinned Zig, so debug builds and Windows skip
+it. On Linux it is an `externalBin` added by `tauri.release-linux.conf.json`; on
+macOS it is a separately signed file at `Contents/MacOS/canopy-term-app` added
+by `tauri.release-macos.conf.json`, signed with `term-app-entitlements.plist`
+(empty), the same way as the PTY host.
+
 ### 4.4 Canopy Remote
 
 `portal/` is a separate React SPA, but it is not a separate npm workspace

@@ -19,6 +19,7 @@ import "@fontsource/vt323/index.css";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";
 import { applyTheme, getSettings, watchSystemTheme } from "./settings";
+import { ghosttyFailure, preloadTerminalEngine } from "./terminalEngine";
 import { openLink } from "./links";
 import { matchesModifierClick } from "./shortcuts";
 import App from "./App.tsx";
@@ -123,11 +124,27 @@ void import("./crash").then(({ flushPendingCrash }) => flushPendingCrash());
 // heart of the app) works without Monaco.
 // No StrictMode: its dev-mode double-mount would spawn and kill a real PTY for
 // every terminal on each mount, which churns native child processes.
+// The terminal engine (our Ghostty build, a 1 MB wasm module) loads alongside.
+// Terminals restored at startup mount with the app, so the mount waits for it,
+// but never for long: a terminal opened before the engine is ready simply runs
+// on xterm.
+const terminalEngineReady =
+  getSettings().terminalEngine === "ghostty"
+    ? preloadTerminalEngine(3000).then((ready) =>
+        jsLog(
+          "info",
+          ready
+            ? "terminal engine: ghostty"
+            : `terminal engine: xterm (${ghosttyFailure() || "not-loaded"})`,
+        ),
+      )
+    : Promise.resolve();
 Promise.all([
   monacoReady
     .then(() => jsLog("info", "monaco services initialized"))
     .catch((err) => jsLog("error", `monaco services failed to initialize: ${err}`)),
   rendererReady,
+  terminalEngineReady,
 ])
   .finally(() => {
     appRoot.render(

@@ -48,7 +48,9 @@ jobs:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
 
       # The dependency graph is the expensive part by far; the crate itself
       # rebuilds in well under a minute on a warm cache.
@@ -67,6 +69,7 @@ jobs:
           mkdir -p src-tauri/binaries
           triple=$(rustc -vV | grep '^host:' | awk '{print $2}')
           touch "src-tauri/binaries/canopy-hook-${triple}"
+          touch "src-tauri/binaries/canopy-pty-host-${triple}"
 
       # The binary loads whatever is in dist/, so dist has to be current.
       - name: Build the frontend

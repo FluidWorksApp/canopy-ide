@@ -9,7 +9,8 @@ This file is generated. Do not edit it by hand:
     node scripts/generate-third-party-notices.mjs
 
 It covers what Canopy **distributes**: the Rust dependency closure of the app
-binary (dev-only crates pruned), the production npm closure that is bundled into
+binary and of the `canopy-pty-host` sidecar that ships inside the app bundle
+(dev-only crates pruned), the production npm closure that is bundled into
 the frontend, and the prebuilt binaries shipped inside the app bundle. Build-only
 tooling — Vite, Rolldown, oxlint, TypeScript, lightningcss and friends — is not
 listed, because it never leaves the build machine. Hand-ported source is
@@ -20,6 +21,15 @@ Each component appears with the copyright notice taken from its own license
 file; the full text of every license in play is reproduced in the appendix.
 
 ## Notes on specific components
+
+**T3 Code — MIT.** The preview browser (`packages/remote-host/preview-host.mjs`,
+`agent-browser.mjs`, `browser-contexts.mjs`, `session-control.mjs`,
+`browser-stream.mjs`, shipped as the app's `preview-host` resource) and its
+viewer (`src/remoteExecution/StreamSurface.tsx`, `browserStream.ts`) are
+ports of T3 Code's server browser and stream (`apps/server/src/preview`,
+`apps/web/src/browser`, `packages/client-runtime/src/preview`).
+Copyright (c) 2026 T3 Tools Inc.; MIT text in the appendix; source:
+<https://github.com/pingdotgg/t3code>.
 
 **fzf — MIT.** `shared/fuzzy.ts` is a hand port of fzf's matching and scoring
 algorithm (`algo/algo.go`), compiled into the frontend bundle. Copyright (c)
@@ -96,9 +106,17 @@ redistribute them:
 - **serve-sim (vendored in expo-device-hub)** — Apache-2.0, by Evan Bacon, with changes by Expo. <https://github.com/EvanBacon/serve-sim>
 - **scrcpy-server v4.0 (downloaded by serve-emu when an Android device is first streamed)** — Apache-2.0, by Genymobile and Romain Vimont. <https://github.com/Genymobile/scrcpy>
 
-## Rust crates (799)
+The preview browser downloads this on a computer with no Chrome, Edge,
+Chromium or Brave, only after the user chooses "Download Chromium" in a
+preview tab, and checks it against a pinned SHA-256
+(`packages/remote-host/browser-pins.json`). Canopy does not bundle or
+redistribute it:
 
-### MIT — 729
+- **Chrome Headless Shell** (Chrome for Testing, via Playwright's CDN, with Playwright's FFmpeg build) — BSD-3-Clause and other open-source licenses listed in its own `about:credits`, by The Chromium Authors; FFmpeg — LGPL-2.1, by the FFmpeg developers. <https://developer.chrome.com/blog/chrome-for-testing>
+
+## Rust crates (801)
+
+### MIT — 731
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
@@ -161,6 +179,8 @@ redistribute them:
 - **cairo-sys-rs 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **camino 1.2.4** — Copyright Without Boats, Ashley Williams, Steve Klabnik, Rain (per package manifest; the distributed license file carries no copyright line)
 - **canopy-core 0.1.0** — Copyright Cause Connect Pte Ltd (per package manifest; the distributed license file carries no copyright line)
+- **canopy-pty-host 0.1.0** — Copyright Cause Connect Pte Ltd (per package manifest; the distributed license file carries no copyright line)
+- **canopy-term-net 0.1.0** — Copyright Cause Connect Pte Ltd (per package manifest; the distributed license file carries no copyright line)
 - **cargo_metadata 0.19.2** — Copyright Oliver Schneider (per package manifest; the distributed license file carries no copyright line)
 - **cargo_toml 0.22.3** — Copyright Kornel (per package manifest; the distributed license file carries no copyright line)
 - **cargo-platform 0.1.9** — no copyright line in the distributed license file
@@ -945,9 +965,9 @@ redistribute them:
 
 - **foldhash 0.2.0** — Copyright (c) 2024 Orson Peters
 
-## npm packages (237)
+## npm packages (239)
 
-### MIT — 174
+### MIT — 175
 
 - **@antfu/install-pkg 1.1.0** — Copyright (c) 2021 Anthony Fu <https://github.com/antfu>
 - **@braintree/sanitize-url 7.1.2** — Copyright (c) 2017 Braintree
@@ -1122,6 +1142,7 @@ redistribute them:
 - **vscode-languageserver-protocol 3.17.5** — Copyright (c) Microsoft Corporation
 - **vscode-languageserver-types 3.17.5** — Copyright (c) Microsoft Corporation
 - **vscode-ws-jsonrpc 3.5.0** — Copyright 2018 - present TypeFox GmbH
+- **ws 8.22.0** — Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>; Copyright (c) 2013 Arnout Kazemier and contributors; Copyright (c) 2016 Luigi Pinca and contributors
 - **xmlbuilder 10.1.1** — Copyright (c) 2013 Ozgur Ozcitak
 
 ### ISC — 36
@@ -1175,12 +1196,13 @@ redistribute them:
 - **rw 1.3.3** — Copyright (c) 2014-2016, Michael Bostock
 - **sprintf-js 1.0.3** — Copyright (c) 2007-2014, Alexandru Marasteanu <hello [at) alexei (dot] ro>
 
-### Apache-2.0 — 5
+### Apache-2.0 — 6
 
 - **@chevrotain/types 11.1.2** — Copyright Shahar Soel (per package manifest; the distributed license file carries no copyright line)
 - **dompurify 3.3.1** — Copyright 2025 Dr.-Ing. Mario Heiderich, Cure53
 - **dompurify 3.4.12** — Copyright Dr.-Ing. Mario Heiderich, Cure53 (per package manifest; the distributed license file carries no copyright line)
 - **fast-diff 1.3.0** — Copyright Jason Chen (per package manifest; the distributed license file carries no copyright line)
+- **playwright-core 1.63.0-alpha-2026-08-31** — Copyright (c) Microsoft Corporation
 - **xlsx 0.20.3** — Copyright sheetjs (per package manifest; the distributed license file carries no copyright line)
 
 ### BSD-2-Clause — 5

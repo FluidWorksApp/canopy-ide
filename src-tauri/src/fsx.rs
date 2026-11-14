@@ -184,10 +184,16 @@ fn link_grant_refusal(canonical: &Path, home: Option<&Path>) -> Option<&'static 
 /// this app run, never its folder (see `grant_file`).
 #[tauri::command]
 pub fn fs_grant_link_file(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
+    grant_outside_file(&state, &path)
+}
+
+/// The grant behind a terminal link, also used when an agent asks the editor
+/// to open a file outside every project: same setting, same credential guard.
+pub(crate) fn grant_outside_file(state: &WorkspaceManager, path: &str) -> Result<(), String> {
     if !state.link_grants.load(std::sync::atomic::Ordering::SeqCst) {
         return Err("Opening files outside the project is off in Settings → Privacy.".into());
     }
-    let requested = Path::new(&path);
+    let requested = Path::new(path);
     if !requested.is_absolute() {
         return Err("Only an absolute path can be opened from a link.".into());
     }

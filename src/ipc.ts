@@ -1537,6 +1537,8 @@ export interface RemoteUploadProgress {
   files:number; totalFiles:number; skipped:number; cancelled:boolean;
 }
 export const remoteUpload=(destination:string,kind:'files'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_upload',{destination,kind,id});
+export const remoteDownload=(source:string,kind:'file'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_download',{source,kind,id});
+export const onRemoteDownloadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>listen<RemoteUploadProgress>('remote:download-progress',event=>cb(event.payload));
 export const remoteUploadCancel=(id:string)=>invoke<void>('execution_remote_upload_cancel',{id});
 export type MirrorCandidateCategory='secret'|'config'|'data'|'other';
 export interface MirrorCandidate{path:string;size:number;category:MirrorCandidateCategory}
@@ -2882,6 +2884,9 @@ export interface ProcInfo {
   cmd: string;
   cpu: number;
   mem_bytes: number;
+  /** TCP ports this process itself listens on. Absent when it has none, and
+   *  from a core or host that does not report them. */
+  ports?: number[];
 }
 /** What a terminal is running, resolved from the process the pty has in the
  *  foreground — evidence, not a verdict. `bin` is the invoked name with any
@@ -3593,6 +3598,11 @@ export const onIntegrationHealth = (
 /** This app launch's instance tag — pair with SessionDigest.instance so a
  *  digest from another instance/run can't bind to this instance's terminals. */
 export const instanceId = () => invoke<string>("instance_id");
+/** This launch's own tag: stamps tasks and sweeps the previous launch's. Equal to
+ *  `instanceId` unless this launch adopted hosted terminals (whose token it
+ *  carries). A remote workspace host without the command answers with its
+ *  instance id, which is what it always used. */
+export const launchId = () => invoke<string>("launch_id").catch(() => instanceId());
 /** One batch per hook-bridge poll (500ms): every new JSONL line since the
  *  last, so a busy agent costs one React commit per window, not one per line. */
 export const onAgentEvents = async (
@@ -3855,6 +3865,9 @@ export interface PrInfo {
   checks: string;
   /** Human count for a tooltip, e.g. "3/4 checks passed" ("" when none). */
   checks_summary: string;
+  /** Checks that have not passed, by name (absent from an older backend). */
+  /** Every check with its state (passed ones included). */
+  check_runs?: { name: string; state: "running" | "queued" | "failed" | "passed" }[];
   /** Full head commit id ("" or absent when gh did not say). */
   head_sha?: string;
   /** Full base branch tip id ("" or absent when gh did not say). */
@@ -4865,6 +4878,108 @@ export const onTunnelState = (
 ): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
 
+/** The installed Tailscale on this desktop (tailnet.rs). Canopy only reads its
+ *  status and opens its app; it never signs in or changes Tailscale. */
+export type TailscaleKind =
+  | "notInstalled"
+  | "off"
+  | "needsLogin"
+  | "needsApproval"
+  | "starting"
+  | "tooOld"
+  | "running";
+export interface TailscaleMachine {
+  name: string;
+  dnsName: string;
+  ip: string | null;
+  /** The only key Allow takes; null cannot be allowed. */
+  stableId: string | null;
+  online: boolean;
+  /** May connect in to terminals on this machine. */
+  allowed: boolean;
+}
+/** Whether this app is listening for allowed machines (tailnet_serve.rs). */
+export interface TailscaleListener {
+  state: "off" | "listening" | "portInUse" | "noInterface" | "unavailable";
+  port: number;
+}
+export interface TailscaleView {
+  kind: TailscaleKind;
+  version: string | null;
+  minVersion: string;
+  canOpenApp: boolean;
+  thisMachine: TailscaleMachine | null;
+  machines: TailscaleMachine[];
+  allowError: string | null;
+  listener?: TailscaleListener;
+}
+export const tailscaleStatus = () => invoke<TailscaleView>("tailscale_status");
+export const tailscaleAllowSet = (stableId: string, allowed: boolean) =>
+  invoke<void>("tailscale_allow_set", { stableId, allowed });
+export const tailscaleAllowedList = () => invoke<string[]>("tailscale_allowed_list");
+export const tailscaleOpenApp = () => invoke<void>("tailscale_open_app");
+
+/** Terminals on another machine in this tailnet (tailnet_client.rs on this
+ *  side, tailnet_serve.rs on the other). Contract, shared by both Rust halves:
+ *
+ *  - `tailnet_remote_list { stableId }` -> TailnetRemoteTerminal[]. Connects to
+ *    the machine (whois-pinned), checks the session version and lists its
+ *    terminals. It is also what Connect does.
+ *  - `tailnet_remote_open { stableId, remoteId }` -> TailnetRemoteOpened.
+ *    Registers a proxy session in the local PtyManager, attached to that remote
+ *    terminal. The UI then opens an ordinary terminal tab on `ptyId`.
+ *  - `tailnet_remote_close { ptyId }` -> void. Detaches and drops the proxy
+ *    session; never ends the process on the other machine.
+ *  - `tailnet_remote_reconnect { ptyId }` -> void. Restarts a link that gave up
+ *    ("lost"); progress arrives as `tailnet:remote_state`.
+ *
+ *  A rejection is one of TailnetRemoteError. The UI shows the same "didn't
+ *  accept the connection" text for every other rejection (and for a missing
+ *  command), so a refused machine learns nothing about why. */
+export type TailnetRemoteError = "tailscale_off" | "older_canopy" | "refused";
+export interface TailnetRemoteTerminal {
+  /** The terminal's id on the other machine. */
+  remoteId: number;
+  title: string;
+  cwd: string;
+  command: string | null;
+  status: "running" | "exited";
+  exitCode: number | null;
+}
+export interface TailnetRemoteOpened {
+  /** The proxy session's id in this machine's PtyManager. */
+  ptyId: number;
+  sessionGeneration: number;
+  cwd: string;
+  title: string;
+  /** Display name of the other machine, for the tab prefix. */
+  machine: string;
+}
+/** Event `tailnet:remote_state`, once per change of an open link. After
+ *  "reconnecting" attempts count up from 1 (backoff 1/2/4/8/16/30 s); "lost"
+ *  is sent after 5 minutes without a link; "revoked" means the other machine
+ *  turned Allow off (the tab is closed by the UI); "ended" means the remote
+ *  process exited. */
+export interface TailnetRemoteState {
+  ptyId: number;
+  stableId: string;
+  state: "connected" | "reconnecting" | "lost" | "revoked" | "ended";
+  attempt: number | null;
+  exitCode: number | null;
+}
+export const tailnetRemoteList = (stableId: string) =>
+  invoke<TailnetRemoteTerminal[]>("tailnet_remote_list", { stableId });
+export const tailnetRemoteOpen = (stableId: string, remoteId: number) =>
+  invoke<TailnetRemoteOpened>("tailnet_remote_open", { stableId, remoteId });
+export const tailnetRemoteClose = (ptyId: number) =>
+  invoke<void>("tailnet_remote_close", { ptyId });
+export const tailnetRemoteReconnect = (ptyId: number) =>
+  invoke<void>("tailnet_remote_reconnect", { ptyId });
+export const onTailnetRemoteState = (
+  cb: (s: TailnetRemoteState) => void,
+): Promise<UnlistenFn> =>
+  listen<TailnetRemoteState>("tailnet:remote_state", (e) => cb(e.payload));
+
 /** Which of these commands are installed (login-shell PATH). */
 export const whichCheck = (commands: string[]) =>
   invoke<Record<string, boolean>>("which_check", { commands });
@@ -4931,6 +5046,16 @@ export interface DeskPerms {
 export const deskPermissions = () => invoke<DeskPerms>("desk_permissions");
 export const deskRequestPermission = (kind: "screen" | "input") =>
   invoke<void>("desk_request_permission", { kind });
+/** A permission desk.rs does not answer. "unasked": macOS has not asked yet
+ *  and will on first use. "unknown": could not tell. */
+export type PrivacyGrant = "granted" | "denied" | "unasked" | "unknown";
+export interface PrivacyStatus {
+  full_disk: PrivacyGrant;
+  microphone: PrivacyGrant;
+}
+export const privacyStatus = () => invoke<PrivacyStatus>("privacy_status");
+export const privacyOpenSettings = (kind: "full_disk" | "microphone" | "notifications") =>
+  invoke<void>("privacy_open_settings", { kind });
 export const deskEnd = (session: string) =>
   invoke<void>("desk_end", { session });
 export const deskStatus = () =>

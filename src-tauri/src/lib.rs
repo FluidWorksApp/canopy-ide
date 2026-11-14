@@ -1,3 +1,4 @@
+mod adoption_seal;
 mod agent_cli;
 mod agent_instructions;
 mod agent_life;
@@ -22,6 +23,8 @@ mod companion_requests;
 mod containment;
 mod context;
 mod crash;
+#[cfg(unix)]
+mod ctx_socket;
 mod desk;
 mod devicehub;
 mod devicehub_mjpeg;
@@ -30,6 +33,8 @@ mod devicehub_proxy;
 mod dictation;
 mod execution;
 mod mirror;
+mod privacy;
+mod remote_download;
 mod remote_upload;
 mod teleport;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
@@ -50,16 +55,19 @@ mod maintenance;
 mod mcp;
 mod mcp_client;
 mod mesh;
+mod native_term;
 mod notes;
 mod notify;
 mod portal;
 mod preview;
+mod preview_host;
 mod procenv;
 mod process_capture;
 mod profiles;
 mod provenance;
 mod prwatch;
 mod pty;
+mod pty_hosted;
 mod punch;
 mod receipt;
 mod relay;
@@ -81,6 +89,9 @@ mod sysaudio;
 mod system_one;
 mod t3_client;
 mod t3_socket;
+mod tailnet;
+mod tailnet_client;
+mod tailnet_serve;
 mod tasks;
 mod tunnel;
 mod turn_rollback;
@@ -123,6 +134,7 @@ pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
     "find-in-files",
     "spot-search",
     "help",
+    "quit-stop-all",
 ];
 
 /// Custom menu: keeps Edit (clipboard in WKWebView needs it) but replaces the
@@ -164,6 +176,17 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::quit(app, None)?,
+            // With the terminal host on, Quit leaves terminals running for the
+            // next launch to adopt; this is the quit that stops them. It asks
+            // first whenever agents are running (the frontend's dialog), host
+            // on or off.
+            &MenuItem::with_id(
+                app,
+                "quit-stop-all",
+                "Quit and Stop All…",
+                true,
+                accel("quit-stop-all").as_deref(),
+            )?,
         ],
     )?;
     let edit = Submenu::with_items(
@@ -420,6 +443,14 @@ fn js_log(level: String, message: String) {
                 | "remote-stage:desktop-failed"
         ) {
             log::info!(target: "canopy::watchdog::remote", "{message}");
+        } else if matches!(
+            message.as_str(),
+            "reconnect-stage:routing-ready"
+                | "reconnect-stage:routed"
+                | "reconnect-stage:outside-project"
+                | "reconnect-stage:tab-attached"
+        ) {
+            log::info!(target: "canopy::watchdog::reconnect", "{message}");
         }
         return;
     }
@@ -494,6 +525,13 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     raise_file_descriptor_limit();
 
+    // Start reading the adoption sealing key now, off this thread, so the launch
+    // path finds it loaded (or keeps going without it) instead of waiting.
+    #[cfg(unix)]
+    if pty_hosted::enabled() {
+        adoption_seal::prefetch();
+    }
+
     // Install the ring crypto provider process-wide so rustls has a default —
     // the team relay's internet path dials wss:// through a tunnel via
     // tokio-tungstenite, whose rustls connector builds its config from the
@@ -560,6 +598,7 @@ pub fn run() {
         .manage(desk::DeskManager::default())
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
+        .manage(preview_host::PreviewHost::default())
         .manage(browser::BrowserManager::default())
         .manage(workspace_forward::WorkspaceForwards::default())
         .manage(context::ContextBridge::default())
@@ -595,6 +634,25 @@ pub fn run() {
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
             cli::install_deep_links(app);
+            // Terminals a previous launch left in the PTY host (when terminals are hosted)
+            // come back before the first renderer registers.
+            let adopted = app
+                .state::<pty::PtyManager>()
+                .adopt_hosted(app.handle().clone());
+            if adopted > 0 {
+                eprintln!("canopy: adopted {adopted} hosted terminal(s)");
+            }
+            // The tailnet listener: off until a machine is allowed, so this
+            // reads no Tailscale state at startup when none is. It needs the
+            // PtyManager, which is already managed.
+            {
+                let serve = tailnet_serve::TailnetServe::production(
+                    app.handle().clone(),
+                    tailnet::allow_path().unwrap_or_default(),
+                );
+                app.manage(serve.clone());
+                serve.start();
+            }
             // Claude Code's IDE servers emit to the window, so the hub needs a
             // handle before the first agent PTY asks for one.
             app.manage(claude_ide::ClaudeIde::new(std::sync::Arc::new(
@@ -650,6 +708,13 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            // Adoption ran before the log plugin existed; its outcome goes in
+            // the resilience log now (content-free: counts and reason words).
+            log::info!(
+                target: "canopy::watchdog::pty_host",
+                "{}",
+                pty_hosted::launch_report(adopted)
+            );
             // Edge's built-in shortcuts are not Canopy's to hand out — see
             // webview_keys.rs. Done here rather than at window creation
             // because the setting lives on CoreWebView2, which only exists
@@ -691,6 +756,13 @@ pub fn run() {
             cli::cli_take_pending_targets,
             cli::cli_install_shim,
             notify::notify_native,
+            native_term::native_term_available,
+            native_term::native_term_open,
+            native_term::native_term_hand_over,
+            native_term::native_term_take_back,
+            native_term::native_term_forget,
+            native_term::native_term_handover_status,
+            native_term::native_term_windows,
             selftest::selftest_config,
             selftest::selftest_checkpoint,
             selftest::selftest_checkpoint_save,
@@ -781,6 +853,7 @@ pub fn run() {
             mirror::execution_mirror_inspect,
             mirror::execution_mirror_send,
             mirror::execution_mirror_candidates,
+            remote_download::execution_remote_download,
             remote_upload::execution_remote_upload,
             remote_upload::execution_remote_upload_cancel,
             remote_upload::execution_remote_stage_images,
@@ -807,6 +880,13 @@ pub fn run() {
             pty::pty_set_name,
             pty::pty_set_name_theme,
             pty::instance_id,
+            pty::launch_id,
+            pty::app_quit,
+            pty::pty_host_enabled,
+            pty::pty_host_setting,
+            pty::pty_host_set_setting,
+            pty::pty_stop_all_preview,
+            pty::pty_host_notice,
             android::android_sdk_status,
             android::android_devices,
             android::android_avds,
@@ -826,6 +906,7 @@ pub fn run() {
             android::android_describe,
             android::android_run,
             android::android_stage_file,
+            preview_host::preview_host_start,
             devicehub::device_hub_status,
             devicehub::device_hub_install,
             devicehub::device_hub_start,
@@ -1086,6 +1167,8 @@ pub fn run() {
             desk::desk_respond,
             desk::desk_permissions,
             desk::desk_request_permission,
+            privacy::privacy_status,
+            privacy::privacy_open_settings,
             desk::desk_send_input,
             desk::desk_end,
             desk::desk_status,
@@ -1153,6 +1236,14 @@ pub fn run() {
             tunnel::tunnel_start,
             tunnel::tunnel_stop,
             tunnel::tunnel_status,
+            tailnet::tailscale_status,
+            tailnet::tailscale_allow_set,
+            tailnet::tailscale_allowed_list,
+            tailnet::tailscale_open_app,
+            tailnet_client::tailnet_remote_list,
+            tailnet_client::tailnet_remote_open,
+            tailnet_client::tailnet_remote_close,
+            tailnet_client::tailnet_remote_reconnect,
             dictation::dictation_models,
             dictation::dictation_status,
             dictation::dictation_download,
@@ -1177,15 +1268,24 @@ pub fn run() {
                 // the app quit mid-dictation. Cheap, and the one piece of state
                 // here that outlives the process.
                 sysaudio::restore();
+                // No peer keeps typing into terminals that are being closed.
+                if let Some(serve) = app.try_state::<std::sync::Arc<tailnet_serve::TailnetServe>>()
+                {
+                    serve.shutdown();
+                }
                 app.state::<system_one::SystemOne>().stop();
                 let pty = app.state::<pty::PtyManager>();
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exiting(pty.live_count() as u64);
                 // Guarantee no child processes outlive the app.
-                let pty_cleanup = pty.kill_all();
+                // Hosted terminals keep running unless the user chose "Quit
+                // and Stop All".
+                let pty_cleanup = pty.kill_all_on_exit();
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
+                // ... and no preview Chromium: its pages run beforeunload as it goes.
+                app.state::<preview_host::PreviewHost>().shutdown();
                 // ... and no Claude Code IDE lock naming a pid that is about
                 // to be gone.
                 if let Some(ide) = app.try_state::<claude_ide::ClaudeIde>() {

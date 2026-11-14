@@ -70,6 +70,14 @@ if $NOTARIZE && ! xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE
   exit 1
 fi
 
+# The bundled native terminal (canopy-term-app) is built from source by
+# scripts/prepare-sidecar.mjs, and its engine runs `zig build`: Zig 0.15.x must
+# be on PATH (release.yml installs the pinned 0.15.2).
+if ! command -v zig >/dev/null 2>&1 || [ "$(zig version | cut -d. -f1,2)" != "0.15" ]; then
+  echo "error: Zig 0.15.x is required on PATH to build canopy-term-app (found: $(zig version 2>/dev/null || echo none))." >&2
+  exit 1
+fi
+
 # Tauri signs the bundle itself (hardened runtime + entitlements.plist) when
 # these are set, so we don't hand-roll codesign over most nested binaries — the
 # ONNX Runtime dylib is the one exception (re-signed just below).
@@ -103,7 +111,7 @@ for target in "${TARGETS[@]}"; do
       > src-tauri/onnxruntime/DICTATION_UNSUPPORTED.txt
     # `--` forwards --no-default-features to cargo; `tauri build` rejects it as
     # an unknown flag otherwise.
-    BUILD_ARGS=(--target "$target" -- --no-default-features)
+    BUILD_ARGS=(--target "$target" --config src-tauri/tauri.release-macos.conf.json -- --no-default-features)
   else
     if [ ! -f "$ORT_DYLIB" ]; then
       echo "==> fetching ONNX Runtime $ORT_VER"
@@ -118,7 +126,7 @@ for target in "${TARGETS[@]}"; do
     echo "==> re-signing ONNX Runtime for notarisation"
     codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$ORT_DYLIB"
     codesign --verify --strict "$ORT_DYLIB"
-    BUILD_ARGS=(--target "$target")
+    BUILD_ARGS=(--target "$target" --config src-tauri/tauri.release-macos.conf.json)
   fi
   npm run tauri build -- "${BUILD_ARGS[@]}"
 
@@ -138,6 +146,21 @@ for target in "${TARGETS[@]}"; do
   # The sidecar ships inside the bundle and is copied out to ~/.canopy/bin at
   # runtime; if it isn't signed, that copy is what Gatekeeper kills.
   codesign --verify --strict "$APP/Contents/MacOS/canopy-hook"
+  # Same for the PTY host, copied to ~/.canopy/pty-host/bin/<version>-<hash>/.
+  codesign --verify --strict "$APP/Contents/MacOS/canopy-pty-host"
+  # ...and it must carry no entitlements (src-tauri/pty-host-entitlements.plist);
+  # tauri-bundler would have given it the app's.
+  if codesign -d --entitlements - --xml "$APP/Contents/MacOS/canopy-pty-host" 2>/dev/null | grep -q "<key>"; then
+    echo "error: canopy-pty-host carries entitlements for $target" >&2
+    exit 1
+  fi
+  # The native terminal (beta) is bundled the same way: signed by
+  # prepare-sidecar.mjs with the empty src-tauri/term-app-entitlements.plist.
+  codesign --verify --strict "$APP/Contents/MacOS/canopy-term-app"
+  if codesign -d --entitlements - --xml "$APP/Contents/MacOS/canopy-term-app" 2>/dev/null | grep -q "<key>"; then
+    echo "error: canopy-term-app carries entitlements for $target" >&2
+    exit 1
+  fi
 
   if $NOTARIZE; then
     echo "==> notarising $(basename "$DMG")"

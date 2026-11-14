@@ -14,7 +14,8 @@
 import { useEffect, useState } from "react";
 import type { AcpPreset } from "../acp/providers";
 import { useEscape } from "../useEscape";
-import { Button, Field, Radio, Row, Select, TextInput } from "./ui";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { Button, Field, Row, Select, TextInput } from "./ui";
 import {
   addAcpPreset,
   brainCandidates,
@@ -70,7 +71,7 @@ function useInstalled(): { installed: Record<string, boolean>; loaded: boolean }
 
 /** Main and background model for the brain. Empty means the CLI's own
  *  default (main) or the runner's cheap alias (background). */
-export function BrainModels({ cli }: { cli: AgentCli }) {
+export function BrainModels({ cli, before }: { cli: AgentCli; before?: React.ReactNode }) {
   const [s, setS] = useState<Settings>(getSettings);
   const patch = (p: Partial<Settings>) => setS(updateSettings(p));
   const models = agentModelSwitchFor(cli.id);
@@ -106,6 +107,7 @@ export function BrainModels({ cli }: { cli: AgentCli }) {
   );
   return (
     <Row className="brain-models">
+      {before}
       {field("brainModel", "Main model", `${cli.name} default`)}
       {field(
         "brainBackgroundModel",
@@ -179,12 +181,65 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
     }
   };
 
+  const menu = useContextMenu();
+  // An adapter for an agent already in the list is the same model by another
+  // route: nothing the brain gains. Settings → Agents still adds one.
+  const extras = presets.filter((p) => !candidates.some((c) => p.id === `${c.id}-acp`));
+  const installable = brainCapableClis().filter((c) => c.install);
+
+  /** The one place the brain is chosen. A plain switch between agents already
+   *  in the list, so arrowing through it is safe. */
+  const agentField = candidates.length > 0 && (
+    <Field label="Agent">
+      <Select
+        width="md"
+        aria-label="Brain"
+        value={brain?.id ?? ""}
+        onChange={(e) => e.target.value && void chooseBrain(e.target.value)}
+      >
+        {!brain && <option value="">Choose…</option>}
+        {candidates.map((cli) => (
+          <option key={cli.id} value={cli.id}>
+            {cli.name}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+  /** Agents found on this computer that are not in the list yet. Picking one
+   *  adds it, so it is a menu (commits on click or Enter), never a select. */
+  const addAgent = extras.length > 0 && (
+    <Button
+      aria-haspopup="menu"
+      title="Agents found on this computer that are not in your list yet"
+      onClick={(e) =>
+        menu.openUnder(
+          e,
+          extras.map((p) => ({ label: p.name, onClick: () => void chooseBrain(addAcpPreset(p)) })),
+        )
+      }
+    >
+      Add agent…
+    </Button>
+  );
+
   return (
     <div className="brain-connect" data-state={conn.state}>
       <div className="brain-connect-status" role="status" aria-live="polite">
         <span className={`brain-dot is-${text.tone}`} aria-hidden />
         <strong>{brain?.name ?? conn.label ?? "Brain"}</strong>
         <span className="brain-connect-short">{missingWithChoices ? "Not connected" : text.short}</span>
+        {candidates.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="brain-connect-check"
+            disabled={conn.state === "checking"}
+            onClick={() => void checkBrainConnection()}
+          >
+            {conn.state === "unknown" ? "Check connection" : "Check again"}
+          </Button>
+        )}
       </div>
       {conn.state !== "connected" && conn.state !== "checking" && conn.state !== "unknown" && detail && (
         <p className="brain-connect-detail">{detail}</p>
@@ -195,69 +250,64 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
         </code>
       )}
 
-      {candidates.length > 0 && (
-        <div className="brain-connect-choices" role="radiogroup" aria-label="Brain">
-          {candidates.map((cli) => (
-            <Radio
-              key={cli.id}
-              name="brain-cli"
-              checked={brain?.id === cli.id}
-              onChange={() => void chooseBrain(cli.id)}
-              label={cli.name}
-            />
-          ))}
-        </div>
-      )}
-      {presets.length > 0 && (
-        <div className="brain-connect-install">
+      {/* Agent and its two models: one row, one width, one baseline. */}
+      {!hideModels && brain ? (
+        <BrainModels
+          cli={brain}
+          before={
+            <>
+              {agentField}
+              {addAgent}
+            </>
+          }
+        />
+      ) : (
+        (agentField || addAgent) && (
           <Row>
-            {presets.map((p) => (
-              <Button
-                key={p.id}
-                title={`Adds ${p.bin} ${p.args.join(" ")} as an ACP agent and uses it as the brain`}
-                onClick={() => void chooseBrain(addAcpPreset(p))}
-              >
-                Use {p.name}
-              </Button>
-            ))}
+            {agentField}
+            {addAgent}
           </Row>
-        </div>
+        )
       )}
-      {loaded && candidates.length === 0 && (
+
+      {loaded && candidates.length === 0 && installable.length > 0 && (
         <div className="brain-connect-install">
           <span>Install one to give Canopy a brain:</span>
           <Row>
-            {brainCapableClis()
-              .filter((c) => c.install)
-              .map((cli) => (
-                <Button key={cli.id} onClick={() => install(cli)}>
-                  Install {cli.name}
-                </Button>
-              ))}
+            <Button variant="accent" onClick={() => install(installable[0])}>
+              Install {installable[0].name}
+            </Button>
+            {installable.length > 1 && (
+              <Button
+                aria-haspopup="menu"
+                onClick={(e) =>
+                  menu.openUnder(
+                    e,
+                    installable.slice(1).map((cli) => ({ label: `Install ${cli.name}`, onClick: () => install(cli) })),
+                  )
+                }
+              >
+                Another agent…
+              </Button>
+            )}
           </Row>
         </div>
       )}
 
-      <Row className="brain-connect-actions">
-        {missingWithChoices && recommended && (
-          <Button variant="accent" onClick={() => void chooseBrain(recommended.id)}>
-            Use {recommended.name}
-          </Button>
-        )}
-        {conn.state === "signed-out" && brain && (
-          <Button variant="accent" onClick={() => signIn(brain)}>
-            Sign in to {brain.name}
-          </Button>
-        )}
-        {candidates.length > 0 && (
-          <Button
-            disabled={conn.state === "checking"}
-            onClick={() => void checkBrainConnection()}
-          >
-            {conn.state === "unknown" ? "Check connection" : "Check again"}
-          </Button>
-        )}
-      </Row>
+      {((missingWithChoices && recommended) || (conn.state === "signed-out" && brain)) && (
+        <Row className="brain-connect-actions">
+          {missingWithChoices && recommended && (
+            <Button variant="accent" onClick={() => void chooseBrain(recommended.id)}>
+              Use {recommended.name}
+            </Button>
+          )}
+          {conn.state === "signed-out" && brain && (
+            <Button variant="accent" onClick={() => signIn(brain)}>
+              Sign in to {brain.name}
+            </Button>
+          )}
+        </Row>
+      )}
       {conn.state === "signed-out" && brain && !manual && (
         <p className="brain-connect-hint">
           Finish sign-in in the terminal.
@@ -268,8 +318,9 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
           No project is open to host a terminal yet. {manual}
         </p>
       )}
-
-      {!hideModels && brain && <BrainModels cli={brain} />}
+      {menu.menu && (
+        <ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close} />
+      )}
     </div>
   );
 }

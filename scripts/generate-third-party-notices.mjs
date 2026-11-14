@@ -297,6 +297,10 @@ function normaliseLicense(name, raw) {
 // ---------------------------------------------------------------------------
 // Rust
 // ---------------------------------------------------------------------------
+// Crates (members of the src-tauri workspace) built into their own binaries
+// and shipped inside the app bundle as Tauri sidecars.
+const SIDECAR_MANIFESTS = ["crates/canopy-pty-host/Cargo.toml"];
+
 function collectCrates() {
   const meta = JSON.parse(
     execFileSync(
@@ -308,6 +312,17 @@ function collectCrates() {
   const byId = new Map(meta.packages.map((p) => [p.id, p]));
   const nodes = new Map(meta.resolve.nodes.map((n) => [n.id, n]));
   const root = meta.resolve.root;
+  // Separately built binaries that ship inside the app bundle walk from their
+  // own crate too, so their closure is covered even where the app does not
+  // depend on them (canopy-pty-host is an app dependency only on Unix, and
+  // that edge could change). They are members of the same workspace, so the
+  // one `cargo metadata` above already resolved them.
+  const sidecarRoots = SIDECAR_MANIFESTS.map((manifest) => {
+    const want = resolve(ROOT, manifest);
+    const found = meta.packages.find((p) => resolve(p.manifest_path) === want);
+    if (!found) throw new Error(`No package for sidecar manifest ${manifest} in cargo metadata`);
+    return found.id;
+  });
 
   const seen = new Set();
   const walk = (id) => {
@@ -320,6 +335,9 @@ function collectCrates() {
     }
   };
   walk(root);
+  // A sidecar crate is Canopy's own code but, like canopy-core, is listed as a
+  // component; only the app crate itself is left out.
+  for (const id of sidecarRoots) walk(id);
 
   const out = [];
   for (const id of seen) {
@@ -374,6 +392,16 @@ function collectNpm() {
   // they are not part of it.
   for (const name of Object.keys(pkgs[""].dependencies ?? {})) {
     const child = resolveDep("", name);
+    if (child && !seen.has(child)) {
+      seen.add(child);
+      walk(child);
+    }
+  }
+
+  // The preview browser host (scripts/prepare-preview-host.mjs) ships these
+  // as a Node resource, outside Vite's root dependency graph.
+  for (const name of ["playwright-core", "ws"]) {
+    const child = resolveDep("packages/remote-host", name);
     if (child && !seen.has(child)) {
       seen.add(child);
       walk(child);
@@ -549,7 +577,8 @@ This file is generated. Do not edit it by hand:
     node scripts/generate-third-party-notices.mjs
 
 It covers what Canopy **distributes**: the Rust dependency closure of the app
-binary (dev-only crates pruned), the production npm closure that is bundled into
+binary and of the \`canopy-pty-host\` sidecar that ships inside the app bundle
+(dev-only crates pruned), the production npm closure that is bundled into
 the frontend, and the prebuilt binaries shipped inside the app bundle. Build-only
 tooling — Vite, Rolldown, oxlint, TypeScript, lightningcss and friends — is not
 listed, because it never leaves the build machine. Hand-ported source is
@@ -560,6 +589,15 @@ Each component appears with the copyright notice taken from its own license
 file; the full text of every license in play is reproduced in the appendix.
 
 ## Notes on specific components
+
+**T3 Code — MIT.** The preview browser (\`packages/remote-host/preview-host.mjs\`,
+\`agent-browser.mjs\`, \`browser-contexts.mjs\`, \`session-control.mjs\`,
+\`browser-stream.mjs\`, shipped as the app's \`preview-host\` resource) and its
+viewer (\`src/remoteExecution/StreamSurface.tsx\`, \`browserStream.ts\`) are
+ports of T3 Code's server browser and stream (\`apps/server/src/preview\`,
+\`apps/web/src/browser\`, \`packages/client-runtime/src/preview\`).
+Copyright (c) 2026 T3 Tools Inc.; MIT text in the appendix; source:
+<https://github.com/pingdotgg/t3code>.
 
 **fzf — MIT.** \`shared/fuzzy.ts\` is a hand port of fzf's matching and scoring
 algorithm (\`algo/algo.go\`), compiled into the frontend bundle. Copyright (c)
@@ -630,6 +668,14 @@ after the user agrees to it in the Device tab. Canopy does not bundle or
 redistribute them:
 
 ${RUNTIME_TOOLS.map((m) => `- **${m.name}** — ${m.license}, by ${m.by}. <${m.url}>`).join("\n")}
+
+The preview browser downloads this on a computer with no Chrome, Edge,
+Chromium or Brave, only after the user chooses "Download Chromium" in a
+preview tab, and checks it against a pinned SHA-256
+(\`packages/remote-host/browser-pins.json\`). Canopy does not bundle or
+redistribute it:
+
+- **Chrome Headless Shell** (Chrome for Testing, via Playwright's CDN, with Playwright's FFmpeg build) — BSD-3-Clause and other open-source licenses listed in its own \`about:credits\`, by The Chromium Authors; FFmpeg — LGPL-2.1, by the FFmpeg developers. <https://developer.chrome.com/blog/chrome-for-testing>
 
 ${renderSection("Rust crates", crates)}
 ${renderSection("npm packages", npm)}

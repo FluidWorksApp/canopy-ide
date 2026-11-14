@@ -1,0 +1,14 @@
+[package]
+name = "terminal-compare-engine"
+version = "0.0.0"
+description = "Benchmark harness: canopy-term-core Screen::advance on the shared byte streams. Not shipped."
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Its own workspace root with its own lock, like canopy-term-core.
+[workspace]
+
+[dependencies]
+canopy-term-core = { path = "../../../crates/canopy-term-core" }
+libc = "0.2"

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the canopy-term-app binary: none, on purpose.
+
+  It is a native window (winit, wgpu on Metal) around a terminal engine built
+  ahead of time with Zig. It runs no JIT (allow-jit), records no audio
+  (audio-input), loads no third-party libraries into itself
+  (disable-library-validation) and needs no DYLD variables. tauri-bundler would
+  sign an externalBin entry with the app's own entitlements (entitlements.plist),
+  which is why this file is signed by scripts/prepare-sidecar.mjs instead, as the
+  PTY host is (see pty-host-entitlements.plist).
+
+  That the hardened runtime with no entitlements is enough for wgpu/Metal is
+  expected, not yet proven on a real signed build.
+-->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

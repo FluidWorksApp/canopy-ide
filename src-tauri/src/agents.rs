@@ -34,6 +34,10 @@ pub struct ProcInfo {
     pub cmd: String,
     pub cpu: f32,
     pub mem_bytes: u64,
+    /// TCP ports this process itself listens on, so a server can be stopped
+    /// by port without ending the terminal it runs in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
 }
 
 /// macOS RSS includes clean mapped pages that the kernel can discard and map
@@ -392,6 +396,8 @@ pub fn start_monitor(app: AppHandle) {
             let mut sys = System::new();
             let mut tick: u64 = 0;
             let mut last_ports: HashMap<u32, Vec<u16>> = HashMap::new();
+            // The same reading keyed by process, carried the same way.
+            let mut last_proc_ports: HashMap<u32, Vec<u16>> = HashMap::new();
             // Lives across ticks: identification is filesystem work, and the
             // answer for a given binary only changes when it is reinstalled.
             let mut resolver = crate::agentid::Resolver::default();
@@ -572,6 +578,7 @@ pub fn start_monitor(app: AppHandle) {
                                     .join(" "),
                                 cpu: p.cpu_usage(),
                                 mem_bytes: process_memory_bytes(pid, p.memory()),
+                                ports: Vec::new(),
                             });
                         }
                         if let Some(kids) = children.get(&pid) {
@@ -619,6 +626,11 @@ pub fn start_monitor(app: AppHandle) {
                     let by_pid = listening_ports(&all);
                     if !by_pid.is_empty() {
                         for s in stats.iter_mut() {
+                            for p in s.procs.iter_mut() {
+                                if let Some(own) = by_pid.get(&p.pid) {
+                                    p.ports = own.clone();
+                                }
+                            }
                             let mut ports: Vec<u16> = s
                                 .procs
                                 .iter()
@@ -632,12 +644,18 @@ pub fn start_monitor(app: AppHandle) {
                         }
                     }
                     last_ports = stats.iter().map(|s| (s.id, s.ports.clone())).collect();
+                    last_proc_ports = by_pid;
                 } else {
                     // Carry the last reading through the ticks that skip lsof,
                     // so the port doesn't blink out of the UI between polls.
                     for s in stats.iter_mut() {
                         if let Some(p) = last_ports.get(&s.id) {
                             s.ports = p.clone();
+                        }
+                        for proc in s.procs.iter_mut() {
+                            if let Some(own) = last_proc_ports.get(&proc.pid) {
+                                proc.ports = own.clone();
+                            }
                         }
                     }
                 }
@@ -1190,7 +1208,7 @@ const KIRO_HOOK_EVENTS: &[&str] = &[
 
 /// Kiro runs hooks only from the active agent's config, so Canopy installs a
 /// global agent named `canopy` (`~/.kiro/agents/canopy.json`) and launches
-/// `kiro-cli --agent canopy` (see sessionArgs in projects.ts). It mirrors the
+/// `kiro-cli chat --agent canopy` (see sessionArgs in projects.ts). It mirrors the
 /// built-in default agent (all tools, the user's MCP servers, steering and
 /// AGENTS.md as context), so a Canopy session behaves like a plain one while
 /// the hooks report turns and tool use. An unknown agent name falls back to

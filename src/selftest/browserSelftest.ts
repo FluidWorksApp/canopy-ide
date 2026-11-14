@@ -201,7 +201,7 @@ async function clearTheStage() {
     // deliberately later in the surface matrix.
     document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     const backdrop = document.querySelector(
-      ".confirm-backdrop, .dlg-scrim, .modal-backdrop, .palette-backdrop, .coach-layer",
+      ".confirm-backdrop, .dlg-scrim, .modal-backdrop, .palette-backdrop, .coach-layer, .ob-flow",
     );
     if (!backdrop) return;
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -345,6 +345,9 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       // Not through settings: they no longer offer the native engine and
       // migrate it away on every read, which once left this whole scenario
       // waiting 90s for a view that the proxy engine never registers.
+      // The Chrome engine (previewHost.ts) takes precedence when it is on; this
+      // scenario is about the webview and proxy engines, so it runs without it.
+      updateSettings({ previewChrome: false });
       overrideBrowserEngine("webview");
       refreshBrowserViews();
       const asked = preferredEngine();
@@ -821,7 +824,7 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
     // read: under the proxy there is nothing to hide, which IS the claim.
     await step("proxy-default", "Under the default engine a panel does not blank the page", async () => {
       overrideBrowserEngine(null);
-      updateSettings({ browserEngine: "proxy" });
+      updateSettings({ browserEngine: "proxy", previewChrome: false });
       refreshBrowserViews();
       // Let the native views go before framing anything. An iframe drawn over
       // a live child webview is a real fault the watchdog is right to report;

@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
 import { createRef } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { PaneBar } from "./PaneBar";
+import type * as ipc from "../ipc";
+import { mockCommands } from "../test/setup";
+import {
+  applyRemoteStateForTests,
+  registerLink,
+  resetTailnetRemoteForTests,
+} from "../tailnetRemote";
 import { ANCHOR_ATTR } from "../tabSticky";
 import type {
   RailChip,
@@ -453,5 +460,62 @@ describe("sharing a terminal", () => {
     // Not shareable here (no Canopy workspace, or not its owner): no button.
     rerender(paneBar({ isTerminalTab: true }));
     expect(screen.queryByRole("button", { name: /^Share$/ })).toBeNull();
+  });
+});
+
+describe("PaneBar tab for a terminal on another machine (Tailscale)", () => {
+  const remote = (): TermSubTab => ({ ...term("r1", "zsh"), ptyId: 41, attachId: 41 });
+  const link = (phase?: ipc.TailnetRemoteState["state"], attempt: number | null = null) => {
+    registerLink({ ptyId: 41, stableId: "nWORKMAC1CNTRL", remoteId: 7, machine: "work-mac" });
+    if (phase && phase !== "connected")
+      applyRemoteStateForTests({ ptyId: 41, stableId: "nWORKMAC1CNTRL", state: phase, attempt, exitCode: null });
+  };
+  const bar = (over: Partial<React.ComponentProps<typeof PaneBar>> = {}) =>
+    paneBar({ tabGroups: [run("a", [remote()])], ...over });
+
+  afterEach(() => resetTailnetRemoteForTests());
+
+  it("a local terminal has no glyph and no prefix", () => {
+    render(bar());
+    expect(document.querySelector(".tab-tailnet-glyph")).toBeNull();
+    expect(document.querySelector(".tab-title")!.textContent).not.toContain("work-mac:");
+  });
+
+  it("connected: link glyph and a '<machine>:' title prefix, nothing else", () => {
+    link();
+    render(bar());
+    expect(document.querySelector(".tab-tailnet-glyph")).not.toBeNull();
+    expect(document.querySelector(".tab-title")!.textContent!.startsWith("work-mac: ")).toBe(true);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("reconnecting: says so with the attempt number and offers Close", () => {
+    link("reconnecting", 3);
+    const onCloseTab = vi.fn();
+    render(bar({ onCloseTab }));
+    expect(screen.getByRole("status")).toHaveTextContent("Reconnecting to work-mac… (attempt 3)");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onCloseTab).toHaveBeenCalledWith("r1");
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+  });
+
+  it("lost after 5 minutes: Reconnect and Close tab", () => {
+    link("lost");
+    const onCloseTab = vi.fn();
+    const calls: string[] = [];
+    mockCommands({ tailnet_remote_reconnect: (a: Record<string, unknown>) => void calls.push(`reconnect ${a.ptyId}`) });
+    render(bar({ onCloseTab }));
+    expect(screen.getByRole("status")).toHaveTextContent("Lost connection to work-mac.");
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    expect(calls).toEqual(["reconnect 41"]);
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    expect(onCloseTab).toHaveBeenCalledWith("r1");
+  });
+
+  it("the remote process ended: the tab keeps its glyph and shows no banner", () => {
+    link("ended");
+    render(bar());
+    expect(document.querySelector(".tab-tailnet-glyph")).not.toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

@@ -221,6 +221,44 @@ flowchart LR
   Versioned --> Alias --> Latest --> Users
 ```
 
+### Standalone Canopy Terminal (beta)
+
+The release also carries the native terminal as its own download, usable without
+the IDE (macOS Apple silicon and Linux x86_64 only; Windows has no host launch
+yet, and Intel Macs get it only inside the IDE):
+
+```text
+Canopy-Terminal-macos-arm64.zip           Canopy Terminal.app, signed + notarized + stapled
+Canopy-Terminal-macos-arm64.zip.sha256
+Canopy-Terminal-linux-x86_64.tar.gz       canopy-term-app, canopy-pty-host, README.txt, LICENSE.md
+Canopy-Terminal-linux-x86_64.tar.gz.sha256
+```
+
+They are built in the `build` matrix jobs by `scripts/package-term-app.mjs` from
+the binaries `prepare-sidecar.mjs` already built, so they are the same build as
+the one bundled in the IDE. They are uploaded to the draft only for tags (never
+by a manual run), and `scripts/release-assets.mjs` requires all four, with a
+digest, before `finalize` can pass; a `.sha256` must also hold the digest of the
+asset it names. They are not updater payloads: nothing about them reaches
+`latest.json`, and the standalone has no updater (users download again).
+
+The macOS app is `Canopy Terminal.app`, bundle id `app.causeconnect.canopy.terminal`
+(the IDE's id plus `.terminal`), signed with the same Developer ID as the IDE:
+hardened runtime, secure timestamp and no entitlements on either program
+(`src-tauri/term-app-entitlements.plist`, `src-tauri/pty-host-entitlements.plist`),
+then notarized with `notarytool` and stapled. A tag build fails if it cannot sign
+and notarize. After packaging, CI unpacks the zip and checks `codesign --verify
+--strict`, hardened runtime, timestamp, Developer ID, zero entitlements,
+`stapler validate`, and that `spctl --assess` reports `Notarized Developer ID`.
+
+How it finds its host: `canopy-term-app` installs the `canopy-pty-host` beside
+it into `~/.canopy/pty-host/term-app-bin/<version>-<digest>/` and starts the host
+from there (never from Downloads or a bundle an update replaces). It shares
+`~/.canopy/pty-host/host.sock` with the IDE only when the host that is already
+running was started by the same app version (read from the host's path). An idle
+host of another version is stopped and replaced; one that still runs terminals is
+left alone and the app prints which Canopy started it and what to do.
+
 Changing an alias breaks published download links. Update the workflow, README,
 and website together if a rename is ever unavoidable.
 
@@ -235,7 +273,8 @@ candidate.
 - [ ] Expected installers and updater archives exist.
 - [ ] Updater `.sig` files exist.
 - [ ] `latest.json` exists and points at the intended version.
-- [ ] Every stable-name alias exists.
+- [ ] Every stable-name alias exists, including the four standalone Canopy Terminal assets.
+- [ ] Standalone Canopy Terminal manual test done (see below).
 - [ ] Release title, tag, version, and notes agree.
 - [ ] No logs or assets expose credentials.
 
@@ -280,6 +319,25 @@ After publishing:
 Run the GitHub workflow manually with `workflow_dispatch` to exercise the build
 matrix without a release tag. With no tag, upload steps are skipped.
 
+Release builds on macOS and Linux build `canopy-term-app` and need Zig 0.15.x
+(`release.yml` installs the pinned 0.15.2; `scripts/release-macos.sh` requires it
+on PATH). Windows does not bundle it.
+
+To prove only that the terminal app (`canopy-term-app` and `canopy-pty-host`)
+builds for macOS arm64, macOS Intel (cross) and Linux, tick `term_app_dry_run`:
+the release jobs are skipped and only `term-app-dry-run` runs, with the pinned
+Zig from `.github/actions/install-zig`. It needs no secrets, signs nothing and
+creates no tag, draft or upload.
+
+To prove the standalone downloads package correctly without a release, tick
+`term_app_standalone_dry_run`: only `term-app-standalone-dry-run` runs (macOS
+arm64 and Linux), with no secrets. It builds both programs, packages both assets
+UNSIGNED and not notarized (the job log and summary say so), checks the layout,
+the checksums and that the packaged programs start, prints the sizes and keeps
+the files as an artifact for 7 days. It does not exercise signing, notarization,
+stapling or Gatekeeper; only a real signed run on a tag (or a manual run of the
+whole workflow with the secrets) does.
+
 For a local signed macOS build:
 
 ```sh
@@ -315,3 +373,32 @@ then signs, notarizes, staples, and runs Gatekeeper assessment.
 - [ ] Draft release notes and limitations reviewed.
 - [ ] Draft published deliberately.
 - [ ] Public downloads and updater checked after publication.
+
+## Manual test: standalone Canopy Terminal (macOS)
+
+CI cannot prove the Gatekeeper first launch. Before publishing, on a clean Mac
+(or a user account that has never opened Canopy), with Apple silicon:
+
+1. Download `Canopy-Terminal-macos-arm64.zip` from the **draft** release in a
+   browser (so it is quarantined; `curl` does not set the flag). Check the
+   checksum: `shasum -a 256 -c Canopy-Terminal-macos-arm64.zip.sha256`.
+2. Unzip it by double-click. Run:
+   - `spctl --assess --type execute --verbose=4 "Canopy Terminal.app"` and expect
+     `accepted` with `source=Notarized Developer ID`.
+   - `xcrun stapler validate "Canopy Terminal.app"` and expect
+     `The validate action worked!`.
+   - `codesign -dvvv "Canopy Terminal.app/Contents/MacOS/canopy-term-app"`:
+     `flags=0x10000(runtime)`, a `Timestamp=`, `Authority=Developer ID Application`.
+3. Double-click it. Expect no malware or "cannot verify" dialog (macOS may show
+   the one-time "downloaded from the internet, Open?" prompt), a window with a
+   shell in your home directory, the Canopy Terminal name and icon in the Dock.
+4. Close the window, reopen: the session is still there (the host keeps it).
+   `~/.canopy/pty-host/term-app-bin/` holds the installed host.
+5. With the IDE of the **same** version running its hosted terminals, open the
+   terminal: it shares the host. With an IDE of a **different** version holding
+   terminals, it must refuse with the message naming that version.
+6. Report what step 2 printed.
+
+Linux: `tar -xzf Canopy-Terminal-linux-x86_64.tar.gz`, then
+`./canopy-term-app` on a desktop with Vulkan or OpenGL; this has not been run on
+a real display by CI.

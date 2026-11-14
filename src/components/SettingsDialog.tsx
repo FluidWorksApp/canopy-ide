@@ -16,6 +16,7 @@ import {
   useContext,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type RefObject,
 } from "react";
@@ -51,6 +52,8 @@ import {
 import { clearCompanionView, clearRun } from "../companionSession";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
+import { ghosttyFailure } from "../terminalEngine";
+import { EngineBenchmark } from "./EngineBenchmark";
 import { notOnServerYet, serverFeatureError } from "../accountErrors";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 
@@ -63,6 +66,7 @@ import { settingAnchor, type SettingHit } from "./settingsIndex";
 import { SettingsNavContext } from "./settingsNav";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
+import { TailscaleStatus } from "./TailscaleStatus";
 import { AcpProviderPicker } from "./AcpProviderPicker";
 import { partitionBuiltins } from "../agentCliVisibility";
 import { registerConnectorIcon } from "../acp/connectorIcons";
@@ -70,6 +74,7 @@ import { AcpAgentToggle } from "./AcpAgentToggle";
 import { joinArgv, splitArgv } from "../acp/providers";
 import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
+import { clearAllPreviewProfiles, previewBrowserState, subscribePreviewHost, usesDownloadedChromium } from "../previewHost";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import {
   AgentIcon,
@@ -103,6 +108,7 @@ import {
 } from "../fleetSnapshot";
 import { FleetReadinessPanel } from "./FleetReadinessPanel";
 import { AgentMemorySettings } from "./AgentMemorySettings";
+import { useKeepTerminalsRunning } from "./KeepTerminalsRunning";
 import {OrganizationSettings} from "./OrganizationSettings";
 import { AccountSettings } from "./AccountSettings";
 import {
@@ -1356,6 +1362,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
     initialTab === "vault" ? "browser" : initialTab,
   );
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const keepTerminals = useKeepTerminalsRunning();
   const [, setKeysVersion] = useState(0);
   const [gh, setGh] = useState<ipc.GhAuth | null>(null);
   const [ghBusy, setGhBusy] = useState(false);
@@ -2521,6 +2528,42 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                   )}
                 </Item>
                 <Item
+                  name="Engine"
+                  tag="Beta"
+                  desc="Ghostty is Canopy's own terminal. New terminals only."
+                >
+                  <Segmented<"ghostty" | "xterm">
+                    aria-label="Terminal engine"
+                    options={[
+                      { id: "ghostty", label: "Ghostty" },
+                      { id: "xterm", label: "Classic" },
+                    ]}
+                    value={s.terminalEngine}
+                    onChange={(terminalEngine) => patch({ terminalEngine })}
+                  />
+                  {s.terminalEngine === "ghostty" && ghosttyFailure() && (
+                    <span className="set-warn" role="status">
+                      Ghostty can't run here; using Classic.
+                    </span>
+                  )}
+                </Item>
+                <Item
+                  name="Show engine stats"
+                  desc="Engine, speed and memory on each terminal."
+                >
+                  <Switch
+                    checked={s.terminalEngineStats}
+                    onChange={(terminalEngineStats) => patch({ terminalEngineStats })}
+                    aria-label="Show engine stats"
+                  />
+                </Item>
+                <Item
+                  name="Benchmark engines"
+                  desc="Time the same output on Ghostty and Classic, here, about 10 seconds."
+                >
+                  <EngineBenchmark />
+                </Item>
+                <Item
                   name="Scrollback"
                   desc="Lines kept per terminal. New terminals only."
                 >
@@ -2545,6 +2588,23 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     }}
                   />
                 </Item>
+                {keepTerminals.visible && (
+                  <Item
+                    name="Keep terminals running after quit"
+                    desc="Terminals and agents stay alive for 2 hours after you quit or update, and reconnect on next launch. Applies after restart. Mac and Linux."
+                  >
+                    <Switch
+                      checked={keepTerminals.on}
+                      onChange={keepTerminals.set}
+                      aria-label="Keep terminals running after quit"
+                    />
+                    {keepTerminals.error && (
+                      <span className="set-warn" role="alert">
+                        {keepTerminals.error}
+                      </span>
+                    )}
+                  </Item>
+                )}
               </>
             )}
 
@@ -2586,6 +2646,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
 
             {tab === "browser" && (
               <>
+                <PreviewBrowserSetting enabled={s.previewChrome} onChange={(previewChrome) => patch({ previewChrome })} />
                 {/* The vault is the browser's other half: it exists to fill
                     logins into these same preview tabs, and as its own tab it
                     read as an unrelated feature. */}
@@ -2952,8 +3013,23 @@ export function RemoteSettings({
     };
   }, []);
   if (me === undefined) return null;
-  if (me) return <CanopyLinkSettings />;
-  return <SelfHostedRemoteSettings runInTerminal={runInTerminal} />;
+  return (
+    <>
+      {me ? <CanopyLinkSettings /> : <SelfHostedRemoteSettings runInTerminal={runInTerminal} />}
+      <TailscaleSettings />
+    </>
+  );
+}
+
+/** The Tailscale already installed on this machine, signed in to Canopy or
+ *  not. Separate from the Tailscale choice under Public link, which is Funnel
+ *  for the phone portal. */
+function TailscaleSettings() {
+  return (
+    <Item name="Tailscale" desc="Uses the Tailscale app on this machine.">
+      <TailscaleStatus />
+    </Item>
+  );
 }
 
 /** The portal is served under /remote. */
@@ -3989,5 +4065,47 @@ function DictationSettings() {
 
       {err && <div className="set-item-desc set-error">{err}</div>}
     </>
+  );
+}
+
+/** Settings › Browser & Vault: which browser preview tabs run in, and signing
+ *  the preview's Chrome profiles out of every site. */
+function PreviewBrowserSetting({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const browser = useSyncExternalStore(subscribePreviewHost, previewBrowserState);
+  const desc = !enabled
+    ? "Runs inside Canopy. Logins may not stick."
+    : usesDownloadedChromium(browser)
+      ? `Using downloaded Chromium ${browser?.installer?.version.split(".")[0] ?? ""}`.trim() + "."
+      : "Chrome keeps logins, one profile per project.";
+  return (
+    <Item name="Preview browser" desc={desc}>
+      <span className="rc-settings">
+        <Segmented<"chrome" | "embedded">
+          aria-label="Preview browser"
+          options={[
+            { id: "chrome", label: "Chrome" },
+            { id: "embedded", label: "Embedded" },
+          ]}
+          value={enabled ? "chrome" : "embedded"}
+          onChange={(choice) => onChange(choice === "chrome")}
+        />
+        <Button
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            setNote("");
+            void clearAllPreviewProfiles()
+              .then(() => setNote("Signed out."))
+              .catch((error: unknown) => setNote(String((error as Error)?.message ?? error)))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Sign out of preview sites
+        </Button>
+        {note && <span className="set-item-desc">{note}</span>}
+      </span>
+    </Item>
   );
 }

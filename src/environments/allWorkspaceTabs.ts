@@ -41,7 +41,12 @@ export function parseMachineSessions(rows: unknown): MachineSession[] {
 export function sessionsNeedingTabs(
   env: string,
   sessions: readonly MachineSession[],
-  tabs: readonly { type: string; machine?: string; ptyId?: number | null; reconnect?: { sessionId: number } }[],
+  tabs: readonly {
+    type: string;
+    machine?: string;
+    ptyId?: number | null;
+    reconnect?: { sessionId: number };
+  }[],
 ): MachineSession[] {
   const held = new Set<number>();
   for (const tab of tabs) {
@@ -51,12 +56,35 @@ export function sessionsNeedingTabs(
   return sessions.filter((session) => {
     if (held.has(session.id)) return false;
     const alias = aliasOf(env, session.id);
-    return !(alias !== undefined && tabs.some((t) => t.type === "terminal" && t.ptyId === alias));
+    return !(
+      alias !== undefined &&
+      tabs.some((t) => t.type === "terminal" && t.ptyId === alias)
+    );
   });
 }
 
+/** Sessions the person closed in this window, so the next refresh does not
+ *  bring their tabs back while the sessions keep running on the machine. */
+export const closedKey = (env: string, sessionId: number): string =>
+  `${env}:${sessionId}`;
+
+/** `sessions` without the ones in `closed`. Entries for sessions that no longer
+ *  exist on `env` are dropped from `closed`, so the set cannot grow forever and
+ *  a new session never inherits an old one's close. */
+export function withoutClosed(
+  env: string,
+  sessions: readonly MachineSession[],
+  closed: Set<string>,
+): MachineSession[] {
+  const live = new Set(sessions.map((session) => closedKey(env, session.id)));
+  for (const key of [...closed])
+    if (key.startsWith(`${env}:`) && !live.has(key)) closed.delete(key);
+  return sessions.filter((session) => !closed.has(closedKey(env, session.id)));
+}
+
 /** The machine's short label for a tab: the workspace's own name. */
-export const machineBadge = (name: string): string => name.trim().slice(0, 14) || "workspace";
+export const machineBadge = (name: string): string =>
+  name.trim().slice(0, 14) || "workspace";
 
 /** The environment id of the desktop this window runs on, while a workspace is
  *  the window's own machine and the desktop therefore joins as one of the others. */
@@ -66,11 +94,15 @@ export const THIS_MAC_ENV = "local";
  *  connectable, and never the one that already is this window's own machine.
  *  That one's terminals are the window's primary tabs (no `machine`, plain ids),
  *  so reading it as a second machine would add every one of them again. */
-export function workspacesToJoin<W extends { id: string; state?: string; access?: { canConnect?: boolean } }>(
-  workspaces: readonly W[],
-  activeWorkspaceId?: string,
-): W[] {
-  return workspaces.filter((w) => w.state === "ready" && w.access?.canConnect !== false && w.id !== activeWorkspaceId);
+export function workspacesToJoin<
+  W extends { id: string; state?: string; access?: { canConnect?: boolean } },
+>(workspaces: readonly W[], activeWorkspaceId?: string): W[] {
+  return workspaces.filter(
+    (w) =>
+      w.state === "ready" &&
+      w.access?.canConnect !== false &&
+      w.id !== activeWorkspaceId,
+  );
 }
 
 /** Whether a tab belongs in the project's remembered terminals (the Resume
@@ -78,4 +110,7 @@ export function workspacesToJoin<W extends { id: string; state?: string; access?
  *  be reopened on this window's own machine: a terminal shown from another
  *  machine, or only because "All workspaces" is on, would come back as a shell
  *  in a folder that exists somewhere else. */
-export const rememberableTab = (tab: { viaAll?: boolean; machine?: string }): boolean => !tab.viaAll && !tab.machine;
+export const rememberableTab = (tab: {
+  viaAll?: boolean;
+  machine?: string;
+}): boolean => !tab.viaAll && !tab.machine;

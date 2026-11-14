@@ -6,9 +6,13 @@
 //
 // It only reads: the digest the hook wrote, `git status`, and the PR list. The
 // task actions send the agent a message, exactly as typing it would.
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { runCommitPushPr } from "../commitPushPrIpc";
+import { draftPrWithBrain, type BrainPrDraft } from "../prDraftBrain";
 import * as ipc from "../ipc";
+import { PROVENANCE_WRITTEN_EVENT, prIdentity } from "../provenance";
+import { offersAutoMerge } from "../prMergeAuto";
 import { agentCliFor } from "../projects";
 import { prConflictContext, prFixChecksContext } from "../prs";
 import { openInOsBrowser } from "../links";
@@ -34,6 +38,7 @@ import type { Life } from "../../shared/agentLife";
 
 const COLLAPSED_KEY = "canopy:agentCard:collapsed";
 const DOCKED_KEY = "canopy:agentCard:docked";
+const TASKS_OPEN_KEY = "canopy:agentCard:tasksOpen";
 const PR_TTL_MS = 60_000;
 
 const prCache = new Map<string, { at: number; prs: ipc.PrInfo[] }>();
@@ -69,6 +74,17 @@ function readDocked(): boolean {
   }
 }
 
+/** Whether the task list is open. The card remounts when the terminal tab or
+ *  the workspace drawer changes, and a plain `useState(false)` closed the list
+ *  each time, so a list you opened vanished after your next request. */
+function readTasksOpen(): boolean {
+  try {
+    return localStorage.getItem(TASKS_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function readCollapsed(): boolean {
   try {
     return localStorage.getItem(COLLAPSED_KEY) === "1";
@@ -94,6 +110,9 @@ function readMergeMethod(): "squash" | "merge" | "rebase" {
 }
 const DEFAULT_BRANCHES = new Set(["main", "master", "develop"]);
 /** "fix/hub-prefetch-scrcpy" becomes "Fix hub prefetch scrcpy". */
+/** Longest "Raise PR" waits for the brain's draft before using the offline text. */
+const DRAFT_WAIT_MS = 8000;
+
 export function titleFromBranch(branch: string): string {
   const text = branch
     .replace(/^[^/]+\//, "")
@@ -125,6 +144,117 @@ function useNow(live: boolean): number {
 }
 
 const MAX_PREVIOUS = 30;
+
+type CheckRun = NonNullable<ipc.PrInfo["check_runs"]>[number];
+const CHECK_ORDER: Record<CheckRun["state"], number> = {
+  failed: 0,
+  running: 1,
+  queued: 2,
+  passed: 3,
+};
+const CHECK_WORD: Record<CheckRun["state"], string> = {
+  failed: "Failed",
+  running: "Running",
+  queued: "Queued",
+  passed: "Passed",
+};
+
+/** The PR's checks as one dot (red failing, pulsing orange running, green
+ *  passed). Hover or focus opens every check with its own dot; passed ones
+ *  fold into one row so a long list stays short. Drawn in a portal: the card's
+ *  blur would otherwise clip it. */
+function ChecksBadge({ pr }: { pr: ipc.PrInfo }) {
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const [showPassed, setShowPassed] = useState(false);
+  const closeTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(closeTimer.current), []);
+  const runs = [...(pr.check_runs ?? [])].sort(
+    (a, b) => CHECK_ORDER[a.state] - CHECK_ORDER[b.state],
+  );
+  const open = runs.filter((c) => c.state !== "passed");
+  const passed = runs.length - open.length;
+  const overall =
+    pr.checks === "FAIL" ? "failed" : pr.checks === "PENDING" ? "running" : "passed";
+  const count = runs.length ? `${passed}/${runs.length}` : "";
+  const label = runs.length
+    ? `${passed} of ${runs.length} checks passed`
+    : pr.checks_summary || `Checks ${CHECK_WORD[overall].toLowerCase()}`;
+  const show = (el: HTMLElement) => {
+    window.clearTimeout(closeTimer.current);
+    setAnchor(el.getBoundingClientRect());
+  };
+  const keep = () => window.clearTimeout(closeTimer.current);
+  const hide = () => {
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      setAnchor(null);
+      setShowPassed(false);
+    }, 150);
+  };
+  const row = (c: CheckRun, i: number) => (
+    <li key={`${i}:${c.name}`} title={CHECK_WORD[c.state]}>
+      <span className={`agent-card-dot agent-card-dot-${c.state}`} aria-hidden="true" />
+      <span className="agent-card-ellipsis">{c.name}</span>
+      <span className="agent-card-sr">{CHECK_WORD[c.state]}</span>
+    </li>
+  );
+  return (
+    <span
+      className="agent-card-checks-anchor"
+      onMouseEnter={(e) => show(e.currentTarget)}
+      onMouseLeave={hide}
+    >
+      <button
+        type="button"
+        className="agent-card-checks-btn"
+        aria-label={label}
+        aria-expanded={!!anchor}
+        onFocus={(e) => show(e.currentTarget)}
+        onBlur={hide}
+        onKeyDown={(e) => e.key === "Escape" && setAnchor(null)}
+      >
+        <span className={`agent-card-dot agent-card-dot-${overall}`} aria-hidden="true" />
+        {count && <span className="agent-card-checks-count">{count}</span>}
+      </button>
+      {anchor &&
+        createPortal(
+          <div
+            className="agent-card-checks-pop"
+            role="tooltip"
+            onMouseEnter={keep}
+            onMouseLeave={hide}
+            style={{
+              top: Math.min(anchor.bottom + 4, window.innerHeight - 120),
+              right: Math.max(8, window.innerWidth - anchor.right),
+            }}
+          >
+            <div className="agent-card-checks-pop-head">{label}</div>
+            {runs.length > 0 && (
+              <ul aria-label="Checks">
+                {open.map(row)}
+                {passed > 0 &&
+                  (showPassed ? (
+                    runs.filter((c) => c.state === "passed").map(row)
+                  ) : (
+                    <li>
+                      <button
+                        type="button"
+                        className="agent-card-checks-more"
+                        onClick={() => setShowPassed(true)}
+                      >
+                        <span className="agent-card-dot agent-card-dot-passed" aria-hidden="true" />
+                        <span>{passed} passed</span>
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </div>,
+          document.body,
+        )}
+    </span>
+  );
+}
 
 /** The agent's sub-agents, as T3 Code's "Lineage": the ones running now with
  *  their age, and the finished ones behind a row that opens. This is the list
@@ -218,6 +348,9 @@ interface AgentDetailsCardProps {
   digest?: ipc.SessionDigest;
   /** TCP ports the agent's terminal is serving; each is a preview in Assets. */
   ports?: number[];
+  /** Stops whatever is listening on these ports. Absent where the process
+   *  behind a port is not known (an older core, another machine). */
+  onStopServer?: { ports: readonly number[]; stop: (port: number) => Promise<void> };
   /** The verdict from shared/agentLife for this agent's terminal, which is what
    *  decides whether a message is safe to send. The raw digest state is not
    *  compared here: it can be stale or unproven. */
@@ -236,9 +369,8 @@ interface AgentDetailsCardProps {
    *  branch and changes are read there, and a pull request is not looked up from
    *  this Mac's checkout. */
   machine?: { env: string; name: string };
-  /** Settle (put away) or un-settle this agent's tab. `settled` is its current state. */
-  settled?: boolean;
-  onSettle?: (settle: boolean) => void;
+  /** Settle: retire this agent's tab; it stays restorable under Agents. */
+  onSettle?: () => void;
   /** Type a message to this agent (its terminal), as the person would. Resolves
    *  with whether it was delivered and, when not, why. */
   onSendToAgent: (
@@ -248,18 +380,25 @@ interface AgentDetailsCardProps {
   onNotice?: (message: string) => void;
 }
 
+/** Ports are read every ten seconds or so; a stopped server's row can outlive
+ *  it by that long. After this, a row still there is a server again. */
+const STOP_SETTLE_MS = 15_000;
+
+/** The port of a server asset's `http://localhost:<port>` address. */
+const portOf = (path: string): number => Number(path.slice(path.lastIndexOf(":") + 1));
+
 export function AgentDetailsCard({
   agent,
   repo,
   cwd,
   digest,
   ports,
+  onStopServer,
   life,
   onOpenWorkspace,
   onDockChange,
   onOpenAsset,
   onSendToWorkspace,
-  settled,
   onSettle,
   onSendToAgent,
   onNotice,
@@ -267,7 +406,15 @@ export function AgentDetailsCard({
 }: AgentDetailsCardProps) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [docked, setDocked] = useState(readDocked);
-  const [tasksOpen, setTasksOpen] = useState(false);
+  const [tasksOpen, setTasksOpenState] = useState(readTasksOpen);
+  const setTasksOpen = (next: boolean) => {
+    setTasksOpenState(next);
+    try {
+      localStorage.setItem(TASKS_OPEN_KEY, next ? "1" : "0");
+    } catch {
+      /* A remembered state is a convenience. */
+    }
+  };
   const [assetsOpen, setAssetsOpen] = useState(false);
   const [hovered, setHovered] = useState<{
     asset: Asset;
@@ -284,6 +431,12 @@ export function AgentDetailsCard({
     null | "squash" | "merge" | "rebase" | "close"
   >(null);
   const [merging, setMerging] = useState(false);
+  /** A merge GitHub refused for its branch policy: offered as "merge when checks pass". */
+  const [autoOffer, setAutoOffer] = useState<null | {
+    repo: string;
+    number: number;
+    method: "squash" | "merge" | "rebase";
+  }>(null);
   const [mergeMenu, setMergeMenu] = useState(false);
   const [method, setMethod] = useState<"squash" | "merge" | "rebase">(
     readMergeMethod,
@@ -292,8 +445,41 @@ export function AgentDetailsCard({
   const [raising, setRaising] = useState<null | {
     title: string;
     busy: boolean;
+    /** "push": the branch already has a PR, so this only commits and pushes,
+     *  and the field is the commit message. */
+    mode: "raise" | "push";
   }>(null);
+  /** The brain's draft for the open form. Replies for a closed form are dropped. */
+  const draftRef = useRef<{
+    ctl: AbortController;
+    seed: string;
+    draft: BrainPrDraft | null;
+    /** Settles with the draft, or null; the submit waits on it briefly. */
+    pending: Promise<BrainPrDraft | null>;
+  } | null>(null);
+  const closeRaise = () => {
+    draftRef.current?.ctl.abort();
+    draftRef.current = null;
+    setRaising(null);
+  };
+  useEffect(
+    () => () => {
+      draftRef.current?.ctl.abort();
+      draftRef.current = null;
+    },
+    [cwd, repo, branch],
+  );
   const [prEpoch, setPrEpoch] = useState(0);
+  // The session raised a PR (or any edge changed): drop the minute cache so the
+  // new PR is in the list, and read again.
+  useEffect(() => {
+    const onChange = () => {
+      prCache.clear();
+      setPrEpoch((n) => n + 1);
+    };
+    window.addEventListener(PROVENANCE_WRITTEN_EVENT, onChange);
+    return () => window.removeEventListener(PROVENANCE_WRITTEN_EVENT, onChange);
+  }, []);
   /** Commits on this branch beyond its base, when nothing is left uncommitted. */
   const [ahead, setAhead] = useState(0);
 
@@ -363,13 +549,17 @@ export function AgentDetailsCard({
           /* No record: the branch's own PR still shows. */
         }
         if (stale) return;
-        const raised = new Set(
-          edges
-            .filter((e) => e.repo === repo || !e.repo)
-            .map((e) => e.pr_number),
-        );
+        // By URL: the ledger keys a repo by its main checkout and a card may
+        // sit in a worktree, and a bare number is ambiguous across repos.
+        const isRaised = (url: string) =>
+          edges.some(
+            (e) =>
+              e.pr_url === url ||
+              (prIdentity(e.pr_url) !== null &&
+                prIdentity(e.pr_url) === prIdentity(url)),
+          );
         const mine = prs
-          .filter((p) => p.branch === branch || raised.has(p.number))
+          .filter((p) => p.branch === branch || isRaised(p.url))
           .sort((a, b) => b.number - a.number);
         setAgentPrs(mine);
         setPr(prs.find((p) => p.branch === branch) ?? mine[0] ?? null);
@@ -423,6 +613,17 @@ export function AgentDetailsCard({
   // Servers the terminal is running get their own section with a link; the
   // Assets list keeps only the files the agent made.
   const servers = previewAssets(ports);
+  /** Servers asked to stop; the row goes when the port stops being reported. */
+  const [stopping, setStopping] = useState<string[]>([]);
+  // Gone from the list: forget it, so a server started there later can be stopped.
+  const portsKey = (ports ?? []).join(",");
+  useEffect(() => {
+    setStopping((cur) => {
+      const next = cur.filter((path) => (ports ?? []).includes(portOf(path)));
+      return next.length === cur.length ? cur : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portsKey]);
   const assets = collectAssets(digest?.files, cwd);
   const requests = useSyncExternalStore(subscribeRequestTasks, () =>
     requestTasksFor(digest?.session_id ?? ""),
@@ -471,13 +672,14 @@ export function AgentDetailsCard({
         : pr.mergeable === "CONFLICTING"
           ? "Resolve the conflicts first"
           : undefined;
-  const canRaise =
-    !pr &&
-    !!repo &&
-    !remoteMachine &&
-    !!branch &&
-    !DEFAULT_BRANCHES.has(branch) &&
-    ((changed ?? 0) > 0 || ahead > 0);
+  const onOwnBranch =
+    !!repo && !remoteMachine && !!branch && !DEFAULT_BRANCHES.has(branch);
+  const canRaise = !pr && onOwnBranch && ((changed ?? 0) > 0 || ahead > 0);
+  // Uncommitted work on a branch that already has its PR: commit and push
+  // adds it to that PR. Only when the PR is this branch's own — a PR shown
+  // because the session raised it from elsewhere is not where a push here goes.
+  const canPush =
+    !!pr && onOwnBranch && pr.branch === branch && pr.state.toUpperCase() === "OPEN" && (changed ?? 0) > 0;
 
   if (collapsed) {
     return (
@@ -580,11 +782,41 @@ export function AgentDetailsCard({
               >
                 Open ↗
               </button>
+              {onStopServer?.ports.includes(portOf(server.path)) && (
+                <button
+                  type="button"
+                  className="agent-card-server-stop"
+                  title={`Stop the server on ${server.name}`}
+                  aria-label={`Stop ${server.name}`}
+                  disabled={stopping.includes(server.path)}
+                  onClick={() => {
+                    setStopping((cur) => [...cur, server.path]);
+                    void onStopServer
+                      .stop(portOf(server.path))
+                      .then(() => {
+                        onNotice?.(`Stopped ${server.name}.`);
+                        // Still listed after a while (something restarted it):
+                        // let the person try again.
+                        setTimeout(
+                          () => setStopping((cur) => cur.filter((p) => p !== server.path)),
+                          STOP_SETTLE_MS,
+                        );
+                      })
+                      .catch((err) => {
+                        onNotice?.(`Could not stop ${server.name}: ${String(err instanceof Error ? err.message : err)}`);
+                        setStopping((cur) => cur.filter((p) => p !== server.path));
+                      });
+                  }}
+                >
+                  <span aria-hidden="true" />
+                </button>
+              )}
             </div>
           ))}
         </section>
       )}
 
+      <div className="agent-card-section">
       {branch && (
         <div className="agent-card-row" title={branch}>
           <GitBranchIcon size={14} />
@@ -637,44 +869,29 @@ export function AgentDetailsCard({
               ))}
             </ul>
           )}
-          <span className="agent-card-pr-num">#{pr.number}</span>
+          <button
+            type="button"
+            className="agent-card-pr-num agent-card-pr-link"
+            title={`Open #${pr.number} on GitHub`}
+            aria-label={`Open pull request #${pr.number} on GitHub`}
+            onClick={() => openInOsBrowser(pr.url)}
+          >
+            #{pr.number}
+          </button>
           <span className="agent-card-grow agent-card-ellipsis">
             {pr.title}
           </span>
-          <span
-            className={`agent-card-chip agent-card-chip-${prStatusLabel(pr).toLowerCase().replace(/\s+/g, "-")}`}
-          >
-            {prStatusLabel(pr)}
-          </span>
-          {(pr.checks === "FAIL" || pr.mergeable === "CONFLICTING") && (
-            <button
-              type="button"
-              className="agent-card-fix"
-              disabled={!canAct}
-              title={
-                actHint ??
-                (pr.checks === "FAIL"
-                  ? "Ask this agent to fix the failing checks"
-                  : "Ask this agent to resolve the conflicts")
-              }
-              onClick={() =>
-                void Promise.resolve(
-                  onSendToAgent(
-                    pr.checks === "FAIL"
-                      ? prFixChecksContext(pr)
-                      : prConflictContext(pr),
-                  ),
-                ).then((result) => {
-                  if (result && !result.delivered)
-                    onNotice?.(
-                      result.note || "The agent did not receive that.",
-                    );
-                })
-              }
-            >
-              {pr.checks === "FAIL" ? "Fix it" : "Resolve"}
-            </button>
-          )}
+          {pr.checks && <ChecksBadge pr={pr} />}
+          {/* The checks dot already says failing or running; the chip is
+              only for what it cannot say. */}
+          {prStatusLabel(pr) !== "Checks failing" &&
+            !(prStatusLabel(pr) === "Ready" && pr.checks === "PENDING") && (
+              <span
+                className={`agent-card-chip agent-card-chip-${prStatusLabel(pr).toLowerCase().replace(/\s+/g, "-")}`}
+              >
+                {prStatusLabel(pr)}
+              </span>
+            )}
         </div>
       )}
 
@@ -684,11 +901,52 @@ export function AgentDetailsCard({
           role="group"
           aria-label={`Merge pull request #${pr.number}`}
         >
-          {pending ? (
+          {autoOffer &&
+          autoOffer.repo === repo &&
+          autoOffer.number === pr.number &&
+          !pending ? (
+            <>
+              <span className="agent-card-grow agent-card-ellipsis">
+                Merge not allowed yet
+              </span>
+              <button
+                type="button"
+                className="agent-card-fix"
+                disabled={merging}
+                autoFocus
+                onClick={() => {
+                  const offer = autoOffer;
+                  setMerging(true);
+                  void ipc
+                    .ghPrAutoMerge(offer.repo, offer.number, offer.method, true)
+                    .then((message) => {
+                      prCache.delete(repo);
+                      setPrEpoch((n) => n + 1);
+                      onNotice?.(message);
+                    })
+                    .catch((err) => onNotice?.(String(err)))
+                    .finally(() => {
+                      setMerging(false);
+                      setAutoOffer(null);
+                    });
+                }}
+              >
+                {merging ? "Working…" : "Merge when checks pass"}
+              </button>
+              <button
+                type="button"
+                className="agent-card-fix agent-card-fix-quiet"
+                disabled={merging}
+                onClick={() => setAutoOffer(null)}
+              >
+                Dismiss
+              </button>
+            </>
+          ) : pending ? (
             <>
               <span className="agent-card-grow agent-card-ellipsis">
                 {pending === "close"
-                  ? "Close"
+                  ? "Close PR"
                   : pending === "squash"
                     ? "Squash and merge"
                     : pending === "merge"
@@ -728,7 +986,11 @@ export function AgentDetailsCard({
                           : `#${pr.number} ${method === "close" ? "closed" : "merged"}.`,
                       );
                     })
-                    .catch((err) => onNotice?.(String(err)))
+                    .catch((err) => {
+                      if (method !== "close" && offersAutoMerge(err))
+                        setAutoOffer({ repo, number: pr.number, method });
+                      onNotice?.(String(err));
+                    })
                     .finally(() => {
                       setMerging(false);
                       setPending(null);
@@ -744,6 +1006,45 @@ export function AgentDetailsCard({
                 onClick={() => setPending(null)}
               >
                 Cancel
+              </button>
+            </>
+          ) : pr.checks === "FAIL" || pr.mergeable === "CONFLICTING" ? (
+            <>
+              <button
+            type="button"
+            className="agent-card-fix"
+            disabled={!canAct}
+            title={
+              actHint ??
+              (pr.checks === "FAIL"
+                ? "Ask this agent to fix the failing checks"
+                : "Ask this agent to resolve the conflicts")
+            }
+            onClick={() =>
+              void Promise.resolve(
+                onSendToAgent(
+                  pr.checks === "FAIL"
+                    ? prFixChecksContext(pr)
+                    : prConflictContext(pr),
+                ),
+              ).then((result) => {
+                if (result && !result.delivered)
+                  onNotice?.(
+                    result.note || "The agent did not receive that.",
+                  );
+              })
+            }
+          >
+            {pr.checks === "FAIL" ? "Fix it" : "Resolve"}
+          </button>
+              <span className="agent-card-grow" />
+              <button
+                type="button"
+                className="agent-card-fix agent-card-fix-quiet agent-card-close"
+                onClick={() => setPending("close")}
+                title={`Close #${pr.number} without merging`}
+              >
+                Close PR
               </button>
             </>
           ) : (
@@ -805,25 +1106,26 @@ export function AgentDetailsCard({
                 type="button"
                 className="agent-card-fix agent-card-fix-quiet agent-card-close"
                 onClick={() => setPending("close")}
+                title={`Close #${pr.number} without merging`}
               >
-                Close
+                Close PR
               </button>
             </>
           )}
         </div>
       )}
 
-      {canRaise && (
+      {(canRaise || canPush) && (
         <div
           className="agent-card-row agent-card-merge"
           role="group"
-          aria-label="Raise a pull request"
+          aria-label={canPush ? "Commit and push" : "Raise a pull request"}
         >
           {raising ? (
             <>
               <input
                 className="agent-card-title-input agent-card-grow"
-                aria-label="Pull request title"
+                aria-label={raising.mode === "push" ? "Commit message" : "Pull request title"}
                 value={raising.title}
                 autoFocus
                 disabled={raising.busy}
@@ -831,7 +1133,7 @@ export function AgentDetailsCard({
                   setRaising({ ...raising, title: e.target.value })
                 }
                 onKeyDown={(e) => {
-                  if (e.key === "Escape") setRaising(null);
+                  if (e.key === "Escape") closeRaise();
                 }}
               />
               <button
@@ -839,14 +1141,46 @@ export function AgentDetailsCard({
                 className="agent-card-fix"
                 disabled={raising.busy || !raising.title.trim()}
                 onClick={() => {
-                  const title = raising.title.trim();
+                  const typed = raising.title.trim();
+                  const slot = draftRef.current;
                   setRaising({ ...raising, busy: true });
-                  void runCommitPushPr({
-                    repo: cwd || repo!,
-                    message: title,
-                    title,
-                    commit: (changed ?? 0) > 0,
-                  })
+                  // "Working…" waits briefly for a draft still being written,
+                  // then goes ahead with the offline text.
+                  const settled: Promise<BrainPrDraft | null> =
+                    !slot || slot.draft
+                      ? Promise.resolve(slot?.draft ?? null)
+                      : Promise.race([
+                          slot.pending,
+                          new Promise<null>((r) => setTimeout(r, DRAFT_WAIT_MS, null)),
+                        ]);
+                  void settled
+                    .then((draft) => {
+                      slot?.ctl.abort();
+                      // A title still at the branch-name seed takes the draft's;
+                      // one the person changed wins.
+                      const title =
+                        draft && typed === slot!.seed ? draft.title : typed;
+                      if (raising.mode === "push")
+                        return runCommitPushPr({
+                          repo: cwd || repo!,
+                          // Untouched (the seed, or the draft's own first
+                          // line): send the draft's whole message.
+                          message:
+                            draft && (typed === slot!.seed || typed === draft.message.split("\n")[0])
+                              ? draft.message
+                              : typed,
+                          commit: true,
+                          openPr: false,
+                        });
+                      return runCommitPushPr({
+                        repo: cwd || repo!,
+                        message:
+                          draft && title === draft.title ? draft.message : title,
+                        title,
+                        ...(draft ? { body: draft.body } : {}),
+                        commit: (changed ?? 0) > 0,
+                      });
+                    })
                     .then((result) => {
                       if (result.skipped.length > 0)
                         onNotice?.(
@@ -855,13 +1189,16 @@ export function AgentDetailsCard({
                       onNotice?.(
                         result.prUrl
                           ? `Opened ${result.prUrl}`
-                          : result.prExisted
-                            ? "A pull request already exists for this branch."
-                            : "Committed and pushed.",
+                          : raising.mode === "push" && pr
+                            ? `Committed and pushed to #${pr.number}.`
+                            : result.prExisted
+                              ? "A pull request already exists for this branch."
+                              : "Committed and pushed.",
                       );
+                      setChanged(result.skipped.length);
                       prCache.delete(repo!);
                       setPrEpoch((n) => n + 1);
-                      setRaising(null);
+                      closeRaise();
                     })
                     .catch((err) => {
                       onNotice?.(
@@ -871,13 +1208,13 @@ export function AgentDetailsCard({
                     });
                 }}
               >
-                {raising.busy ? "Working…" : "Raise PR"}
+                {raising.busy ? "Working…" : raising.mode === "push" ? "Commit & push" : "Raise PR"}
               </button>
               <button
                 type="button"
                 className="agent-card-fix agent-card-fix-quiet"
                 disabled={raising.busy}
-                onClick={() => setRaising(null)}
+                onClick={closeRaise}
               >
                 Cancel
               </button>
@@ -886,11 +1223,36 @@ export function AgentDetailsCard({
             <button
               type="button"
               className="agent-card-fix"
-              onClick={() =>
-                setRaising({ title: titleFromBranch(branch!), busy: false })
-              }
+              onClick={() => {
+                const mode = canPush ? ("push" as const) : ("raise" as const);
+                const seed =
+                  mode === "push" ? `Update ${titleFromBranch(branch!).toLowerCase()}` : titleFromBranch(branch!);
+                const ctl = new AbortController();
+                const slot = {
+                  ctl,
+                  seed,
+                  draft: null as BrainPrDraft | null,
+                  pending: undefined as unknown as Promise<BrainPrDraft | null>,
+                };
+                draftRef.current = slot;
+                setRaising({ title: seed, busy: false, mode });
+                // The form is usable now; the brain's title fills in if it
+                // answers before the person has typed their own.
+                slot.pending = draftPrWithBrain({
+                  repo: cwd || repo!,
+                  signal: ctl.signal,
+                }).then((d) => {
+                  if (!d || draftRef.current !== slot || ctl.signal.aborted)
+                    return null;
+                  slot.draft = d;
+                  // Shown as one line; the submit sends the draft's whole message.
+                  const line = mode === "push" ? d.message.split("\n")[0] : d.title;
+                  setRaising((r) => (r && r.title === seed ? { ...r, title: line } : r));
+                  return d;
+                });
+              }}
             >
-              {(changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
+              {canPush ? "Commit & push" : (changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
             </button>
           )}
         </div>
@@ -900,6 +1262,9 @@ export function AgentDetailsCard({
         <div className="agent-card-row">
           <span>Changes</span>
           <span className="agent-card-grow" />
+          {pr && (changed ?? 0) > 0 && (
+            <span className="agent-card-dim">{changed} uncommitted</span>
+          )}
           {pr ? (
             <span className="agent-card-diffstat">
               <span className="agent-card-add">+{pr.additions}</span>{" "}
@@ -910,7 +1275,9 @@ export function AgentDetailsCard({
           )}
         </div>
       )}
+      </div>
 
+      <div className="agent-card-section">
       {subagents.length > 0 ? (
         <Lineage subagents={subagents} />
       ) : (
@@ -922,18 +1289,32 @@ export function AgentDetailsCard({
           </div>
         )
       )}
+      </div>
 
+      <div className="agent-card-section">
       <button
         type="button"
         className="agent-card-row agent-card-btn"
         aria-expanded={tasksOpen}
-        onClick={() => setTasksOpen((v) => !v)}
+        onClick={() => setTasksOpen(!tasksOpen)}
         disabled={summary.total === 0}
       >
         <TasksIcon size={14} />
         <span>Tasks</span>
         <span className="agent-card-grow" />
-        <span className="agent-card-dim">{taskHeadline(summary)}</span>
+        {summary.total > 0 ? (
+          <span
+            className="agent-card-tasks-legend"
+            title={taskHeadline(summary)}
+            aria-label={taskHeadline(summary)}
+          >
+            <span><i className="agent-card-dot agent-card-dot-passed" />{summary.done}</span>
+            <span><i className="agent-card-dot agent-card-dot-running" />{summary.running}</span>
+            <span><i className="agent-card-dot agent-card-dot-pending" />{summary.pending}</span>
+          </span>
+        ) : (
+          <span className="agent-card-dim">{taskHeadline(summary)}</span>
+        )}
         {summary.total > 0 && (
           <span aria-hidden="true">{tasksOpen ? "▾" : "▸"}</span>
         )}
@@ -959,12 +1340,6 @@ export function AgentDetailsCard({
         </div>
       )}
 
-      {summary.current && !tasksOpen && (
-        <div className="agent-card-current" title={summary.current.text}>
-          {summary.current.text}
-        </div>
-      )}
-
       {tasksOpen && (
         <ul className="agent-card-tasks">
           {tasks.map((task, i) => (
@@ -973,11 +1348,15 @@ export function AgentDetailsCard({
               className={`agent-card-task agent-card-task-${task.status}`}
             >
               <span className="agent-card-task-mark" aria-hidden="true">
-                {task.status === "completed"
-                  ? "✓"
-                  : task.status === "running"
-                    ? "●"
-                    : "○"}
+                <span
+                  className={`agent-card-dot agent-card-dot-${
+                    task.status === "completed"
+                      ? "passed"
+                      : task.status === "running"
+                        ? "running"
+                        : "pending"
+                  }`}
+                />
               </span>
               <button
                 type="button"
@@ -1032,8 +1411,10 @@ export function AgentDetailsCard({
         </ul>
       )}
 
+      </div>
+
       {assets.length > 0 && (
-        <>
+        <div className="agent-card-section">
           <button
             type="button"
             className="agent-card-row agent-card-btn"
@@ -1100,19 +1481,21 @@ export function AgentDetailsCard({
           {hovered && assetsOpen && (
             <AssetPreview asset={hovered.asset} anchor={hovered.anchor} />
           )}
-        </>
+        </div>
       )}
+
+      <div className="agent-card-section">
 
       {onSettle && (
         <button
           type="button"
           className="agent-card-row agent-card-btn"
-          onClick={() => onSettle(!settled)}
+          onClick={() => onSettle()}
         >
-          <span>{settled ? "Unsettle" : "Settle"}</span>
+          <span className="agent-card-label-text">Settle</span>
           <span className="agent-card-grow" />
-          <span className="agent-card-dim">
-            {settled ? "Back to the strip" : "Put finished work away"}
+          <span className="agent-card-dim agent-card-ellipsis">
+            Close, keep under Agents
           </span>
         </button>
       )}
@@ -1123,9 +1506,9 @@ export function AgentDetailsCard({
           className="agent-card-row agent-card-btn"
           onClick={onSendToWorkspace}
         >
-          <span>To a workspace</span>
+          <span className="agent-card-label-text">To a workspace</span>
           <span className="agent-card-grow" />
-          <span className="agent-card-dim">Send this project</span>
+          <span className="agent-card-dim agent-card-ellipsis">Send this project</span>
           <span aria-hidden="true">›</span>
         </button>
       )}
@@ -1135,11 +1518,12 @@ export function AgentDetailsCard({
         className="agent-card-row agent-card-btn agent-card-workspace"
         onClick={onOpenWorkspace}
       >
-        <span>Workspace</span>
+        <span className="agent-card-label-text">Workspace</span>
         <span className="agent-card-grow" />
-        <span className="agent-card-dim">Files, diffs, commits</span>
+        <span className="agent-card-dim agent-card-ellipsis">Files, diffs, commits</span>
         <span aria-hidden="true">›</span>
       </button>
+      </div>
     </aside>
   );
 }

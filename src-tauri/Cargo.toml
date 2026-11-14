@@ -1,6 +1,6 @@
 [package]
 name = "canopy"
-version = "0.5.14"
+version = "0.5.15"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
@@ -11,7 +11,7 @@ rust-version.workspace = true
 default-run = "canopy"
 
 [workspace]
-members = ["../crates/canopy-core", "../crates/canopy-service"]
+members = ["../crates/canopy-core", "../crates/canopy-service", "../crates/canopy-pty-host"]
 
 [workspace.package]
 rust-version = "1.82"
@@ -56,6 +56,11 @@ dictation = [
 
 [dependencies]
 canopy-core = { path = "../crates/canopy-core" }
+# Settings → Remote access → Tailscale: talks to the INSTALLED Tailscale through
+# its CLI (version / status / whois only) and holds the tailnet allowlist.
+# No default features: the iroh transport is not used by the app yet, and
+# pulling it would add its whole dependency tree to the build and the notices.
+canopy-term-net = { path = "../crates/canopy-term-net", default-features = false }
 enigo = { version = "=0.6.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
@@ -101,6 +106,8 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 # PTY: cross-platform pseudo-terminal, the core of the terminal feature
 portable-pty = "0.9"
+# portable-pty's error type, which the proxy MasterPty (tailnet_client.rs) must name
+anyhow = "1"
 # File watching for external-change detection (diff-first workflow)
 notify = "8"
 # .gitignore semantics for the file walk behind quick-open, find-in-files and
@@ -199,6 +206,8 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Hosted terminals (on by default on Unix, a Settings toggle) (pty_hosted.rs); the host binary is its own crate.
+canopy-pty-host = { path = "../crates/canopy-pty-host" }
 
 # desk.rs screen capture. xcap on Linux pulls libpipewire (libspa-sys) which the
 # build and CI images do not carry, so Linux capture is not wired up and
@@ -274,6 +283,8 @@ codegen-units = 1
 
 [dev-dependencies]
 keepass = { version = "0.13", default-features = false, features = ["save_kdbx4"] }
+# The crate's scripted CliRunner and anonymised fixtures, for tailnet.rs tests only.
+canopy-term-net = { path = "../crates/canopy-term-net", default-features = false, features = ["test-support"] }
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach
 # against a mock runtime. Dev-only, so the release build is unaffected.
 tauri = { version = "2.11.3", features = ["test", "unstable"] }

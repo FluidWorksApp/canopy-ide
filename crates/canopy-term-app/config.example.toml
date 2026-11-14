@@ -1,0 +1,56 @@
+# canopy-term-app config file.
+#
+# Where it lives (the first that applies):
+#   1. $CANOPY_TERM_CONFIG (the file must exist)
+#   2. $XDG_CONFIG_HOME/canopy-term/config.toml, else ~/.config/canopy-term/config.toml
+#      (Linux and macOS)
+#   3. %APPDATA%\canopy-term\config.toml (Windows)
+# With no file, the built-in defaults below apply.
+#
+# Command-line flags override this file (--font-family, --font-px, --line-height,
+# --padding, --theme, --no-blink). `canopy-term-app --print-config` prints what the
+# file and the flags add up to. A wrong value is an error that names the key, and
+# the program exits with status 2 instead of starting.
+#
+# The values below are the defaults; lines starting with "#~" are samples to
+# uncomment.
+
+# An installed font family, by name. Use a monospaced one: the cell width comes
+# from it. If it is not installed the bundled JetBrains Mono is used and one
+# warning line is printed.
+# Default: unset (the bundled JetBrains Mono).
+#~ font_family = "Fira Code"
+
+# Font size in logical pixels (4 to 200).  Zooming in the window starts from here.
+font_px = 14
+
+# A multiplier on the line height (0.5 to 3). 1 is the font's own line; 1.2 adds a
+# little air between rows. The text stays centred in the row.
+line_height = 1
+
+# Space between the window edge and the text, in logical pixels (0 to 200).
+padding = 8
+
+# Whether the cursor blinks.
+blink = true
+
+# The colours: "dark" (the default), "light", or a table of colours (below).
+theme = "dark"
+
+# A table of colours instead of a name. Replace the line `theme = "dark"` above
+# with this table (a key can be set only once). Every colour is "#rrggbb"; any
+# you leave out comes from `base` ("dark" unless you say "light"). `ansi` is the 16
+# terminal colours: black, red, green, yellow, blue, magenta, cyan, white, then the
+# same eight bright. Programs that ask the terminal for its colours (OSC 4, 10, 11)
+# are answered with these.
+#
+#~ [theme]
+#~ base = "dark"
+#~ foreground = "#e5e5e5"
+#~ background = "#1e1e1e"
+#~ cursor = "#ffffff"
+#~ selection = "#264f78"
+#~ ansi = [
+#~   "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
+#~   "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
+#~ ]

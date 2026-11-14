@@ -42,8 +42,13 @@ The tag workflow creates a **draft** GitHub Release. Before publishing:
 
 1. Confirm all platform jobs completed.
 2. Confirm updater signatures and `latest.json` exist.
-3. Confirm every stable installer alias exists.
-4. Install and smoke-test representative artifacts.
+3. Confirm every stable installer alias exists, and the four standalone
+   Canopy Terminal assets (`Canopy-Terminal-macos-arm64.zip` and
+   `Canopy-Terminal-linux-x86_64.tar.gz`, each with a `.sha256`).
+4. Install and smoke-test representative artifacts, and do the standalone
+   Canopy Terminal Gatekeeper test on a clean Mac (`spctl --assess --type
+   execute --verbose=4 "Canopy Terminal.app"` must say `Notarized Developer ID`;
+   steps in `docs/release-process.md`).
 5. Review release notes, limitations, and version metadata.
 6. Publish deliberately. Publishing activates latest-download URLs and updater
    rollout.

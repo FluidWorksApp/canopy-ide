@@ -161,4 +161,10 @@ describe("LaunchPalette", () => {
     await userEvent.keyboard("zzzzz");
     expect(screen.getByText("No match")).toBeInTheDocument();
   });
+
+  it("has exactly one shell row and no separate-window row", () => {
+    open();
+    expect(screen.getAllByText("Shell")).toHaveLength(1);
+    expect(screen.queryByText(/Native Terminal/)).not.toBeInTheDocument();
+  });
 });

@@ -9,7 +9,9 @@
 // <statusDir>/<updateId>.json:
 //   {state:'running', step:'download'|'gateway'|'gateway-ready'|'image'|'rollback', updatedAt}
 //   {state:'done', code, host, image, detail, updatedAt}
-// code: updated | current | rolled-back | failed | invalid | refresh-required.
+// code: updated | current | deferred | rolled-back | failed | invalid | refresh-required.
+// `deferred`: the container image was not swapped because sessions are still
+// running; it moves to the release when the workspace next stops and resumes.
 // <statusDir>/current holds the updateId while it runs. Every run ends with a
 // `done` status, whatever fails.
 import * as nodeFs from 'node:fs/promises';

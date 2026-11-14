@@ -106,3 +106,38 @@ export function previewAssets(ports: readonly number[] | undefined, max = 6): As
 }
 
 export const isPreviewUrl = (path: string): boolean => /^https?:\/\//.test(path);
+
+/** How the card stops a server in this terminal: the ports whose listening
+ *  process is known, and a stop that ends exactly those processes. Undefined
+ *  when no process reports a port (an older core, or a terminal on another
+ *  machine, where a local kill would hit the wrong computer). */
+export function stopServerFor(
+  stat:
+    | {
+        id: number;
+        procs: readonly { pid: number; parent?: number | null; ports?: readonly number[] }[];
+        agent_hint?: unknown;
+      }
+    | undefined,
+  kill: (pid: number) => Promise<void>,
+): { ports: number[]; stop: (port: number) => Promise<void> } | undefined {
+  const procs = stat?.procs ?? [];
+  const pids = new Set(procs.map((p) => p.pid));
+  // Never the terminal's own process, and in an agent's terminal never the
+  // processes started straight from it: that is the agent CLI, which may hold
+  // a port of its own (a sign-in callback, an editor bridge). A server the
+  // agent runs sits below it.
+  const roots = new Set(procs.filter((p) => p.parent == null || !pids.has(p.parent)).map((p) => p.pid));
+  const spared = (p: { pid: number; parent?: number | null }) =>
+    roots.has(p.pid) || (!!stat?.agent_hint && p.parent != null && roots.has(p.parent));
+  const owners = procs.filter((p) => (p.ports?.length ?? 0) > 0 && !spared(p));
+  if (!stat || owners.length === 0) return undefined;
+  return {
+    ports: [...new Set(owners.flatMap((p) => [...(p.ports ?? [])]))],
+    stop: async (port) => {
+      const pids = owners.filter((p) => p.ports!.includes(port)).map((p) => p.pid);
+      if (pids.length === 0) throw new Error("nothing is listening there now");
+      await Promise.all(pids.map((pid) => kill(pid)));
+    },
+  };
+}

@@ -23,6 +23,8 @@ interface LaunchPaletteProps {
   >;
   /** Where the launch lands — shown in the footer so it isn't a guess. */
   targetLabel?: string;
+  /** The one shell row. Which terminal engine draws it is a setting, not a
+   *  second row. */
   onShell: () => void;
   onLaunchCli: (cli: AgentCli, where: "workspace" | "current") => void;
   /** Overrides where ↵ puts an agent for this opening — ⌘⇧N passes
@@ -136,7 +138,7 @@ export function LaunchPalette({
                 onClick={() => commit(r)}
               >
                 <span className="launch-icon">
-                  {r.kind === "shell" ? (
+                  {r.kind !== "cli" ? (
                     <TerminalIcon size={15} />
                   ) : (
                     <AgentIcon id={r.cli.id} size={15} />

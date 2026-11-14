@@ -1,7 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../ipc", () => ({
+  // provenance.ts subscribes to the change channel at module load.
+  onStoreChange: vi.fn(() => new Promise<never>(() => {})),
   fsReadFile: vi.fn(async (path: string) =>
     new TextEncoder().encode(
       path.endsWith(".md") ? "# Risk report\nThe store policy changed." : "x",
@@ -14,6 +16,7 @@ vi.mock("../ipc", () => ({
     entries: [{}, {}, {}],
   })),
   ghPrMerge: vi.fn(async () => ({ message: "Merged #21", pending: false })),
+  ghPrAutoMerge: vi.fn(async () => "#21 will merge automatically once its checks and reviews pass"),
   ghPrClose: vi.fn(async () => "closed"),
   ghPrList: vi.fn(async () => [
     {
@@ -29,6 +32,13 @@ vi.mock("../ipc", () => ({
       deletions: 3,
     },
   ]),
+}));
+vi.mock("../prDraftBrain", () => ({
+  draftPrWithBrain: vi.fn(async () => null),
+}));
+vi.mock("../links", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../links")>()),
+  openInOsBrowser: vi.fn(),
 }));
 vi.mock("../commitPushPrIpc", () => ({
   runCommitPushPr: vi.fn(async () => ({
@@ -97,6 +107,7 @@ vi.mock("../remoteExecution/workspace", () => ({
 import { AgentDetailsCard, prStatusLabel } from "./AgentDetailsCard";
 import { liveEnvironments } from "../environments/live";
 import * as ipc from "../ipc";
+import * as links from "../links";
 
 const idle = { state: "idle" } as never;
 const digest = {
@@ -134,6 +145,12 @@ function setup(extra: Partial<Parameters<typeof AgentDetailsCard>[0]> = {}) {
 }
 
 beforeEach(() => localStorage.clear());
+// A call left over from an earlier test would satisfy the next test's "was
+// called" wait before its own call lands.
+beforeEach(async () => {
+  const { runCommitPushPr } = await import("../commitPushPrIpc");
+  vi.mocked(runCommitPushPr).mockClear();
+});
 
 describe("AgentDetailsCard on another machine", () => {
   it("reads branch and changes from that machine and does not look up a PR from this Mac", async () => {
@@ -221,8 +238,9 @@ describe("AgentDetailsCard", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("+40")).toBeInTheDocument();
     expect(screen.getByText("Lineage · 1 running")).toBeInTheDocument();
-    expect(screen.getByText("1 done · 2 pending")).toBeInTheDocument();
-    expect(screen.getByText("Wire it up")).toBeInTheDocument(); // current step while collapsed
+    expect(screen.getByLabelText("1 done · 1 in progress · 1 not started")).toBeInTheDocument();
+    // The current step is not repeated under the bar; it shows when the list opens.
+    expect(screen.queryByText("Wire it up")).toBeNull();
   });
 
   it("expands the task list and sends focus and complete requests to the agent", async () => {
@@ -356,6 +374,63 @@ describe("AgentDetailsCard", () => {
     });
   });
 
+  it("stops a server whose process is known, and offers no stop otherwise", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const { onNotice } = setup({
+      ports: [5173, 8080],
+      onStopServer: { ports: [5173], stop },
+      digest: { session_id: "s" },
+    }) as { onNotice?: ReturnType<typeof vi.fn> };
+    expect(screen.queryByRole("button", { name: "Stop localhost:8080" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Stop localhost:5173" }));
+    expect(stop).toHaveBeenCalledWith(5173);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Stop localhost:5173" })).toBeDisabled(),
+    );
+    void onNotice;
+  });
+
+  it("offers Commit & push for uncommitted work on a branch that has its PR", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "fix/hub-prefetch-scrcpy",
+      entries: [{}, {}, {}],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 77, title: "Hub prefetch", branch: "fix/hub-prefetch-scrcpy", base: "main", state: "OPEN", draft: false, additions: 4, deletions: 1, checks: "", url: "https://example.test/pr/77" },
+    ] as never);
+    setup({ repo: "/push", cwd: "/push" });
+    fireEvent.click(await screen.findByRole("button", { name: "Commit & push" }));
+    expect(screen.queryByRole("button", { name: /raise PR/i })).toBeNull();
+    expect(screen.getByText("3 uncommitted")).toBeTruthy();
+    const input = screen.getByLabelText("Commit message") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Fix the retry" } });
+    fireEvent.click(screen.getByRole("button", { name: "Commit & push" }));
+    const { runCommitPushPr } = await import("../commitPushPrIpc");
+    await waitFor(() =>
+      expect(runCommitPushPr).toHaveBeenCalledWith({
+        repo: "/push",
+        message: "Fix the retry",
+        commit: true,
+        openPr: false,
+      }),
+    );
+  });
+
+  it("does not offer Commit & push into a PR from another branch", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "fix/other-work",
+      entries: [{}],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 78, title: "Elsewhere", branch: "fix/somewhere-else", base: "main", state: "OPEN", draft: false, additions: 1, deletions: 0, checks: "", url: "https://example.test/pr/78" },
+    ] as never);
+    setup({ repo: "/other", cwd: "/other" });
+    await screen.findByRole("button", { name: "Commit & raise PR" });
+    expect(screen.queryByRole("button", { name: "Commit & push" })).toBeNull();
+  });
+
   it("shows task progress as a bar", () => {
     setup({
       digest: {
@@ -379,9 +454,9 @@ describe("AgentDetailsCard", () => {
     expect(onSendToWorkspace).toHaveBeenCalledOnce();
   });
 
-  it("settles and unsettles the agent from the card", () => {
+  it("settles the agent from the card", () => {
     const onSettle = vi.fn();
-    const { rerender } = render(
+    render(
       <AgentDetailsCard
         agent="claude"
         repo="/r"
@@ -394,22 +469,8 @@ describe("AgentDetailsCard", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /^Settle/ }));
-    expect(onSettle).toHaveBeenLastCalledWith(true);
-    rerender(
-      <AgentDetailsCard
-        agent="claude"
-        repo="/r"
-        cwd="/r"
-        digest={digest}
-        life={idle}
-        onOpenWorkspace={() => {}}
-        onSendToAgent={() => {}}
-        onSettle={onSettle}
-        settled
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: /^Unsettle/ }));
-    expect(onSettle).toHaveBeenLastCalledWith(false);
+    expect(onSettle).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: /^Unsettle/ })).toBeNull();
   });
 
   it("has no send row when the callback is absent", () => {
@@ -503,6 +564,50 @@ describe("failing PR", () => {
   });
 });
 
+describe("checks still running", () => {
+  it("shows checks only on hover, each with its state, failures first", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 5,
+        title: "Ship it",
+        url: "u",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PENDING",
+        checks_summary: "3/7 checks passed",
+        check_runs: [
+          { name: "Lint", state: "passed" },
+          { name: "Frontend", state: "running" },
+          { name: "Secret scan", state: "queued" },
+          { name: "Rust", state: "failed" },
+        ],
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/pending-checks", cwd: "/pending-checks" });
+    const badge = await screen.findByRole("button", { name: "1 of 4 checks passed" });
+    expect(badge.textContent).toBe("1/4");
+    expect(screen.queryByText("Frontend")).toBeNull();
+    fireEvent.mouseEnter(badge.parentElement!);
+    const list = () =>
+      within(screen.getByRole("list", { name: "Checks" }))
+        .getAllByRole("listitem")
+        .map((li) => li.textContent);
+    expect(list()).toEqual(["RustFailed", "FrontendRunning", "Secret scanQueued", "1 passed"]);
+    fireEvent.click(screen.getByRole("button", { name: "1 passed" }));
+    expect(list()).toEqual(["RustFailed", "FrontendRunning", "Secret scanQueued", "LintPassed"]);
+    vi.useFakeTimers();
+    fireEvent.mouseLeave(badge.parentElement!);
+    act(() => vi.advanceTimersByTime(200));
+    vi.useRealTimers();
+    expect(screen.queryByText("Frontend")).toBeNull();
+  });
+});
+
 describe("PRs raised by the agent", () => {
   it("lists every one on hover", async () => {
     vi.mocked(ipc.ghPrList).mockResolvedValue([
@@ -557,12 +662,117 @@ describe("PRs raised by the agent", () => {
   });
 });
 
+describe("a PR from another branch", () => {
+  it("shows the PR the session raised, and no Commit & raise PR", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 571,
+        title: "Release: builder",
+        url: "https://github.com/o/r/pull/571",
+        branch: "release/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PENDING",
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    (ipc as unknown as { provenanceForSession: unknown }).provenanceForSession =
+      vi.fn(async () => [
+        {
+          repo: "/main-checkout",
+          pr_number: 571,
+          pr_url: "https://api.github.com/repos/o/r/pulls/571",
+          branch: "release/x",
+          session_id: "s",
+        },
+      ]);
+    // Uncommitted work, so the raise button would show if nothing owned a PR.
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "feat/x",
+      entries: [{ status: "M", path: "a.ts" }],
+    } as never);
+    setup({ repo: "/wt-other", cwd: "/wt-other" });
+    expect(await screen.findByText("#571")).toBeInTheDocument();
+    expect(screen.queryByText(/Commit & raise PR/)).toBeNull();
+    cleanup();
+    // Control: the same session with no edge does offer it.
+    (ipc as unknown as { provenanceForSession: unknown }).provenanceForSession =
+      vi.fn(async () => []);
+    setup({ repo: "/wt-control", cwd: "/wt-control" });
+    expect(await screen.findByText(/Commit & raise PR/)).toBeInTheDocument();
+    delete (ipc as unknown as { provenanceForSession?: unknown })
+      .provenanceForSession;
+  });
+});
+
+describe("the task list", () => {
+  it("shows all three states in words, on one line", () => {
+    setup();
+    const legend = screen.getByLabelText("1 done · 1 in progress · 1 not started");
+    expect(legend.getAttribute("title")).toBe("1 done · 1 in progress · 1 not started");
+    expect(legend.textContent).toBe("111");
+  });
+  it("stays open when the card remounts", () => {
+    try {
+      localStorage.removeItem("canopy:agentCard:tasksOpen");
+    } catch {
+      /* no storage */
+    }
+    const first = setup();
+    fireEvent.click(screen.getByRole("button", { name: /Tasks/ }));
+    expect(screen.getAllByRole("button", { name: /Focus on/ })[0]).toBeInTheDocument();
+    cleanup();
+    setup();
+    expect(screen.getAllByRole("button", { name: /Focus on/ })[0]).toBeInTheDocument();
+    void first;
+    localStorage.removeItem("canopy:agentCard:tasksOpen");
+  });
+});
+
 describe("lineage rows", () => {
   it("open to show what the sub-agent returned", () => {
     setup();
     fireEvent.click(screen.getByRole("button", { name: /Previous agents/ }));
     fireEvent.click(screen.getByRole("button", { name: /planner/ }));
     expect(screen.getByText("No text was returned.")).toBeInTheDocument();
+  });
+});
+
+describe("the PR number", () => {
+  it("opens the pull request on GitHub", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "feat/x",
+      entries: [],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 779,
+        title: "All workspaces",
+        url: "https://github.com/acme/app/pull/779",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PASS",
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/linkable", cwd: "/linkable" });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open pull request #779 on GitHub",
+      }),
+    );
+    expect(links.openInOsBrowser).toHaveBeenCalledWith(
+      "https://github.com/acme/app/pull/779",
+    );
   });
 });
 
@@ -599,7 +809,7 @@ describe("merging from the card", () => {
     );
     await waitFor(() => expect(screen.getByText("Merged")).toBeInTheDocument());
   });
-  it("disables merging while checks fail", async () => {
+  it("offers Fix it instead of merging while checks fail", async () => {
     vi.mocked(ipc.gitStatus).mockResolvedValue({
       is_repo: true,
       branch: "feat/x",
@@ -621,9 +831,75 @@ describe("merging from the card", () => {
       },
     ] as never);
     setup({ repo: "/red", cwd: "/red" });
-    expect(
-      await screen.findByRole("button", { name: "Squash & merge" }),
-    ).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Fix it" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Squash & merge" })).toBeNull();
+  });
+
+  describe("when GitHub's branch policy refuses the merge", () => {
+    const policy =
+      "Pull request is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.";
+    const open = async (repo: string) => {
+      vi.mocked(ipc.ghPrAutoMerge).mockClear();
+      vi.mocked(ipc.gitStatus).mockResolvedValue({
+        is_repo: true,
+        branch: "feat/x",
+        entries: [],
+      } as never);
+      vi.mocked(ipc.ghPrList).mockResolvedValue([
+        {
+          number: 21,
+          title: "Ready",
+          url: "u",
+          branch: "feat/x",
+          base: "main",
+          state: "OPEN",
+          draft: false,
+          checks: "PASS",
+          mergeable: "MERGEABLE",
+          additions: 1,
+          deletions: 0,
+        },
+      ] as never);
+      setup({ repo, cwd: repo });
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Squash & merge" }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    };
+
+    it("offers Merge when checks pass, and asks GitHub for auto-merge only when clicked", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error(policy));
+      await open("/policy");
+      const offer = await screen.findByRole("button", {
+        name: "Merge when checks pass",
+      });
+      expect(ipc.ghPrAutoMerge).not.toHaveBeenCalled();
+      fireEvent.click(offer);
+      await waitFor(() =>
+        expect(ipc.ghPrAutoMerge).toHaveBeenCalledWith("/policy", 21, "squash", true),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull(),
+      );
+      expect(screen.queryByText("Merged")).toBeNull();
+    });
+
+    it("Dismiss removes the offer without calling GitHub", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error(policy));
+      await open("/policy-dismiss");
+      await screen.findByRole("button", { name: "Merge when checks pass" });
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull();
+      expect(ipc.ghPrAutoMerge).not.toHaveBeenCalled();
+    });
+
+    it("offers nothing for other merge failures", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error("merge conflicts"));
+      await open("/conflicts");
+      // The failed merge is over: the merge button is back, with no offer.
+      await screen.findByRole("button", { name: "Squash & merge" });
+      expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull();
+    });
   });
 });
 
@@ -657,6 +933,116 @@ describe("raising a PR from the card", () => {
       ),
     );
     void onNotice;
+  });
+  // Each test waits up to 5 s inside waitFor, so the default 5 s test timeout
+  // fired first on a loaded runner (it did on #859's run).
+  describe("brain-drafted text", { timeout: 30_000 }, () => {
+    const draft = {
+      title: "Hub prefetch keeps scrcpy alive",
+      message: "Hub prefetch keeps scrcpy alive\n\nWhy it matters.",
+      body: "## Summary\nDrafted.",
+    };
+    const openForm = async () => {
+      vi.mocked(ipc.gitStatus).mockResolvedValue({
+        is_repo: true,
+        branch: "fix/hub-prefetch-scrcpy",
+        entries: [{}, {}],
+      } as never);
+      vi.mocked(ipc.ghPrList).mockResolvedValue([] as never);
+      setup({ repo: "/raise", cwd: "/raise" });
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Commit & raise PR" }),
+      );
+      return screen.getByLabelText("Pull request title") as HTMLInputElement;
+    };
+    const submitted = async () => {
+      const { runCommitPushPr } = await import("../commitPushPrIpc");
+      // The default 1 s wait is too short for a loaded CI runner: the click goes
+      // through a dynamic import and a promise race before the IPC is called.
+      await waitFor(() => expect(runCommitPushPr).toHaveBeenCalled(), { timeout: 5000 });
+      return vi.mocked(runCommitPushPr).mock.calls.at(-1)![0];
+    };
+
+    it("fills the title and sends the drafted commit message and body", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      vi.mocked(draftPrWithBrain).mockResolvedValueOnce(draft);
+      const input = await openForm();
+      await waitFor(() => expect(input.value).toBe(draft.title), { timeout: 5000 });
+      fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+      expect(await submitted()).toMatchObject({
+        title: draft.title,
+        message: draft.message,
+        body: draft.body,
+      });
+    });
+
+    it("keeps a title the person typed before the draft arrived", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      let resolve!: (d: typeof draft) => void;
+      vi.mocked(draftPrWithBrain).mockReturnValueOnce(
+        new Promise((r) => (resolve = r)),
+      );
+      const input = await openForm();
+      fireEvent.change(input, { target: { value: "My own title" } });
+      resolve(draft);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(input.value).toBe("My own title");
+      fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+      const call = await submitted();
+      expect(call).toMatchObject({ title: "My own title", message: "My own title" });
+    });
+
+    it("waits for a draft still being written, then uses it", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      let resolve!: (d: typeof draft) => void;
+      vi.mocked(draftPrWithBrain).mockReturnValueOnce(
+        new Promise((r) => (resolve = r)),
+      );
+      await openForm();
+      const { runCommitPushPr } = await import("../commitPushPrIpc");
+      vi.mocked(runCommitPushPr).mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+      expect(await screen.findByText("Working…", {}, { timeout: 5000 })).toBeInTheDocument();
+      expect(runCommitPushPr).not.toHaveBeenCalled();
+      resolve(draft);
+      expect(await submitted()).toMatchObject({
+        title: draft.title,
+        message: draft.message,
+        body: draft.body,
+      });
+    });
+
+    it("raises with the offline text when the draft takes too long", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      vi.mocked(draftPrWithBrain).mockReturnValueOnce(new Promise(() => {}));
+      await openForm();
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+        await vi.advanceTimersByTimeAsync(8000);
+      } finally {
+        vi.useRealTimers();
+      }
+      const call = await submitted();
+      expect(call).toMatchObject({
+        title: "Hub prefetch scrcpy",
+        message: "Hub prefetch scrcpy",
+      });
+      expect(call).not.toHaveProperty("body");
+    });
+
+    it("stops the draft when the form is cancelled", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      let signal: AbortSignal | undefined;
+      vi.mocked(draftPrWithBrain).mockImplementationOnce(async (opts) => {
+        signal = opts.signal;
+        return new Promise(() => {});
+      });
+      await openForm();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(signal?.aborted).toBe(true);
+    });
   });
   it("offers plain Raise PR when everything is committed but the branch is ahead", async () => {
     vi.mocked(ipc.gitStatus).mockResolvedValue({

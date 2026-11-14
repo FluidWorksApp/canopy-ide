@@ -1,0 +1,29 @@
+[package]
+name = "perf-compare"
+version = "0.0.0"
+description = "Measurement only: canopy-term-core Screen::advance on the same stream and read sizes as the libghostty-vt spike bench"
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Its own workspace root with its own lock, outside the `crates/canopy-term-*`
+# glob that the `Terminal crates` job builds.
+[workspace]
+
+[dependencies]
+canopy-term-core = { path = "../canopy-term-core" }
+# Same pin as canopy-term-core; only used by `gscreen bare` (a callgrind target
+# for the bare vt_write loop).
+libghostty-vt = "=0.2.2"
+
+[[bin]]
+name = "ours"
+path = "src/main.rs"
+
+[[bin]]
+name = "gscreen"
+path = "src/gscreen.rs"
+
+# Same as the spike's `current` and `ghostty` bins: plain release.
+[profile.release]
+opt-level = 3

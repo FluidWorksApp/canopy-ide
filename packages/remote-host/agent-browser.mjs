@@ -1,6 +1,6 @@
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
-import {join} from 'node:path';
+import {isAbsolute,join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {BrowserContexts} from './browser-contexts.mjs';
 import {BrowserControlInterrupted,SessionControl} from './session-control.mjs';
@@ -39,6 +39,15 @@ export const SCREENCAST_MOTION_WINDOW_MS=300;
 export const SCREENCAST_MOTION_QUALITY=50;
 export const VIEWER_OUTPUT_LIMIT=64;
 const NAVIGATION_TIMEOUT_MS=15_000;
+// T3 d9805b2c: how long a closing page may spend in its unload handlers.
+export const PAGE_CLOSE_GRACE_MS=5_000;
+// The desktop preview's control (autoControl): a person's input takes the page
+// and gives it back this long after their last input, so the person never has
+// to press "Take control" and the agent is never locked out of a page someone
+// is only watching. The workspace overlay keeps T3's explicit handoff.
+export const AUTO_RELEASE_MS=1_500;
+// Viewer input that takes the page under autoControl. Hovers and resizes do not.
+const TAKING_INPUT=new Set(['mouse','wheel','key','text','navigate','history','reload','fileChooser']);
 const VIEWER_NAVIGATION_OPTIONS={waitUntil:'commit',timeout:NAVIGATION_TIMEOUT_MS};
 const EDITABLE_AT_POINT_SCRIPT=`(x, y) => {
   let element = document.elementFromPoint(x, y);
@@ -61,14 +70,15 @@ const CLIPBOARD_WORLD='t3-preview-clipboard';
 // Chromium shares its clipboard across contexts; capture real copy/cut keys in a page-inaccessible world instead.
 const CLIPBOARD_SCRIPT=`(() => {
   let keying = false;
-  let copied = "";
+  // One entry per copy or cut key, oldest first, so a later key cannot overwrite an unread copy.
+  const copies = [];
   // The same Ctrl or Cmd + C or X that editingCommand sends as copy or cut.
   addEventListener("keydown", (event) => {
     if (!event.isTrusted || event.altKey || event.ctrlKey === event.metaKey) return;
     const key = event.key.toLowerCase();
     if (key !== "c" && key !== "x") return;
     keying = true;
-    copied = "";
+    copies.push({ at: Date.now(), text: "" });
     setTimeout(() => { keying = false; });
   }, true);
   const selection = () => {
@@ -79,7 +89,8 @@ const CLIPBOARD_SCRIPT=`(() => {
     return String(document.getSelection() ?? "");
   };
   const record = (text) => {
-    copied = String(text ?? "").slice(0, ${CLIPBOARD_TEXT_LIMIT});
+    const copy = copies.at(-1);
+    if (copy) copy.text = String(text ?? "").slice(0, ${CLIPBOARD_TEXT_LIMIT});
   };
   // Capturing at window runs before page handlers can stop the event, and
   // before cut removes the selection.
@@ -94,12 +105,15 @@ const CLIPBOARD_SCRIPT=`(() => {
     addEventListener(type, snapshot, true);
     addEventListener(type, replace);
   }
-  globalThis.takeCopy = () => {
-    const text = copied;
-    copied = "";
-    return text;
+  // A key's copy was keyed between its dispatch and acknowledgement; older copies are stale.
+  globalThis.takeCopy = (since, until) => {
+    while (copies.length > 0 && copies[0].at < since) copies.shift();
+    return copies[0] && copies[0].at <= until ? copies.shift().text : "";
   };
 })();`;
+// T3 f796df8f's ServerBrowserPage.parseNetError, without the numeric code table.
+// Names can hold digits, as in ERR_HTTP2_PROTOCOL_ERROR.
+export const parseNetError=errorText=>({description:/ERR_[A-Z\d_]+/.exec(errorText)?.[0]??errorText});
 const failure=(status,message)=>Object.assign(Error(message),{status});
 const constVoid=()=>undefined;
 const sleepUntil=deadline=>new Promise(resolve=>setTimeout(resolve,Math.max(0,deadline-Date.now())));
@@ -158,17 +172,28 @@ class ViewerOutput{
 }
 
 export class AgentBrowser{
- constructor({home='/home/agent',timeoutMs=30_000,launch,picker=new URL('./browser-assets/preview_picker.js',import.meta.url),executablePath=process.env.CANOPY_CHROMIUM_EXECUTABLE??'/usr/bin/chromium'}={}){
-  Object.assign(this,{home,timeoutMs,picker,executablePath});
+ /**
+  * The workspace passes nothing and gets its one page in its own profile.
+  * The desktop preview host (preview-host.mjs) runs one AgentBrowser per
+  * preview tab on a shared `contexts`, so tabs share a profile like T3's tabs
+  * do: such a browser never closes the context, adopts a popup's page through
+  * `adopt`, and reports its end through `onClosed`.
+  */
+ constructor({home='/home/agent',timeoutMs=30_000,launch,picker=new URL('./browser-assets/preview_picker.js',import.meta.url),executablePath=process.env.CANOPY_CHROMIUM_EXECUTABLE??'/usr/bin/chromium',contexts,profile=AGENT_PROFILE,adopt,onPopup,onClosed,prepareTab,label='workspace browser',autoControl=false,autoReleaseMs=AUTO_RELEASE_MS,fileChooser=false}={}){
+  Object.assign(this,{home,timeoutMs,picker,executablePath,profile,adopt,onPopup,onClosed,prepareTab,label,autoControl,autoReleaseMs,fileChooser});
   this.launch=launch??(async profileDirectory=>{const {chromium}=createRequire(import.meta.url)('playwright-core');return chromium.launchPersistentContext(profileDirectory,{executablePath:this.executablePath,headless:true,args:['--no-sandbox','--disable-dev-shm-usage'],viewport:DEFAULT_VIEWPORT});});
+  this.ownsContexts=!contexts;
   // The Chromium profile lock (browser-contexts.mjs): one persistent context per profile directory.
-  this.contexts=new BrowserContexts({profilesDir:join(home,'.canopy','browser-profiles'),launch:directory=>this.launch(directory),onContextClose:context=>{if(this.current?.context===context)this.dropTab(this.current);}});
+  this.contexts=contexts??new BrowserContexts({profilesDir:join(home,'.canopy','browser-profiles'),launch:directory=>this.launch(directory),onContextClose:context=>this.contextClosed(context)});
   this.pending=new Map();this.serial=0;this.viewerResizeOrder=0;
   /** T3's tab.setting: fill follows the latest viewer's size, fixed is the agent's resize. */
   this.setting={_tag:'fill'};
  }
+ /** A shared context closed (Chromium exited); the host fans this out to every tab. */
+ contextClosed(context){if(this.current?.context===context)this.dropTab(this.current);}
  /** The workspace's one tab, created once; T3's ensureTab with Canopy's single key. */
  open(){
+  if(this.ended)return Promise.reject(Object.assign(new Error('The preview tab closed.'),{reason:'closed'}));
   if(this.current&&!this.current.closing)return Promise.resolve(this.current);
   this.opening??=this.createTab().finally(()=>{this.opening=undefined;});
   return this.opening;
@@ -183,28 +208,68 @@ export class AgentBrowser{
   }
  }
  async setUpTab(opened){
-  const context=await this.contexts.contextFor(AGENT_PROFILE);
+  const context=await this.contexts.contextFor(this.profile);
   // A context with no tab left would otherwise hold the profile lock with nothing to show.
-  opened.push(()=>context.close());
+  // A shared context holds other tabs, so only this tab's page is closed.
+  if(this.ownsContexts)opened.push(()=>context.close());
   // T3's prepareContext: the page may write the clipboard; copies reach the viewer through CLIPBOARD_SCRIPT.
   await context.grantPermissions(['clipboard-write']);
-  const page=await context.newPage();
+  const adopted=this.adopt;this.adopt=undefined;
+  const page=adopted&&!adopted.isClosed()?adopted:await context.newPage();
+  if(!this.ownsContexts)opened.push(()=>page.close());
   const tab={
-   context,page,source:'',cdp:null,frameSessions:new Map(),viewers:new Set(),
+   context,page,source:'',cdp:null,frameSessions:new Map(),viewers:new Set(),fileChooser:null,
+   // T3 3c7424ee: copy reads run in key order, outside the input queue.
+   copyReads:Promise.resolve(),copyKeyedUntil:0,
    control:new SessionControl(AGENT_ID),captureLock:Promise.resolve(),capturing:0,dialog:null,closing:false,
   };
   await page.exposeBinding('__canopyStreamSend',({frame},message)=>{
-   if(frame!==page.mainFrame()||message?.canopy!=='agent-result')return;
-   const waiter=this.pending.get(message.id);if(waiter){this.pending.delete(message.id);waiter(message);}
+   if(frame!==page.mainFrame()||typeof message!=='object'||message===null)return;
+   if(message.canopy==='agent-result'){
+    const waiter=this.pending.get(message.id);if(waiter){this.pending.delete(message.id);waiter(message);}
+    return;
+   }
+   // The desktop preview's picker (annotations, regions, ready/nav) talks to the
+   // viewer, as it talks to the IDE over postMessage under the proxy.
+   if(this.autoControl)for(const viewer of tab.viewers)viewer.push({_tag:'picker',message});
   });
   tab.source=`if (window === window.top) { window.__canopyStreamBrowser = true; ${await readFile(this.picker,'utf8')}\n }`;
   await page.addInitScript({content:tab.source});
   await page.evaluate(tab.source).catch(()=>{});
   tab.cdp=await context.newCDPSession(page);
   await this.recordCopies(tab.cdp);
+  // The desktop host presents the page as Chrome (T3's presentAsChrome).
+  if(this.prepareTab)await this.prepareTab(tab).catch(constVoid);
   if(this.setting._tag==='fixed')await page.setViewportSize({width:this.setting.width,height:this.setting.height});
   page.on('framenavigated',frame=>void this.recordFrameCopies(tab,frame));
-  page.on('dialog',dialog=>{tab.dialog=dialog;this.broadcastControl(tab);});
+  // An adopted popup's frames may have loaded before the tab listened.
+  if(adopted)for(const frame of page.frames())void this.recordFrameCopies(tab,frame);
+  // T3 f796df8f: browser tools report why a page failed to load.
+  page.on('request',request=>{if(request.isNavigationRequest()&&request.frame()===page.mainFrame())tab.loadError=undefined;});
+  page.on('requestfailed',request=>{
+   if(!request.isNavigationRequest()||request.frame()!==page.mainFrame())return;
+   tab.loadError={url:request.url().slice(0,2048),...parseNetError(request.failure()?.errorText??'')};
+   void this.broadcastNavigation(tab);
+  });
+  page.on('dialog',dialog=>{
+   // Closing is already decided, so an unsaved-changes guard must not keep the page open.
+   if(tab.closing&&dialog.type()==='beforeunload'){void dialog.accept().catch(constVoid);return;}
+   tab.dialog=dialog;this.broadcastControl(tab);
+  });
+  // The viewer's address bar (Canopy's preview toolbar); T3 sends this in its tab snapshot.
+  page.on('framenavigated',frame=>{if(frame===page.mainFrame())void this.broadcastNavigation(tab);});
+  page.on('load',()=>void this.broadcastNavigation(tab));
+  // T3: popups become tabs and keep `window.opener`, so sign-in popups can report back.
+  if(this.onPopup)page.on('popup',popup=>void this.onPopup(popup,tab));
+  // T3's file chooser: the page's file input is answered by the person controlling it.
+  if(this.fileChooser){
+   let offers=Promise.resolve();
+   page.on('filechooser',chooser=>{offers=offers.then(()=>this.offerFileChooser(tab,chooser)).catch(constVoid);});
+   page.on('framenavigated',()=>{
+    const open=tab.fileChooser;
+    if(open)void this.isFileChooserCurrent(open.chooser).then(current=>{if(!current&&tab.fileChooser===open)this.closeFileChooser(tab);});
+   });
+  }
   // Playwright cannot reload a crashed page, so it must leave the tab list.
   page.on('close',()=>this.dropTab(tab));
   page.on('crash',()=>this.dropTab(tab));
@@ -217,13 +282,29 @@ export class AgentBrowser{
   tab.closing=true;
   for(const viewer of tab.viewers)viewer.push({_tag:'gone'});
   void tab.control.close().catch(constVoid);
-  void tab.page.close().catch(constVoid);
+  // T3 d9805b2c: closing runs the page's beforeunload handlers. `runBeforeUnload`
+  // returns before the page closes, a pending dialog would block beforeunload
+  // from running at all, and a renderer that never finishes unloading must not
+  // outlive its tab.
+  const page=tab.page;
+  const closed=page.isClosed()?Promise.resolve():new Promise(resolve=>page.once('close',()=>resolve()));
+  const forceClose=setTimeout(()=>void page.close().catch(constVoid),PAGE_CLOSE_GRACE_MS);
+  void closed.then(()=>clearTimeout(forceClose));
+  void page.close({runBeforeUnload:tab.dialog===null}).catch(()=>page.close()).catch(constVoid);
+  tab.closed=closed;
+  if(!this.ownsContexts){this.ended=true;this.onClosed?.();}
+ }
+ async broadcastNavigation(tab){
+  if(tab.closing||!tab.viewers.size)return;
+  const title=await tab.page.title().catch(()=>'');
+  const loadError=this.loadErrorOf(tab);
+  for(const viewer of tab.viewers)viewer.push({_tag:'navigated',url:loadError?.url??tab.page.url(),title,...(loadError?{loadError}:{})});
  }
  run(op,args={}){
   validateBrowserOp(op,args);
   return this.runOperation(op,args,performance.now()+this.timeoutMs).catch(error=>{
    // SessionControl's start deadline (T3's deadlineMs) passed while queued.
-   if(error?.name==='TimeoutError')throw failure(504,"The workspace browser didn't answer in time. The page may still be loading — try again.");
+   if(error?.name==='TimeoutError')throw failure(504,`The ${this.label} didn't answer in time. The page may still be loading — try again.`);
    throw error;
   });
  }
@@ -246,7 +327,7 @@ export class AgentBrowser{
  }
  deadline(promise){
   let timer;
-  return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(failure(504,"The workspace browser didn't answer in time. The page may still be loading — try again.")),this.timeoutMs);})]).finally(()=>clearTimeout(timer));
+  return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(failure(504,`The ${this.label} didn't answer in time. The page may still be loading — try again.`)),this.timeoutMs);})]).finally(()=>clearTimeout(timer));
  }
  async execute(tab,op,args){
   const {page,source}=tab;
@@ -266,7 +347,9 @@ export class AgentBrowser{
    return {url:page.url(),width,height,reset:!!args.reset};
   }
   if(op==='screenshot'){
-   const image=await this.withScreencastsPaused(tab,()=>page.screenshot({type:'png',timeout:this.timeoutMs-1000}));
+   // CSS pixels by default, so the image matches the width and height reported;
+   // `scale: "device"` keeps a 2x page's full resolution (the IDE's own region crops).
+   const image=await this.withScreencastsPaused(tab,()=>page.screenshot({type:'png',scale:args.scale==='device'?'device':'css',timeout:this.timeoutMs-1000}));
    return {image:image.toString('base64'),mimeType:'image/png',url:page.url(),...viewport()};
   }
   if(!PAGE_OPS.has(op))throw failure(400,`unknown browser op: ${op}`);
@@ -285,7 +368,12 @@ export class AgentBrowser{
     return reply.data;
    }finally{this.pending.delete(id);}
   };
-  return op==='snapshot'?this.withScreencastsPaused(tab,pick):pick();
+  if(op!=='snapshot')return pick();
+  const snapshot=await this.withScreencastsPaused(tab,pick);
+  const loadError=this.loadErrorOf(tab);
+  return loadError&&snapshot&&typeof snapshot==='object'?{...snapshot,loadError}:snapshot;
+ }
+ loadErrorOf(tab){return tab.page.url().startsWith('chrome-error://')?tab.loadError:undefined;
  }
  // T3's applySetting, without zoom: fixed sizes win, fill follows the newest viewer request.
  async applySetting(tab,setting){
@@ -304,7 +392,48 @@ export class AgentBrowser{
  dialogStatus(tab){
   return tab.dialog?{type:tab.dialog.type(),message:tab.dialog.message().slice(0,4000),defaultValue:tab.dialog.defaultValue().slice(0,4000)}:null;
  }
+ // T3's file chooser lifecycle (offerFileChooser, pushFileChooser, closeFileChooser, setChooserFiles).
+ // Not isConnected: upload helpers often click an input never added to the page.
+ isFileChooserCurrent(chooser){
+  return chooser.element().evaluate(element=>element.ownerDocument===document).catch(()=>false);
+ }
+ async offerFileChooser(tab,chooser){
+  const previous=tab.fileChooser;
+  const accept=(await chooser.element().getAttribute('accept').catch(()=>null))??'';
+  if(!(await this.isFileChooserCurrent(chooser)))return;
+  if(previous)this.closeFileChooser(tab);
+  tab.fileChooser={id:randomUUID(),chooser,accept:accept.slice(0,1024),offeredTo:null};
+  this.pushFileChooser(tab);
+ }
+ pushFileChooser(tab){
+  const open=tab.fileChooser;
+  const controller=[...tab.viewers].find(viewer=>viewer.id===tab.control.controller);
+  if(!open||!controller)return;
+  if(open.offeredTo!==controller.id){
+   tab.fileChooser={...open,id:randomUUID(),offeredTo:controller.id};
+   if(open.offeredTo!==null)for(const viewer of tab.viewers)viewer.push({_tag:'fileChooserClosed',id:open.id});
+  }
+  const current=tab.fileChooser;
+  controller.push({_tag:'fileChooser',id:current.id,multiple:current.chooser.isMultiple(),accept:current.accept});
+ }
+ closeFileChooser(tab){
+  const open=tab.fileChooser;
+  if(!open)return;
+  tab.fileChooser=null;
+  for(const viewer of tab.viewers)viewer.push({_tag:'fileChooserClosed',id:open.id});
+ }
+ /** Canopy difference: the host runs on the person's own computer, so the IDE
+  *  answers with paths from its native file dialog instead of T3's upload route. */
+ async setChooserFiles(tab,viewer,input){
+  const open=tab.fileChooser;
+  if(!open||open.id!==input.id||open.offeredTo===null||open.offeredTo!==viewer.id||tab.control.controller!==viewer.id)return false;
+  const paths=Array.isArray(input.paths)?input.paths.filter(path=>typeof path==='string'&&isAbsolute(path)).slice(0,20):[];
+  if(paths.length>0)await open.chooser.setFiles(open.chooser.isMultiple()?paths:paths.slice(0,1));
+  if(tab.fileChooser===open)this.closeFileChooser(tab);
+  return true;
+ }
  broadcastControl(tab){
+  if(this.fileChooser)this.pushFileChooser(tab);
   for(const viewer of tab.viewers)viewer.push({
    _tag:'control',canOperate:viewer.canOperate,
    controller:tab.control.controller===viewer.id?'you':tab.control.controller!==null?'another-viewer':tab.control.agentId!==null?'agent':'unclaimed',
@@ -358,16 +487,16 @@ export class AgentBrowser{
   });
   await this.recordCopies(cdp).catch(constVoid);
  }
- async takeSessionCopies(cdp){
+ async takeSessionCopies(cdp,since,until){
   const tree=await cdp.send('Page.getFrameTree').catch(()=>null);
   if(!tree)return [];
   const frameIds=node=>[node.frame.id,...(node.childFrames??[]).flatMap(frameIds)];
   return Promise.all(frameIds(tree.frameTree).map(frameId=>cdp.send('Page.createIsolatedWorld',{frameId,worldName:CLIPBOARD_WORLD})
-   .then(({executionContextId})=>cdp.send('Runtime.evaluate',{contextId:executionContextId,expression:'globalThis.takeCopy?.()',returnByValue:true}))
+   .then(({executionContextId})=>cdp.send('Runtime.evaluate',{contextId:executionContextId,expression:`globalThis.takeCopy?.(${since}, ${until})`,returnByValue:true}))
    .then(({result})=>typeof result.value==='string'?result.value:'',()=>'')));
  }
- async takeCopiedText(tab){
-  const copies=await Promise.all([tab.cdp,...tab.frameSessions.values()].map(cdp=>this.takeSessionCopies(cdp)));
+ async takeCopiedText(tab,since,until){
+  const copies=await Promise.all([tab.cdp,...tab.frameSessions.values()].map(cdp=>this.takeSessionCopies(cdp,since,until)));
   return copies.flat().find(text=>text.length>0);
  }
  async releaseViewerInput(viewer,session){
@@ -408,7 +537,9 @@ export class AgentBrowser{
     }
     const command=editingCommand(key,modifiers);
     const copying=command?.commands[0]==='copy'||command?.commands[0]==='cut';
-    if(copying)await this.takeCopiedText(tab);
+    // Copy keys get disjoint millisecond windows so each frame's copy belongs to one key.
+    if(copying)while(Date.now()<=tab.copyKeyedUntil)await sleepUntil(tab.copyKeyedUntil+1);
+    const since=Date.now();
     await session.send('Input.dispatchKeyEvent',{
      type:text?'keyDown':'rawKeyDown',key,code,modifiers,
      ...(text?{text,unmodifiedText:text}:{}),
@@ -416,11 +547,16 @@ export class AgentBrowser{
      windowsVirtualKeyCode:num(message.keyCode,key.length===1?key.toUpperCase().charCodeAt(0):0),
     });
     viewer.pressedKeys.set(code||key,{key,code});
-    if(copying){
-     const copied=await this.takeCopiedText(tab);
+    if(!copying)return;
+    const until=Date.now();
+    tab.copyKeyedUntil=until;
+    // A busy frame answers late; its read must not hold later input.
+    const read=tab.copyReads.then(async()=>{
+     const copied=await this.takeCopiedText(tab,since,until);
      if(copied)viewer.push({_tag:'clipboard',text:copied});
-    }
-    return;
+    });
+    tab.copyReads=read;
+    return()=>read;
    }
    case 'text':
     if(typeof message.text==='string'&&message.text.length>0)await session.send('Input.insertText',{text:message.text.slice(0,10_000)});
@@ -581,11 +717,51 @@ export class AgentBrowser{
    // An idle page does not repaint for a new screencast, so the viewer
    // starts from a still unless a live frame beat it.
    if(!screencastStarted)await pushStill();
+   // autoControl: the page is taken by a person's input and given back once it stops.
+   let releaseTimer=null;
+   finalizers.push(async()=>{if(releaseTimer!==null)clearTimeout(releaseTimer);});
+   const scheduleRelease=()=>{
+    if(releaseTimer!==null)clearTimeout(releaseTimer);
+    releaseTimer=setTimeout(()=>{
+     releaseTimer=null;
+     if(closed||tab.control.controller!==viewer.id)return;
+     // Never mid-gesture, and never while a dialog or file chooser waits on this person.
+     if(viewer.pressedKeys.size||viewer.pressedButtons.size||tab.dialog||tab.fileChooser?.offeredTo===viewer.id){scheduleRelease();return;}
+     const releasing=tab.control.release(viewer.id,()=>this.releaseViewerInput(viewer,session));
+     this.broadcastControl(tab);
+     void releasing.catch(constVoid);
+    },this.autoReleaseMs);
+   };
+   const autoTake=async message=>{
+    const hover=message.type==='mouse'&&message.action==='move'&&message.button==='none'&&message.buttons===0;
+    if(tab.control.controller===viewer.id){if(!hover)scheduleRelease();return true;}
+    if(tab.control.controller!==null)return false;
+    // Nobody holds the page: a hover passes straight through, real input takes it.
+    if(hover)return 'direct';
+    if(!TAKING_INPUT.has(message.type))return 'direct';
+    const taking=tab.control.take(viewer.id);
+    this.broadcastControl(tab);
+    await taking;
+    scheduleRelease();
+    return true;
+   };
    const inputFor=async raw=>{
     if(!viewer.canOperate||closed)return;
     const message=asRecord(raw);
     if(!message)return;
     try{
+     if(message.type==='picker'){
+      // Picker commands (annotate mode, marks) steer the IDE's overlay, not the page's state.
+      const command=asRecord(message.message);
+      if(command&&this.autoControl)await tab.page.evaluate(d=>window.__canopyBrowser?window.__canopyBrowser.cmd(d):false,command).catch(constVoid);
+      return;
+     }
+     if(this.autoControl&&!['takeControl','releaseControl','dialog'].includes(String(message.type))){
+      const taken=await autoTake(message);
+      if(taken===false)return;
+      if(taken==='direct'){await this.dispatchViewerInput(tab,session,viewer,message).catch(constVoid);return;}
+     }
+     if(message.type==='fileChooser'&&this.fileChooser){await this.setChooserFiles(tab,viewer,message);return;}
      if(message.type==='takeControl'){
       const taking=tab.control.take(viewer.id);
       this.broadcastControl(tab);
@@ -597,7 +773,7 @@ export class AgentBrowser{
      }else if(message.type==='dialog'&&tab.control.controller===viewer.id&&typeof message.accept==='boolean'){
       await this.resolveDialog(tab,{accept:message.accept,...(typeof message.promptText==='string'?{promptText:message.promptText}:{})});
      }else{
-      const dispatch=next=>this.dispatchViewerInput(tab,session,viewer,next);
+      const dispatch=async next=>{await this.dispatchViewerInput(tab,session,viewer,next);};
       if(message.type==='mouse'&&message.action==='move'&&message.button==='none'&&message.buttons===0){
        await tab.control.humanLatest(viewer.id,`hover:${modifiersOf(message)}`,message,dispatch);
       }else if(message.type==='wheel'){
@@ -605,7 +781,8 @@ export class AgentBrowser{
        await tab.control.humanLatest(viewer.id,`wheel:${num(message.x)}:${num(message.y)}:${modifiersOf(message)}:${Math.sign(num(message.deltaX))}:${Math.sign(num(message.deltaY))}`,message,dispatch,
         (waiting,next)=>({...next,deltaX:num(waiting.deltaX)+num(next.deltaX),deltaY:num(waiting.deltaY)+num(next.deltaY)}));
       }else{
-       await tab.control.human(viewer.id,()=>dispatch(message));
+       const copyRead=await tab.control.human(viewer.id,()=>this.dispatchViewerInput(tab,session,viewer,message));
+       await copyRead?.();
       }
      }
     }catch{
@@ -618,6 +795,7 @@ export class AgentBrowser{
  async close(){
   const tab=this.current;
   if(tab)this.dropTab(tab);
-  await this.contexts.close();
+  if(this.ownsContexts)await this.contexts.close();
+  else{this.ended=true;await tab?.closed;}
  }
 }

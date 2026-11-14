@@ -365,6 +365,14 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
     why: "Only an agent driving a page puts one up, and the selftest has no agent session to drive one with.",
   },
   {
+    id: "first-run-setup",
+    label: "First-run setup",
+    selector: ".ob-flow",
+    kind: "persistent",
+    covers: "center",
+    why: "Shown once on a new install, or from Help > Replay intro; the test has neither.",
+  },
+  {
     id: "modal-dialog",
     label: "Project / share dialogs",
     selector: ".modal-backdrop",

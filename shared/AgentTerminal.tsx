@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
+import { createTerminal, preferredTerminalEngine } from './terminalEngine'
 import type { Transport } from './transport'
 
 // A live view of one agent's PTY, over any Transport. Attaches on mount (the
@@ -46,13 +46,17 @@ export function AgentTerminal({
   const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
-    const term = new Terminal({
+    // Our Ghostty engine, as in the desktop tabs; xterm when it cannot run
+    // in this browser or was turned off (see preferredTerminalEngine).
+    const { term } = createTerminal({
+      engine: preferredTerminalEngine(),
+      scrollback: 1000,
       fontSize: 12,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      convertEol: false,
       cursorBlink: true,
       theme: { background: 'rgba(0,0,0,0)', foreground: '#c9d1d9' },
       allowTransparency: true,
+      xtermAddons: 'none',
     })
     term.open(ref.current!)
     if (autoFocusRef.current) term.focus()

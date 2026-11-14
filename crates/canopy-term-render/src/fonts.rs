@@ -1,0 +1,919 @@
+//! Font selection: the primary family for a style, and fallback faces for
+//! characters it lacks (CJK, emoji, symbols).
+//!
+//! Built on `fontdb` (MIT) for discovery. The bundled test font (JetBrains
+//! Mono, SIL OFL 1.1; licence text in `fonts/`) is always available so tests
+//! never depend on what the machine has installed; system fonts are loaded only
+//! when asked.
+
+use crate::glyphs::FontStyle;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+type SharedBytes = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
+/// A `static`, so every use is the same bytes at the same address.
+pub static BUNDLED_FONT: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+pub const BUNDLED_FAMILY: &str = "JetBrains Mono";
+
+/// What the fallback chooser needs to know about a face, separated from fontdb
+/// so the policy is testable with stubs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub covers: bool,
+    pub monospaced: bool,
+    pub bold: bool,
+    pub italic: bool,
+    /// A face to use only when no other covering face exists: a colour emoji
+    /// font asked for a character whose default look is text (a dingbat such
+    /// as U+2733 must not turn into a coloured picture).
+    pub demoted: bool,
+    /// Tie-break between otherwise equal faces: higher is better (see
+    /// `preference_rank`). 0 for a face nobody has a view on.
+    pub preferred: u8,
+}
+
+/// Picks the best covering candidate: matching the requested weight and slant
+/// matters most (a wrong-weight fallback looks like a bug), then monospaced,
+/// then the platform's preferred symbol faces. A `demoted` face is chosen only
+/// when nothing else covers. Ties go to the earliest candidate.
+pub fn pick_fallback(candidates: &[Candidate], want: FontStyle) -> Option<usize> {
+    let mut best: Option<(u32, usize)> = None;
+    let any_plain = candidates.iter().any(|c| c.covers && !c.demoted);
+    for (i, c) in candidates.iter().enumerate() {
+        if !c.covers || (c.demoted && any_plain) {
+            continue;
+        }
+        let style = (c.bold == want.bold) as u32 * 4
+            + (c.italic == want.italic) as u32 * 2
+            + c.monospaced as u32;
+        let score = style * 256 + c.preferred as u32;
+        if best.map_or(true, |(s, _)| score > s) {
+            best = Some((score, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// macOS keeps `.LastResort` among its fonts: a face whose every code point
+/// maps to a glyph that is a tofu box naming the Unicode block. It is for the
+/// system to show "nothing has this", never for a terminal to pick as a
+/// fallback (it was what drew U+23F5 as a box with a question mark). Matches
+/// the family names "LastResort" and "Last Resort" with or without the leading
+/// dot.
+pub fn is_last_resort(family: &str) -> bool {
+    let f = family.to_ascii_lowercase();
+    f.contains("lastresort") || f.contains("last resort")
+}
+
+/// A colour emoji font, by family name (Apple Color Emoji, Noto Color Emoji,
+/// Segoe UI Emoji, Twemoji, ...).
+pub fn is_color_emoji(family: &str) -> bool {
+    family.to_ascii_lowercase().contains("emoji")
+}
+
+/// Code points whose default presentation is the coloured emoji picture
+/// (Unicode `Emoji_Presentation=Yes`), as opposed to a text symbol that merely
+/// has an emoji variant (U+2733, U+26A0, U+2764).
+pub fn has_emoji_presentation(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1F000..=0x1FAFF
+        | 0x231A..=0x231B | 0x23E9..=0x23EC | 0x23F0 | 0x23F3
+        | 0x25FD..=0x25FE | 0x2614..=0x2615 | 0x2648..=0x2653 | 0x267F | 0x2693
+        | 0x26A1 | 0x26AA..=0x26AB | 0x26BD..=0x26BE | 0x26C4..=0x26C5 | 0x26CE
+        | 0x26D4 | 0x26EA | 0x26F2..=0x26F3 | 0x26F5 | 0x26FA | 0x26FD
+        | 0x2705 | 0x270A..=0x270B | 0x2728 | 0x274C | 0x274E | 0x2753..=0x2755
+        | 0x2757 | 0x2795..=0x2797 | 0x27B0 | 0x27BF | 0x2B1B..=0x2B1C | 0x2B50
+        | 0x2B55)
+}
+
+/// Faces that carry the technical, arrow, dingbat and geometric symbols a
+/// terminal UI uses, best first: monospaced ones where there is a choice, then
+/// the platform's symbol fonts. Only a tie-break between faces that already
+/// cover the character equally well.
+const PREFERRED_SYMBOL_FACES: &[&str] = &[
+    "Menlo",
+    "Apple Symbols",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Noto Sans Symbols 2",
+    "Noto Sans Symbols",
+    "Segoe UI Symbol",
+    "Cascadia Mono",
+    "DejaVu Sans",
+];
+
+/// 0 for a face not in `PREFERRED_SYMBOL_FACES`, else higher for an earlier
+/// entry.
+pub fn preference_rank(family: &str) -> u8 {
+    PREFERRED_SYMBOL_FACES
+        .iter()
+        .position(|f| f.eq_ignore_ascii_case(family))
+        .map_or(0, |i| (PREFERRED_SYMBOL_FACES.len() - i) as u8)
+}
+
+/// The codepoints a face maps, as sorted, non-overlapping inclusive ranges, so
+/// "does this face have U+XXXX" is a binary search instead of a font parse.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Coverage {
+    ranges: Vec<(u32, u32)>,
+}
+
+impl Coverage {
+    pub fn from_codepoints(mut cps: Vec<u32>) -> Coverage {
+        cps.sort_unstable();
+        cps.dedup();
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for c in cps {
+            match ranges.last_mut() {
+                Some(last) if last.1.saturating_add(1) == c => last.1 = c,
+                _ => ranges.push((c, c)),
+            }
+        }
+        Coverage { ranges }
+    }
+
+    /// Reads the Unicode `cmap` subtables of one face. A face that cannot be
+    /// parsed covers nothing.
+    pub fn from_face(data: &[u8], index: u32) -> Coverage {
+        let Ok(face) = rustybuzz::ttf_parser::Face::parse(data, index) else {
+            return Coverage::default();
+        };
+        let Some(cmap) = face.tables().cmap else {
+            return Coverage::default();
+        };
+        let mut cps = Vec::new();
+        for sub in cmap.subtables {
+            if sub.is_unicode() {
+                sub.codepoints(|c| cps.push(c));
+            }
+        }
+        // Keep exactly what the parser would draw, so the index never
+        // disagrees with `glyph_index` (ranges can include unmapped slots).
+        cps.retain(|&c| char::from_u32(c).is_some_and(|ch| face.glyph_index(ch).is_some()));
+        Coverage::from_codepoints(cps)
+    }
+
+    pub fn contains(&self, ch: char) -> bool {
+        let c = ch as u32;
+        self.ranges
+            .binary_search_by(|&(lo, hi)| {
+                if hi < c {
+                    std::cmp::Ordering::Less
+                } else if lo > c {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+}
+
+/// Keeps `shared` alive for the rest of the process and returns its bytes as
+/// `'static`, once per distinct byte range however many books or faces use it.
+///
+/// This is what lets a parsed shaping face be `'static` and built once instead
+/// of once per shaped run, without copying the font: system fonts are memory
+/// mapped (by fontdb) and the mapping is shared by every face of the file, so
+/// the cost is address space and page cache, not heap. Only the small `Arc`
+/// handle is leaked; the mapping lives as long as the process, bounded by the
+/// font files actually used.
+fn pin(shared: &SharedBytes) -> &'static [u8] {
+    let inner: &(dyn AsRef<[u8]> + Send + Sync) = &**shared;
+    let bytes: &[u8] = inner.as_ref();
+    let key = (bytes.as_ptr() as usize, bytes.len());
+    let mut table = pinned();
+    if let Some(&pinned) = table.by_range.get(&key) {
+        return pinned;
+    }
+    let handle: &'static SharedBytes = Box::leak(Box::new(shared.clone()));
+    let inner: &'static (dyn AsRef<[u8]> + Send + Sync) = &**handle;
+    let pinned: &'static [u8] = inner.as_ref();
+    table.by_range.insert(key, pinned);
+    pinned
+}
+
+/// Pinned font bytes for the whole process: by byte range (in-memory fonts)
+/// and by file path (so a second book loading the same system font reuses the
+/// first mapping instead of mapping and pinning the file again).
+#[derive(Default)]
+struct Pinned {
+    by_range: HashMap<(usize, usize), &'static [u8]>,
+    by_path: HashMap<PathBuf, &'static [u8]>,
+}
+
+fn pinned() -> MutexGuard<'static, Pinned> {
+    static PINNED: OnceLock<Mutex<Pinned>> = OnceLock::new();
+    PINNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// A face whose bytes are held for shaping and rasterising (see `pin`).
+pub struct LoadedFace {
+    pub data: &'static [u8],
+    pub index: u32,
+    pub units_per_em: u16,
+    pub buzz: rustybuzz::Face<'static>,
+    /// The face's first family name (diagnostics, the CI coverage probe).
+    pub family: String,
+}
+
+/// A face and which styles must be faked because the face lacks them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FaceChoice {
+    /// Index into `FontBook::face`.
+    pub face: u32,
+    pub synth_bold: bool,
+    pub synth_italic: bool,
+}
+
+pub struct FontBook {
+    db: fontdb::Database,
+    primary: String,
+    loaded: Vec<LoadedFace>,
+    by_id: HashMap<fontdb::ID, u32>,
+    cache: HashMap<(char, FontStyle), Option<FaceChoice>>,
+    coverage: HashMap<fontdb::ID, Coverage>,
+    primary_ids: HashMap<FontStyle, Option<fontdb::ID>>,
+}
+
+fn is_bold(w: fontdb::Weight) -> bool {
+    w.0 >= 600
+}
+
+impl FontBook {
+    /// Only the bundled font.
+    pub fn bundled() -> Self {
+        let mut db = fontdb::Database::new();
+        // The static bytes themselves, not a copy.
+        db.load_font_source(fontdb::Source::Binary(Arc::new(BUNDLED_FONT)));
+        FontBook {
+            db,
+            primary: BUNDLED_FAMILY.to_string(),
+            loaded: Vec::new(),
+            by_id: HashMap::new(),
+            cache: HashMap::new(),
+            coverage: HashMap::new(),
+            primary_ids: HashMap::new(),
+        }
+    }
+
+    /// The book the terminal opens with: the bundled font as the primary face,
+    /// or `family` when it is given and installed. Returns a warning line when
+    /// `family` was asked for and not found (the bundled font is used then).
+    ///
+    /// `system_fonts` keeps its old meaning: the machine's fonts as fallbacks
+    /// for CJK and emoji. Looking a family up needs them loaded, so with a
+    /// family and `system_fonts` off they are loaded, the family is chosen,
+    /// and every face outside it (and the bundled one) is dropped again.
+    pub fn configured(family: Option<&str>, system_fonts: bool) -> (FontBook, Option<String>) {
+        let family = family
+            .map(str::trim)
+            .filter(|f| !f.is_empty() && !f.eq_ignore_ascii_case(BUNDLED_FAMILY));
+        let plain = |system_fonts: bool| {
+            let mut book = FontBook::bundled();
+            if system_fonts {
+                book.load_system_fonts();
+            }
+            book
+        };
+        let Some(family) = family else {
+            return (plain(system_fonts), None);
+        };
+        let mut book = FontBook::bundled();
+        book.load_system_fonts();
+        if book.select_primary(family) {
+            if !system_fonts {
+                book.keep_only_primary_and_bundled();
+            }
+            return (book, None);
+        }
+        let warning =
+            format!("font_family {family:?} is not installed; using the bundled {BUNDLED_FAMILY}");
+        (plain(system_fonts), Some(warning))
+    }
+
+    /// Makes the installed family called `family` (any letter case) the
+    /// primary one. False when no face has that family name.
+    fn select_primary(&mut self, family: &str) -> bool {
+        let found = self
+            .db
+            .faces()
+            .flat_map(|f| f.families.iter().map(|(n, _)| n.clone()))
+            .find(|n| n.eq_ignore_ascii_case(family));
+        match found {
+            Some(name) => {
+                self.primary = name;
+                self.invalidate();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn keep_only_primary_and_bundled(&mut self) {
+        let drop: Vec<fontdb::ID> = self
+            .db
+            .faces()
+            .filter(|f| {
+                !f.families
+                    .iter()
+                    .any(|(n, _)| *n == self.primary || n == BUNDLED_FAMILY)
+            })
+            .map(|f| f.id)
+            .collect();
+        for id in drop {
+            self.db.remove_face(id);
+        }
+        self.invalidate();
+    }
+
+    /// The name of the primary family.
+    pub fn primary_family(&self) -> &str {
+        &self.primary
+    }
+
+    /// The primary face's metrics (what the cell size derives from).
+    pub fn primary_metrics(&mut self) -> Option<crate::metrics::FontMetrics> {
+        let choice = self.primary_choice(FontStyle::default())?;
+        let face = self.face(choice.face);
+        crate::metrics::FontMetrics::from_font_data(face.data, face.index)
+    }
+
+    /// An empty book whose primary family is `family` (fill it with
+    /// `add_font_data` / `load_system_fonts`).
+    pub fn with_primary(family: &str) -> Self {
+        FontBook {
+            db: fontdb::Database::new(),
+            primary: family.to_string(),
+            loaded: Vec::new(),
+            by_id: HashMap::new(),
+            cache: HashMap::new(),
+            coverage: HashMap::new(),
+            primary_ids: HashMap::new(),
+        }
+    }
+
+    pub fn add_font_data(&mut self, data: Vec<u8>) {
+        self.db.load_font_data(data);
+        self.invalidate();
+    }
+
+    fn invalidate(&mut self) {
+        self.cache.clear();
+        self.primary_ids.clear();
+    }
+
+    /// Loads the machine's fonts. Not used by tests: results differ per machine.
+    pub fn load_system_fonts(&mut self) {
+        self.db.load_system_fonts();
+        self.invalidate();
+    }
+
+    /// Reads every face's character coverage now. Fallback lookups need it, and
+    /// otherwise build it face by face the first time a character is missing
+    /// from the primary font. Call this at startup, off the frame path (the
+    /// book is plain data and can be moved to a worker thread and back), so no
+    /// frame pays for it.
+    pub fn index_fallbacks(&mut self) {
+        let ids: Vec<fontdb::ID> = self.db.faces().map(|f| f.id).collect();
+        for id in ids {
+            self.coverage_of(id);
+        }
+    }
+
+    fn coverage_of(&mut self, id: fontdb::ID) -> &Coverage {
+        if !self.coverage.contains_key(&id) {
+            let cov = self
+                .db
+                .with_face_data(id, Coverage::from_face)
+                .unwrap_or_default();
+            self.coverage.insert(id, cov);
+        }
+        &self.coverage[&id]
+    }
+
+    pub fn face(&self, index: u32) -> &LoadedFace {
+        &self.loaded[index as usize]
+    }
+
+    fn load(&mut self, id: fontdb::ID) -> Option<u32> {
+        if let Some(&i) = self.by_id.get(&id) {
+            return Some(i);
+        }
+        let (index, path, family) = {
+            let info = self.db.face(id)?;
+            let path = match &info.source {
+                fontdb::Source::File(p) | fontdb::Source::SharedFile(p, _) => Some(p.clone()),
+                fontdb::Source::Binary(_) => None,
+            };
+            let family = info
+                .families
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| info.post_script_name.clone());
+            (info.index, path, family)
+        };
+        let known = path.as_ref().and_then(|p| pinned().by_path.get(p).copied());
+        let data = match known {
+            Some(data) => data,
+            None => {
+                // SAFETY: fontdb maps the font file read-only. As with any
+                // mapped file, another process truncating or rewriting an
+                // installed font while the app runs could fault; installed
+                // fonts are not rewritten in place in practice, and every text
+                // stack that maps fonts accepts this.
+                let (shared, _) = unsafe { self.db.make_shared_face_data(id)? };
+                let data = pin(&shared);
+                if let Some(p) = path {
+                    pinned().by_path.insert(p, data);
+                }
+                data
+            }
+        };
+        let upem = rustybuzz::ttf_parser::Face::parse(data, index)
+            .map(|f| f.units_per_em())
+            .unwrap_or(1000);
+        let buzz = rustybuzz::Face::from_slice(data, index)?;
+        self.loaded.push(LoadedFace {
+            data,
+            index,
+            units_per_em: upem,
+            buzz,
+            family,
+        });
+        let i = (self.loaded.len() - 1) as u32;
+        self.by_id.insert(id, i);
+        Some(i)
+    }
+
+    fn covers(&mut self, id: fontdb::ID, ch: char) -> bool {
+        self.coverage_of(id).contains(ch)
+    }
+
+    fn primary_id(&mut self, style: FontStyle) -> Option<fontdb::ID> {
+        if let Some(&id) = self.primary_ids.get(&style) {
+            return id;
+        }
+        let id = self.query_primary(style);
+        self.primary_ids.insert(style, id);
+        id
+    }
+
+    fn query_primary(&self, style: FontStyle) -> Option<fontdb::ID> {
+        let families = [fontdb::Family::Name(&self.primary)];
+        let found = self.db.query(&fontdb::Query {
+            families: &families,
+            weight: if style.bold {
+                fontdb::Weight::BOLD
+            } else {
+                fontdb::Weight::NORMAL
+            },
+            style: if style.italic {
+                fontdb::Style::Italic
+            } else {
+                fontdb::Style::Normal
+            },
+            ..Default::default()
+        });
+        // A misspelt family still draws: use whatever face is loaded first.
+        found.or_else(|| self.db.faces().next().map(|f| f.id))
+    }
+
+    fn choice_for(&mut self, id: fontdb::ID, want: FontStyle) -> Option<FaceChoice> {
+        let (bold, italic) = {
+            let info = self.db.face(id)?;
+            (is_bold(info.weight), info.style != fontdb::Style::Normal)
+        };
+        Some(FaceChoice {
+            face: self.load(id)?,
+            synth_bold: want.bold && !bold,
+            synth_italic: want.italic && !italic,
+        })
+    }
+
+    /// The face to draw `ch` in for `style`: the primary family when it has the
+    /// glyph, otherwise the best fallback. `None` when no face has it (the caller
+    /// then draws the primary face's missing-glyph box).
+    pub fn choose(&mut self, ch: char, style: FontStyle) -> Option<FaceChoice> {
+        if let Some(hit) = self.cache.get(&(ch, style)) {
+            return *hit;
+        }
+        let primary = self.primary_id(style);
+        let blank = ch.is_whitespace() || ch.is_control();
+        let result = match primary {
+            Some(id) if blank || self.covers(id, ch) => self.choice_for(id, style),
+            _ => {
+                // Coverage is a binary search per face; nothing is parsed here
+                // once the index exists (see `index_fallbacks`).
+                let faces: Vec<(fontdb::ID, bool, bool, bool, String)> = self
+                    .db
+                    .faces()
+                    .map(|f| {
+                        (
+                            f.id,
+                            f.monospaced,
+                            is_bold(f.weight),
+                            f.style != fontdb::Style::Normal,
+                            f.families
+                                .first()
+                                .map(|(n, _)| n.clone())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                let text_default = !has_emoji_presentation(ch);
+                let candidates: Vec<Candidate> = faces
+                    .iter()
+                    .map(|(id, monospaced, bold, italic, family)| Candidate {
+                        // The system's "nothing has this" face never counts.
+                        covers: !is_last_resort(family) && self.covers(*id, ch),
+                        monospaced: *monospaced,
+                        bold: *bold,
+                        italic: *italic,
+                        demoted: text_default && is_color_emoji(family),
+                        preferred: preference_rank(family),
+                    })
+                    .collect();
+                match pick_fallback(&candidates, style) {
+                    Some(i) => self.choice_for(faces[i].0, style),
+                    None => None,
+                }
+            }
+        };
+        self.cache.insert((ch, style), result);
+        result
+    }
+
+    /// Every loaded face (family, bold, italic, monospaced) that maps `ch`, in
+    /// database order. Diagnostics: the CI coverage probe prints this so a
+    /// missing glyph can be traced to the fonts a machine really has.
+    pub fn covering_faces(&mut self, ch: char) -> Vec<(String, bool, bool, bool)> {
+        let faces: Vec<(fontdb::ID, String, bool, bool, bool)> = self
+            .db
+            .faces()
+            .map(|f| {
+                (
+                    f.id,
+                    f.families
+                        .first()
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| f.post_script_name.clone()),
+                    is_bold(f.weight),
+                    f.style != fontdb::Style::Normal,
+                    f.monospaced,
+                )
+            })
+            .collect();
+        faces
+            .into_iter()
+            .filter(|(id, ..)| self.covers(*id, ch))
+            .map(|(_, n, b, i, m)| (n, b, i, m))
+            .collect()
+    }
+
+    /// Number of faces in the database.
+    pub fn face_count(&self) -> usize {
+        self.db.len()
+    }
+
+    /// The primary face, whether or not it has `ch`; used for missing glyphs.
+    pub fn primary_choice(&mut self, style: FontStyle) -> Option<FaceChoice> {
+        let id = self.primary_id(style)?;
+        self.choice_for(id, style)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(covers: bool, monospaced: bool, bold: bool, italic: bool) -> Candidate {
+        Candidate {
+            covers,
+            monospaced,
+            bold,
+            italic,
+            demoted: false,
+            preferred: 0,
+        }
+    }
+
+    const REGULAR: FontStyle = FontStyle {
+        bold: false,
+        italic: false,
+    };
+    const BOLD: FontStyle = FontStyle {
+        bold: true,
+        italic: false,
+    };
+
+    #[test]
+    fn fallback_skips_faces_without_the_glyph() {
+        let c = [
+            cand(false, true, false, false),
+            cand(true, false, false, false),
+        ];
+        assert_eq!(pick_fallback(&c, REGULAR), Some(1));
+        assert_eq!(
+            pick_fallback(&[cand(false, true, false, false)], REGULAR),
+            None
+        );
+        assert_eq!(pick_fallback(&[], REGULAR), None);
+    }
+
+    #[test]
+    fn fallback_prefers_the_matching_weight_over_monospaced() {
+        let c = [
+            cand(true, true, false, false), // mono regular
+            cand(true, false, true, false), // proportional bold
+        ];
+        assert_eq!(pick_fallback(&c, BOLD), Some(1));
+        assert_eq!(pick_fallback(&c, REGULAR), Some(0));
+    }
+
+    #[test]
+    fn fallback_prefers_monospaced_among_equal_styles_and_then_the_first() {
+        let c = [
+            cand(true, false, false, false),
+            cand(true, true, false, false),
+            cand(true, true, false, false),
+        ];
+        assert_eq!(pick_fallback(&c, REGULAR), Some(1));
+    }
+
+    #[test]
+    fn italic_matters_after_weight() {
+        let c = [
+            cand(true, true, false, false),
+            cand(true, false, false, true),
+        ];
+        let want = FontStyle {
+            bold: false,
+            italic: true,
+        };
+        assert_eq!(pick_fallback(&c, want), Some(1));
+    }
+
+    #[test]
+    fn the_systems_last_resort_face_is_never_a_fallback() {
+        // What drew U+23F5 as a tofu box on macOS (CI probe: the only faces
+        // covering it were .LastResort and STIX Two Math).
+        for name in [".LastResort", "LastResort", "Last Resort", ".lastresort"] {
+            assert!(is_last_resort(name), "{name}");
+        }
+        for name in ["STIX Two Math", "Apple Symbols", "Menlo", "Resort Sans"] {
+            assert!(!is_last_resort(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_colour_emoji_font_does_not_take_text_symbols_but_still_serves_emoji() {
+        for name in [
+            "Apple Color Emoji",
+            ".Apple Color Emoji UI",
+            "Noto Color Emoji",
+            "Segoe UI Emoji",
+        ] {
+            assert!(is_color_emoji(name), "{name}");
+        }
+        assert!(!is_color_emoji("DejaVu Sans Mono"));
+        // U+2733 and U+26A0 are text symbols; U+1F600 and U+2705 are emoji.
+        assert!(!has_emoji_presentation('\u{2733}'));
+        assert!(!has_emoji_presentation('\u{26A0}'));
+        assert!(!has_emoji_presentation('\u{23F5}'));
+        assert!(has_emoji_presentation('\u{1F600}'));
+        assert!(has_emoji_presentation('\u{2705}'));
+        // Demoted: the emoji face loses to any other covering face, however
+        // monospaced, but wins when it is the only one.
+        let emoji = Candidate {
+            demoted: true,
+            ..cand(true, false, false, false)
+        };
+        let text = cand(true, false, false, false);
+        assert_eq!(pick_fallback(&[emoji, text], REGULAR), Some(1));
+        assert_eq!(pick_fallback(&[emoji], REGULAR), Some(0));
+        assert_eq!(
+            pick_fallback(&[emoji, cand(false, true, false, false)], REGULAR),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn preferred_symbol_faces_break_ties_but_never_beat_style() {
+        let pref = |covers, bold, preferred| Candidate {
+            preferred,
+            ..cand(covers, false, bold, false)
+        };
+        let menlo = preference_rank("Menlo");
+        let dejavu = preference_rank("DejaVu Sans");
+        assert!(menlo > dejavu && dejavu > 0);
+        assert_eq!(preference_rank("menlo"), menlo, "case-insensitive");
+        assert_eq!(preference_rank("Comic Sans MS"), 0);
+        // Equal style: the preferred face wins even though it is later.
+        assert_eq!(
+            pick_fallback(&[pref(true, false, 0), pref(true, false, menlo)], REGULAR),
+            Some(1)
+        );
+        // A better style match wins over preference.
+        assert_eq!(
+            pick_fallback(&[pref(true, true, 0), pref(true, false, menlo)], BOLD),
+            Some(0)
+        );
+        // Preference alone does not make a face cover.
+        assert_eq!(pick_fallback(&[pref(false, false, menlo)], REGULAR), None);
+    }
+
+    #[test]
+    fn no_family_or_the_bundled_one_is_the_default_book_without_a_warning() {
+        for family in [None, Some(""), Some("  "), Some("jetbrains mono")] {
+            let (book, warning) = FontBook::configured(family, false);
+            assert_eq!(warning, None, "{family:?}");
+            assert_eq!(book.primary_family(), BUNDLED_FAMILY);
+            assert_eq!(book.face_count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_family_that_is_not_installed_warns_once_and_keeps_the_bundled_font() {
+        let (mut book, warning) = FontBook::configured(Some("No Such Family 7f3a"), false);
+        let w = warning.expect("a warning");
+        assert!(
+            w.contains("No Such Family 7f3a") && w.contains(BUNDLED_FAMILY),
+            "{w}"
+        );
+        assert!(!w.contains('\n'), "one line");
+        assert_eq!(book.primary_family(), BUNDLED_FAMILY);
+        assert!(book.choose('a', FontStyle::default()).is_some());
+    }
+
+    #[test]
+    fn selecting_a_primary_ignores_letter_case_and_rejects_strangers() {
+        let mut book = FontBook::bundled();
+        assert!(!book.select_primary("Nope"));
+        assert!(book.select_primary("JETBRAINS MONO"));
+        assert_eq!(book.primary_family(), BUNDLED_FAMILY);
+    }
+
+    #[test]
+    fn the_primary_metrics_are_the_primary_faces() {
+        let mut book = FontBook::bundled();
+        let m = book.primary_metrics().expect("metrics");
+        assert_eq!((m.units_per_em, m.advance), (1000, 600));
+    }
+
+    #[test]
+    fn the_bundled_font_serves_ascii_and_fakes_missing_styles() {
+        let mut book = FontBook::bundled();
+        let reg = book.choose('a', REGULAR).expect("bundled font has 'a'");
+        assert!(!reg.synth_bold && !reg.synth_italic);
+        // Only a regular face is bundled, so bold and italic are synthesised.
+        let bold = book.choose('a', BOLD).unwrap();
+        assert!(bold.synth_bold && !bold.synth_italic);
+        assert_eq!(bold.face, reg.face, "same face, faked weight");
+        let it = book
+            .choose(
+                'a',
+                FontStyle {
+                    bold: false,
+                    italic: true,
+                },
+            )
+            .unwrap();
+        assert!(it.synth_italic);
+        assert_eq!(book.face(reg.face).units_per_em, 1000);
+    }
+
+    #[test]
+    fn a_character_no_face_has_is_reported_not_invented() {
+        let mut book = FontBook::bundled();
+        // Private-use code point the bundled font does not map.
+        assert_eq!(book.choose('\u{10FFF0}', REGULAR), None);
+        assert!(book.primary_choice(REGULAR).is_some());
+    }
+
+    #[test]
+    fn whitespace_and_controls_use_the_primary_face() {
+        let mut book = FontBook::bundled();
+        assert!(book.choose(' ', REGULAR).is_some());
+        assert!(book.choose('\0', REGULAR).is_some());
+    }
+
+    #[test]
+    fn coverage_merges_runs_and_answers_by_binary_search() {
+        let c = Coverage::from_codepoints(vec![5, 3, 4, 4, 10, 11, 20]);
+        assert_eq!(c.ranges, vec![(3, 5), (10, 11), (20, 20)]);
+        for (ch, want) in [
+            (2u32, false),
+            (3, true),
+            (5, true),
+            (6, false),
+            (11, true),
+            (12, false),
+            (20, true),
+            (21, false),
+        ] {
+            assert_eq!(c.contains(char::from_u32(ch).unwrap()), want, "{ch}");
+        }
+        assert!(!Coverage::default().contains('a'));
+    }
+
+    #[test]
+    fn the_coverage_index_agrees_with_the_font_parser() {
+        let cov = Coverage::from_face(BUNDLED_FONT, 0);
+        let face = rustybuzz::ttf_parser::Face::parse(BUNDLED_FONT, 0).unwrap();
+        for cp in (0x20u32..0x3000).chain(0xE000..0xE100) {
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
+            assert_eq!(
+                cov.contains(ch),
+                face.glyph_index(ch).is_some(),
+                "U+{cp:04X}"
+            );
+        }
+        assert!(cov.contains('a') && !cov.contains('\u{10FFF0}'));
+    }
+
+    #[test]
+    fn indexing_covers_every_face_once() {
+        let mut book = FontBook::bundled();
+        assert!(book.coverage.is_empty());
+        book.index_fallbacks();
+        assert_eq!(book.coverage.len(), 1);
+        book.index_fallbacks();
+        assert_eq!(book.coverage.len(), 1);
+        // A miss uses the index and still answers.
+        assert_eq!(book.choose('\u{10FFF0}', REGULAR), None);
+    }
+
+    #[test]
+    fn font_bytes_are_shared_not_copied_per_book_or_face() {
+        let mut a = FontBook::bundled();
+        let mut b = FontBook::bundled();
+        let fa = a.choose('a', REGULAR).unwrap().face;
+        let fb = b.choose('a', BOLD).unwrap().face;
+        let (da, db) = (a.face(fa).data, b.face(fb).data);
+        assert_eq!(
+            da.as_ptr(),
+            BUNDLED_FONT.as_ptr(),
+            "the bundled bytes themselves"
+        );
+        assert_eq!(db.as_ptr(), da.as_ptr(), "one copy across books");
+        assert_eq!(da.len(), BUNDLED_FONT.len());
+    }
+
+    #[test]
+    fn a_font_file_is_mapped_once_for_every_book() {
+        // The bundled font written to a temporary file stands in for a system
+        // font, so the memory-mapped path runs on CI.
+        let path = std::env::temp_dir().join(format!(
+            "canopy-term-render-test-{}.ttf",
+            std::process::id()
+        ));
+        std::fs::write(&path, BUNDLED_FONT).unwrap();
+        let mut a = FontBook::with_primary(BUNDLED_FAMILY);
+        a.db.load_font_file(&path).unwrap();
+        let mut b = FontBook::with_primary(BUNDLED_FAMILY);
+        b.db.load_font_file(&path).unwrap();
+        let fa = a.choose('a', REGULAR).expect("face from the file").face;
+        let fb = b.choose('a', REGULAR).expect("face from the file").face;
+        let (da, db) = (a.face(fa).data, b.face(fb).data);
+        assert!(da == BUNDLED_FONT, "the mapping holds the file's bytes");
+        assert_ne!(da.as_ptr(), BUNDLED_FONT.as_ptr(), "mapped, not the static");
+        assert_eq!(
+            db.as_ptr(),
+            da.as_ptr(),
+            "the second book reuses the mapping"
+        );
+        // The mapping stays valid even though the file goes away (or, on
+        // Windows, cannot be removed while mapped).
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_font_book_can_move_to_a_worker_thread() {
+        fn is_send<T: Send>() {}
+        is_send::<FontBook>();
+        let mut book = FontBook::bundled();
+        let book = std::thread::spawn(move || {
+            book.index_fallbacks();
+            book
+        })
+        .join()
+        .unwrap();
+        assert_eq!(book.coverage.len(), 1);
+    }
+
+    #[test]
+    fn results_are_cached() {
+        let mut book = FontBook::bundled();
+        let a = book.choose('x', REGULAR);
+        let b = book.choose('x', REGULAR);
+        assert_eq!(a, b);
+    }
+}

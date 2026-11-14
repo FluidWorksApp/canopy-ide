@@ -42,6 +42,7 @@ const EXPECTED:Record<string,string[]>={
   "account":["Accounts"],
   "agents":["Accounts", "Agent delegation", "CLI commands", "CLI updates", "Claude Code editor link", "Default agent", "Fleet readiness", "Intent & evidence review", "Other CLIs", "Plan before an agent starts", "Proof receipts", "Session documents", "Skip permission prompts", "Tools available", "Turn rollback", "Use ACP"],
   "appearance":["Accent color", "Side panel", "Skin"],
+  "browser":["Preview browser"],
   "brain":["Agent awareness", "Automatic brain work", "Brain", "Brain spending", "Builder lens summaries", "Features not using your brain", "Memory allowance maximums", "Memory monitoring prompts"],
   "clipboard":["Clipboard history", "How much to keep", "Keep what I copy", "Passwords and keys", "The history", "Where it's kept"],
   "dictation":["Indicator", "Key", "Language", "Live preview", "Model", "Mute while recording", "Recent dictation", "Shortcut", "Trigger"],
@@ -49,11 +50,11 @@ const EXPECTED:Record<string,string[]>={
   "mascot":["Mascot"],
   "notifications":["Ask for attention", "Notification pop-ups", "Team messages"],
   "privacy":["Crash reporting","Files outside projects"],
-  "remote":["On this network", "Public link", "Reach", "Remote access", "Remote access", "Scan to connect", "Your link"],
+  "remote":["On this network", "Public link", "Reach", "Remote access", "Remote access", "Scan to connect", "Tailscale", "Your link"],
   "rules":["Rules"],
   "sessions":["At the budget", "Ctrl+Tab switching", "Hibernate idle agents", "Live agents per project", "New agents get a workspace", "Prototype session cap", "Restore sessions I close", "Session budget", "Set up new workspaces", "Settle into Idle after", "Spend & outcomes", "Stack tabs by status", "Workspace ports"],
   "spotsearch":["Conversations to index", "Keep history for", "Scope", "Terminal scrollback", "The index"],
-  "terminal":["Automatic session names", "Font and cursor", "Scrollback"],
+  "terminal":["Automatic session names", "Benchmark engines", "Engine", "Font and cursor", "Keep terminals running after quit", "Scrollback", "Show engine stats"],
 };
 
 describe('the settings index',()=>{
@@ -69,7 +70,7 @@ describe('the settings index',()=>{
     for(const r of itemsInSource())(found[r.tab]??=[]).push(r.name);
     for(const tab of Object.keys(found))found[tab].sort();
     expect(found).toEqual(EXPECTED);
-    expect(Object.values(found).flat().length).toBe(81);// none lost, none doubled
+    expect(Object.values(found).flat().length).toBe(87);// none lost, none doubled
   });
   it('shows each setting\'s current description, so a reworded one cannot leave search showing the old text',()=>{
     const stale:string[]=[];

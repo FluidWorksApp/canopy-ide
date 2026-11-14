@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>terminal-compare</title>
+<link rel="stylesheet" href="/vendor/xterm.css" />
+<style>
+  body { margin: 0; background: #000; }
+  #term { width: max-content; }
+</style>
+<div id="term"></div>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-webgl.js"></script>
+<script src="/vendor/addon-unicode11.js"></script>
+<script>
+  const WINDOW_BYTES = 256 * 1024;
+  let term = null;
+  let renderer = "dom";
+
+  // mode: "webgl" or "dom". Returns what was actually in use.
+  window.setup = function (mode, cols, rows, scrollback) {
+    if (term) term.dispose();
+    document.getElementById("term").textContent = "";
+    term = new Terminal({ cols, rows, scrollback, allowProposedApi: true });
+    term.loadAddon(new Unicode11Addon.Unicode11Addon());
+    term.unicode.activeVersion = "11";
+    term.open(document.getElementById("term"));
+    renderer = "dom";
+    if (mode === "webgl") {
+      try {
+        const gl = new WebglAddon.WebglAddon();
+        term.loadAddon(gl);
+        renderer = document.querySelector(".xterm-screen canvas") ? "webgl" : "dom";
+      } catch (e) {
+        return { renderer: "dom", error: String(e) };
+      }
+    }
+    return { renderer };
+  };
+
+  const write = (chunk) => new Promise((r) => term.write(chunk, r));
+  const raf = () => new Promise((r) => requestAnimationFrame(r));
+
+  async function feed(data, size) {
+    let outstanding = 0;
+    for (let off = 0; off < data.length; off += size) {
+      const chunk = data.subarray(off, Math.min(off + size, data.length));
+      outstanding += chunk.length;
+      if (outstanding >= WINDOW_BYTES) {
+        await write(chunk);
+        outstanding = 0;
+      } else {
+        term.write(chunk);
+      }
+    }
+    await write(new Uint8Array(0));
+  }
+
+  // First write to the last frame painted: after the final write callback,
+  // two animation frames, so the renderer's own frame has run and a later one
+  // has been presented.
+  window.runStream = async function (name, size) {
+    const data = new Uint8Array(await (await fetch(`/streams/${name}.bin`)).arrayBuffer());
+    let frames = 0;
+    let stop = false;
+    (async () => { while (!stop) { await raf(); frames++; } })();
+    const t0 = performance.now();
+    await feed(data, size);
+    const tWritten = performance.now();
+    await raf();
+    await raf();
+    const t1 = performance.now();
+    stop = true;
+    return { bytes: data.length, ms: t1 - t0, parse_ms: tWritten - t0, frames };
+  };
+
+  window.fillLines = async function (lines, line) {
+    let buf = "";
+    for (let i = 0; i < lines; i++) {
+      buf += String(i).padStart(6, "0") + line;
+      if (buf.length > 60 * 1024) { await write(buf); buf = ""; }
+    }
+    await write(buf);
+    await raf();
+    await raf();
+    return term.buffer.active.length - term.rows;
+  };
+</script>

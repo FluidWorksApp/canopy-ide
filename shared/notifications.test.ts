@@ -95,3 +95,25 @@ describe("cross-connector event projection", () => {
     expect(pending).toEqual([]);
   });
 });
+
+describe("a PR the agent's Bash call created", () => {
+  const post = (response: unknown, tool = "Bash") =>
+    parseAgentEvent(
+      JSON.stringify({
+        hook_event_name: "PostToolUse",
+        tool_name: tool,
+        session_id: "s1",
+        cwd: "/r",
+        tool_response: response,
+      }),
+    );
+  it("is read from the structured record", () => {
+    const d = post({ gitOperation: { pr: { action: "created", number: 9, url: "https://github.com/o/r/pull/9" } } });
+    expect(d?.prCreated).toEqual({ url: "https://github.com/o/r/pull/9" });
+  });
+  it("ignores a view, a plain call, and other tools", () => {
+    expect(post({ gitOperation: { pr: { action: "viewed", url: "https://github.com/o/r/pull/9" } } })?.prCreated).toBeUndefined();
+    expect(post({ stdout: "https://github.com/o/r/pull/9" })?.prCreated).toBeUndefined();
+    expect(post({ gitOperation: { pr: { action: "created", url: "https://github.com/o/r/pull/9" } } }, "Read")?.prCreated).toBeUndefined();
+  });
+});
