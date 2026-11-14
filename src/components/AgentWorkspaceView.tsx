@@ -1899,6 +1899,7 @@ export function AgentWorkspaceView({
           agent={agent}
           builder={builderLens}
           refreshKey={digest?.updated}
+          subagents={activity?.subagents}
           onNotice={onNotice}
           onSummarize={
             compaction.supported ? (kind, turn) => compaction.ask({ kind, turn }) : undefined
