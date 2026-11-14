@@ -291,6 +291,12 @@ impl ProcessRunner {
         cmd.env_clear();
         #[cfg(unix)]
         cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        // The standalone macOS app binary is both the GUI and the CLI, and
+        // tells them apart by whether `TERM` is set: without it, `version`
+        // prints "The Tailscale GUI failed to start" (read as an unreadable,
+        // so "too old", version). A fixed value, so nothing is inherited.
+        #[cfg(target_os = "macos")]
+        cmd.env("TERM", "dumb");
         #[cfg(windows)]
         for k in ["SystemRoot", "windir"] {
             if let Some(v) = std::env::var_os(k) {
