@@ -3035,12 +3035,70 @@ function TailscaleSettings() {
 /** The portal is served under /remote. */
 const remotePath = (u: string) => (u.endsWith("/remote") ? u : `${u.replace(/\/+$/, "")}/remote`);
 
+/** Phone access over the Tailscale already on this Mac: the portal listens on
+ *  this machine's tailnet address too, so a phone on the same tailnet reaches
+ *  it from anywhere. Shown with the address to open, a QR for it, and the PIN. */
+function PhoneOverTailscale({ status }: { status: ipc.RemoteStatus }) {
+  const [view, setView] = useState<ipc.TailscaleView | null>(null);
+  const [qr, setQr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      void ipc
+        .tailscaleStatus()
+        .then((v) => live && setView(v))
+        .catch(() => live && setView(null));
+    read();
+    const t = setInterval(read, 30_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  const me = view?.kind === "running" ? view.thisMachine : null;
+  // The MagicDNS name when there is one (it survives an address change), else
+  // the tailnet address.
+  const host = me ? me.dnsName.replace(/\.$/, "") || me.ip : null;
+  const url = host ? `http://${host}:${status.port}/remote` : null;
+
+  useEffect(() => {
+    if (!url) {
+      setQr(null);
+      return;
+    }
+    void ipc.remoteQr(url).then(setQr).catch(() => setQr(null));
+  }, [url]);
+
+  return (
+    <Item name="Open on your phone" desc="Over Tailscale, from anywhere.">
+      {url ? (
+        <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
+          {qr && (
+            <div
+              style={{ width: 128, height: 128, padding: 7, background: "#fff", borderRadius: 10, flex: "none" }}
+              dangerouslySetInnerHTML={{ __html: qr }}
+            />
+          )}
+          <div style={{ display: "grid", gap: 10, minWidth: 0, flex: 1 }}>
+            <Copyable text={url} />
+            {status.pin && <Copyable text={status.pin} big />}
+            <span className="set-note">A phone you allow under Tailscale below signs in without the PIN.</span>
+          </div>
+        </div>
+      ) : (
+        <span className="set-note">Needs Tailscale running on this Mac and on your phone. Set it up below.</span>
+      )}
+    </Item>
+  );
+}
+
 function CanopyLinkSettings() {
   const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
   const [tunnel, setTunnel] = useState<ipc.TunnelState>({ running: false, provider: null, url: null, message: null });
   const [busy, setBusy] = useState(false);
   const [qr, setQr] = useState<string | null>(null);
-  const [showLan, setShowLan] = useState(false);
 
   useEffect(() => {
     void ipc.remoteStatus().then(setStatus).catch(() => setStatus(null));
@@ -3089,15 +3147,16 @@ function CanopyLinkSettings() {
     void op.then(setStatus).catch(() => {}).finally(() => setBusy(false));
   };
 
+  // Only what is true of the Canopy link when it is there. While Canopy's
+  // server does not offer links yet (`pending`) the link says nothing: phone
+  // access is the Tailscale block below, which does not depend on it.
   const state = !on
     ? null
     : connected
       ? "Connected. Open it on your phone and sign in to Canopy."
-      : pending
-        ? "Not live yet — use On this network."
-        : failed
-          ? serverFeatureError(tunnel.message, "Your Canopy link").message
-          : (tunnel.message ?? "Connecting…");
+      : failed && !pending
+        ? serverFeatureError(tunnel.message, "Your Canopy link").message
+        : null;
 
   return (
     <>
@@ -3136,20 +3195,7 @@ function CanopyLinkSettings() {
         </Item>
       )}
 
-      {on && status && (
-        <Item name="On this network" desc="Local address, with PIN.">
-          {showLan ? (
-            <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
-              {status.urls?.[0] && <Copyable text={status.urls[0]} />}
-              {status.pin && <Copyable text={status.pin} big />}
-            </div>
-          ) : (
-            <Button size="sm" onClick={() => setShowLan(true)}>
-              Show address and PIN
-            </Button>
-          )}
-        </Item>
-      )}
+      {on && status && <PhoneOverTailscale status={status} />}
     </>
   );
 }
@@ -3161,15 +3207,10 @@ function SelfHostedRemoteSettings({
 }) {
   const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  // Reach + provider are UI selections that outlive this dialog, so they read
-  // from and write back to persisted settings — otherwise reopening Settings
-  // dropped "Internet" back to "This network" even while the tunnel ran on.
-  const [scope, setScope] = useState<"local" | "internet">(() => getSettings().remoteReach);
+  // Phone access is over Tailscale or a public link: the portal refuses the
+  // local network (portal.rs, peer_may_reach), so there is no "This network"
+  // reach to choose any more. The provider outlives this dialog.
   const [provider, setProvider] = useState(() => getSettings().remoteTunnelProvider);
-  const changeScope = (v: "local" | "internet") => {
-    setScope(v);
-    updateSettings({ remoteReach: v });
-  };
   const changeProvider = (v: string) => {
     setProvider(v);
     updateSettings({ remoteTunnelProvider: v });
@@ -3196,7 +3237,6 @@ function SelfHostedRemoteSettings({
   }, []);
 
   const on = status?.enabled ?? false;
-  const lanUrl = status?.urls?.[0] ?? null;
   // The portal is served under /remote, so a tunnel's bare URL needs the path
   // appended or it 404s at the domain root. The URL/QR only belong to the
   // SELECTED provider — switching tabs to one that isn't running shows no link.
@@ -3204,9 +3244,9 @@ function SelfHostedRemoteSettings({
   const tunnelForProvider = tunnel.provider === provider;
   const tunnelUrl =
     tunnelForProvider && tunnel.running && tunnel.url ? withRemote(tunnel.url) : null;
-  const activeUrl = scope === "internet" ? tunnelUrl : lanUrl;
+  const activeUrl = tunnelUrl;
 
-  // Repoint the QR at whichever URL the chosen scope resolves to.
+  // Repoint the QR at the public link.
   useEffect(() => {
     if (!on || !activeUrl) {
       setQr(null);
@@ -3271,83 +3311,67 @@ function SelfHostedRemoteSettings({
 
       {on && (
         <>
-          <Item name="Reach">
-            <Segmented
-              aria-label="Reach"
-              options={[
-                { id: "local", label: "This network" },
-                { id: "internet", label: "Internet" },
-              ]}
-              value={scope}
-              onChange={changeScope}
-            />
-          </Item>
+          {status && <PhoneOverTailscale status={status} />}
 
-          {scope === "internet" && (
-            <Item name="Public link" desc="One tunnel, shared with internet team sessions.">
-              <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
-                <Segmented
-                  aria-label="Tunnel provider"
-                  options={TUNNELS.map((t) => ({ id: t.id, label: t.name }))}
-                  value={provider}
-                  onChange={changeProvider}
-                />
-                <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                  {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
-                </div>
-                {/* Whether the link survives a restart — the thing people trip
-                    on when they bookmark a quick-tunnel URL and it 404s next
-                    session. */}
-                <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                  {prov.fixed
-                    ? "🔗 Same link every session — safe to bookmark."
-                    : "↻ A new link each session. Tailscale keeps one."}
-                </div>
-
-                {prov.needsToken && (
-                  <TextInput
-                    type="password"
-                    width="lg"
-                    placeholder={prov.tokenHelp ?? "ngrok authtoken"}
-                    value={token}
-                    onChange={(e) => {
-                      setToken(e.target.value);
-                      setTrackerKey("ngrok", e.target.value.trim());
-                    }}
-                  />
-                )}
-
-                {!provInstalled ? (
-                  <Button onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
-                    Install {prov.name}
-                  </Button>
-                ) : tunnel.running && tunnel.provider === provider ? (
-                  <Button disabled={busy} onClick={stopTunnel}>
-                    Stop public link
-                  </Button>
-                ) : (
-                  <Button disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
-                    Start public link
-                  </Button>
-                )}
-
-                {tunnel.message && tunnelForProvider && (
-                  <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
-                    {tunnel.message}
-                  </div>
-                )}
+          <Item name="Public link" desc="One tunnel, shared with internet team sessions.">
+            <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
+              <Segmented
+                aria-label="Tunnel provider"
+                options={TUNNELS.map((t) => ({ id: t.id, label: t.name }))}
+                value={provider}
+                onChange={changeProvider}
+              />
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
               </div>
-            </Item>
-          )}
+              {/* Whether the link survives a restart — the thing people trip
+                  on when they bookmark a quick-tunnel URL and it 404s next
+                  session. */}
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {prov.fixed
+                  ? "🔗 Same link every session — safe to bookmark."
+                  : "↻ A new link each session. Tailscale keeps one."}
+              </div>
+
+              {prov.needsToken && (
+                <TextInput
+                  type="password"
+                  width="lg"
+                  placeholder={prov.tokenHelp ?? "ngrok authtoken"}
+                  value={token}
+                  onChange={(e) => {
+                    setToken(e.target.value);
+                    setTrackerKey("ngrok", e.target.value.trim());
+                  }}
+                />
+              )}
+
+              {!provInstalled ? (
+                <Button onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
+                  Install {prov.name}
+                </Button>
+              ) : tunnel.running && tunnel.provider === provider ? (
+                <Button disabled={busy} onClick={stopTunnel}>
+                  Stop public link
+                </Button>
+              ) : (
+                <Button disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
+                  Start public link
+                </Button>
+              )}
+
+              {tunnel.message && tunnelForProvider && (
+                <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
+                  {tunnel.message}
+                </div>
+              )}
+            </div>
+          </Item>
 
           {activeUrl && (
             <Item
               name="Scan to connect"
-              desc={
-                scope === "local"
-                  ? "Scan, then enter the PIN."
-                  : "Scan from anywhere, then enter the PIN."
-              }
+              desc="Scan from anywhere, then enter the PIN."
             >
               <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
                 {qr && (

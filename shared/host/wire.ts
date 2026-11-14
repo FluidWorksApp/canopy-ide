@@ -12,17 +12,28 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
-/** Whether this page came through the person's Canopy link
- *  (https://<handle>.remote.canopyide.dev), where Canopy's sign-in already
- *  proved who they are and the PIN is not asked. False on the LAN address and
- *  on hosts that predate the route. */
-export async function edgeSession(): Promise<boolean> {
+/** How this page is signed in without a PIN, if it is: `link` through the
+ *  person's Canopy link (https://<handle>.remote.canopyide.dev), where Canopy's
+ *  sign-in already proved who they are; `tailnet` from a machine the person
+ *  allowed under Tailscale on the desktop. `null` on hosts that predate the
+ *  route and for any other client, which asks for the PIN. */
+export type NoPinSession = 'link' | 'tailnet' | null
+
+export async function noPinSession(): Promise<NoPinSession> {
   try {
     const r = await fetch('/remote/session')
-    return r.ok && (await r.json()).edge === true
+    if (!r.ok) return null
+    const body = await r.json()
+    if (body.edge !== true) return null
+    return body.tailnet === true ? 'tailnet' : 'link'
   } catch {
-    return false
+    return null
   }
+}
+
+/** Whether no PIN is asked (either kind above). */
+export async function edgeSession(): Promise<boolean> {
+  return (await noPinSession()) !== null
 }
 
 /** Leave a Canopy-link session: the edge clears its sign-in cookie. */

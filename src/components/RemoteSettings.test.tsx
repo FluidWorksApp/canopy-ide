@@ -31,12 +31,18 @@ function commands(calls: string[], tunnelUrl: string | null, message: string | n
     },
     remote_qr: () => "<svg></svg>",
     which_check: () => ({}),
+    tailscale_status: () => tailscale,
   });
 }
 
+const machine = { name: "mac", dnsName: "mac.example.ts.net.", ip: "100.64.0.1", stableId: "nMAC1CNTRL", online: true, allowed: false };
+const running_ts = { kind: "running", version: "1.104.7", minVersion: "1.60.0", canOpenApp: true, thisMachine: machine, machines: [], allowError: null };
+let tailscale: unknown = running_ts;
+
 describe("Remote access, signed in to Canopy", () => {
-  it("is one switch that brings up your own link — no tunnel picker, no PIN", async () => {
+  it("is one switch: phone access over Tailscale, no PIN screen of its own and no second network option", async () => {
     setTeamIdentityFetchForTests(async () => ({ user: { id: "u1", name: "VJ" } }));
+    tailscale = running_ts;
     const calls: string[] = [];
     commands(calls, "https://vj.remote.canopyide.dev");
     render(<RemoteSettings runInTerminal={() => {}} />);
@@ -44,10 +50,35 @@ describe("Remote access, signed in to Canopy", () => {
     expect(screen.queryByText("Cloudflare")).toBeNull();
     await userEvent.click(toggle);
     await waitFor(() => expect(calls).toEqual(["remote_enable", "tunnel_start canopy 6680"]));
+    // The hosted link, when there is one.
     expect(await screen.findByText("https://vj.remote.canopyide.dev/remote")).toBeInTheDocument();
-    expect(screen.queryByText("123456")).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Show address and PIN" }));
+    // The Tailscale address to open on the phone, with the PIN, right there.
+    expect(await screen.findByText("http://mac.example.ts.net:6680/remote")).toBeInTheDocument();
     expect(screen.getByText("123456")).toBeInTheDocument();
+    // There is no local-network section any more.
+    expect(screen.queryByText("On this network")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show address and PIN" })).toBeNull();
+    setTeamIdentityFetchForTests(null);
+  });
+
+  it("uses the tailnet address when Tailscale gives no name", async () => {
+    setTeamIdentityFetchForTests(async () => ({ user: { id: "u1", name: "VJ" } }));
+    tailscale = { ...running_ts, thisMachine: { ...machine, dnsName: "" } };
+    commands([], null, "not-on-server-yet");
+    render(<RemoteSettings runInTerminal={() => {}} />);
+    await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
+    expect(await screen.findByText("http://100.64.0.1:6680/remote")).toBeInTheDocument();
+    setTeamIdentityFetchForTests(null);
+  });
+
+  it("says what is needed when Tailscale is not running, instead of an address", async () => {
+    setTeamIdentityFetchForTests(async () => ({ user: { id: "u1", name: "VJ" } }));
+    tailscale = { ...running_ts, kind: "off", thisMachine: null };
+    commands([], null, "not-on-server-yet");
+    render(<RemoteSettings runInTerminal={() => {}} />);
+    await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
+    expect(await screen.findByText(/Needs Tailscale running on this Mac and on your phone/)).toBeInTheDocument();
+    expect(screen.queryByText(/ts\.net/)).toBeNull();
     setTeamIdentityFetchForTests(null);
   });
 
@@ -55,11 +86,14 @@ describe("Remote access, signed in to Canopy", () => {
     "says links are waiting on the server, not an error (%s)",
     async (message) => {
       setTeamIdentityFetchForTests(async () => ({ user: { id: "u1", name: "VJ" } }));
+      tailscale = running_ts;
       commands([], null, message);
       render(<RemoteSettings runInTerminal={() => {}} />);
       await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
-      const note = await screen.findByText("Not live yet — use On this network.");
-      expect(note).toHaveClass("set-note");
+      // Waiting on the server is not an error and not worth a line: phone access
+      // is the Tailscale block, which does not depend on the link.
+      expect(await screen.findByText("Open on your phone")).toBeInTheDocument();
+      expect(screen.queryByText(/Not live yet/)).toBeNull();
       expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
       setTeamIdentityFetchForTests(null);
     },
