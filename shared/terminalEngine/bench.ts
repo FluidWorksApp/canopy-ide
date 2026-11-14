@@ -77,8 +77,9 @@ const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resol
 
 async function runOne(engine: TerminalEngine, opts: Required<BenchOptions>): Promise<BenchResult> {
   const host = document.createElement("div");
-  // On the page and laid out (so it paints like a real tab), out of sight.
-  host.style.cssText = `position:fixed;left:-10000px;top:0;width:900px;height:600px;`;
+  // On screen, laid out and painted like a real tab, but invisible: an
+  // off-screen host could let an engine skip painting it.
+  host.style.cssText = `position:fixed;left:0;top:0;width:900px;height:600px;opacity:0.001;pointer-events:none;z-index:2147483647;`;
   document.body.appendChild(host);
   const created = createTerminal({ engine, scrollback: 1000, cols: opts.cols, rows: opts.rows });
   try {
