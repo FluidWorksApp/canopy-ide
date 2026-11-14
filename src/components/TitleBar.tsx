@@ -13,6 +13,7 @@ import { BellIcon, CameraIcon, CloseIcon, FrostIcon, PinIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Urgency } from "../attention";
 import type { Project } from "../projects";
+import { tabIconFor } from "../projectIcon";
 import type { TabDrag } from "../tabDrag";
 // macOS gets the frameless "Overlay" titlebar (set in tauri.conf.json), so our
 // TitleBar becomes the real window titlebar: it must reserve space for the
@@ -101,6 +102,36 @@ interface TitleBarProps {
   onStopCollab: () => void;
   onNewProject: () => void;
   onManageProjects: () => void;
+  /** Icons found in each project's folders, by project id, as data: URLs
+   *  (useProjectIcons). The project's own icon choice still wins. */
+  projectIcons?: Readonly<Record<string, string>>;
+}
+
+/** The project's icon in its tab, or nothing (today's text-only tab). Only
+ *  ever an <img> or a built-in glyph: an SVG from a project folder must never
+ *  be put into the page itself. A file that fails to decode drops back to
+ *  text. */
+function ProjectTabIcon({ icon, loaded }: { icon: Project["icon"]; loaded: string | undefined }) {
+  const shown = tabIconFor(icon, loaded);
+  const [failed, setFailed] = useState<string | null>(null);
+  if (!shown) return null;
+  if (shown.kind === "emoji")
+    return (
+      <span className="project-tab-icon project-tab-glyph" aria-hidden>
+        {shown.text}
+      </span>
+    );
+  if (failed === shown.src) return null;
+  return (
+    <img
+      className="project-tab-icon"
+      src={shown.src}
+      alt=""
+      aria-hidden
+      draggable={false}
+      onError={() => setFailed(shown.src)}
+    />
+  );
 }
 
 /** Build has one browser chrome row: this title bar. PreviewView publishes its
@@ -235,6 +266,7 @@ function TitleBarImpl({
   onStopCollab,
   onNewProject,
   onManageProjects,
+  projectIcons,
 }: TitleBarProps) {
   const projectStrip=useRef<HTMLDivElement>(null);
   useEffect(()=>{projectStrip.current?.querySelector('.project-tab-active')?.scrollIntoView?.({block:'nearest',inline:'nearest'});},[activeId]);
@@ -328,6 +360,7 @@ function TitleBarImpl({
               </span>
             )}
             {p.pinned && <span className="tab-pin-mark" title="Pinned" aria-label="Pinned"><PinIcon size={10} /></span>}
+            <ProjectTabIcon icon={p.icon} loaded={projectIcons?.[p.id]} />
             <span>{p.name}</span>
             {/* Nothing is running in a sleeping project, so nothing there can
                 be waiting on you — its agents' last words are history, not a

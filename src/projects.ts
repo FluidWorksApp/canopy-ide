@@ -5,6 +5,7 @@
 import { customAcpRunner, type CustomAcpConfig } from "./acp/providers";
 import { invoke, invokeDesktop } from "./host";
 import type { CustomMicroTask } from "./microTasks";
+import type { ProjectIcon } from "./projectIcon";
 import { getSettings, updateSettings } from "./settings";
 import { defaultLens, withProjectLens } from "./projectLens";
 import { checkoutKey } from "./paths";
@@ -140,6 +141,9 @@ export interface Project {
   /** Pinned in the project tab strip: kept at the front, in place, whatever
    *  else is opened, closed or dragged. */
   pinned?: boolean;
+  /** The tab icon the user chose (projectIcon.ts). Absent means auto: the
+   *  favicon or app icon found in the project's own folders, if any. */
+  icon?: ProjectIcon;
   components: Component[];
   /** Let agent sessions in this project see each other's recent work. Off by
    *  default: it puts one session's prompts into another's context, which is
