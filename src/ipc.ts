@@ -2884,6 +2884,9 @@ export interface ProcInfo {
   cmd: string;
   cpu: number;
   mem_bytes: number;
+  /** TCP ports this process itself listens on. Absent when it has none, and
+   *  from a core or host that does not report them. */
+  ports?: number[];
 }
 /** What a terminal is running, resolved from the process the pty has in the
  *  foreground — evidence, not a verdict. `bin` is the invoked name with any

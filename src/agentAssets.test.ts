@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { assetKind, collectAssets, hasTextPreview, imageMime, isPreviewUrl, previewAssets, resolveAssetPath } from "./agentAssets";
+import { describe, expect, it, vi } from "vitest";
+import { assetKind, collectAssets, hasTextPreview, imageMime, isPreviewUrl, previewAssets, resolveAssetPath, stopServerFor } from "./agentAssets";
 
 describe("assetKind", () => {
   it("recognises documents, images and pages, and ignores source code", () => {
@@ -63,5 +63,53 @@ describe("previewAssets", () => {
     expect(previewAssets([3000])[0]).toMatchObject({ name: "localhost:3000", kind: "preview" });
     expect(isPreviewUrl("http://localhost:3000")).toBe(true);
     expect(isPreviewUrl("/tmp/a.md")).toBe(false);
+  });
+});
+
+describe("stopServerFor", () => {
+  const stat = {
+    id: 3,
+    procs: [
+      { pid: 10, parent: 1 },
+      { pid: 11, parent: 10, ports: [5173] },
+      { pid: 12, parent: 10, ports: [5173, 9229] },
+      { pid: 13, parent: 10, ports: [] },
+    ],
+  };
+
+  it("kills exactly the processes listening on that port", async () => {
+    const kill = vi.fn().mockResolvedValue(undefined);
+    const s = stopServerFor(stat, kill)!;
+    expect(s.ports).toEqual([5173, 9229]);
+    await s.stop(9229);
+    expect(kill.mock.calls).toEqual([[12]]);
+    await s.stop(5173);
+    expect(kill.mock.calls.slice(1)).toEqual([[11], [12]]);
+    await expect(s.stop(8080)).rejects.toThrow("nothing is listening");
+  });
+
+  it("never offers the terminal's own process or the agent CLI", async () => {
+    const kill = vi.fn().mockResolvedValue(undefined);
+    const agentTerminal = {
+      id: 4,
+      agent_hint: { bin: "claude" },
+      procs: [
+        { pid: 20, parent: 1, ports: [7000] }, // the shell
+        { pid: 21, parent: 20, ports: [54545] }, // the agent CLI, with its own port
+        { pid: 22, parent: 21 },
+        { pid: 23, parent: 22, ports: [5173] }, // a dev server the agent started
+      ],
+    };
+    const s = stopServerFor(agentTerminal, kill)!;
+    expect(s.ports).toEqual([5173]);
+    await s.stop(5173);
+    expect(kill.mock.calls).toEqual([[23]]);
+    // A plain shell: what it runs directly is the server.
+    expect(stopServerFor({ ...agentTerminal, agent_hint: null }, kill)!.ports).toEqual([54545, 5173]);
+  });
+
+  it("offers nothing when no process reports a port", () => {
+    expect(stopServerFor({ id: 1, procs: [{ pid: 1, parent: null }] }, vi.fn())).toBeUndefined();
+    expect(stopServerFor(undefined, vi.fn())).toBeUndefined();
   });
 });

@@ -348,6 +348,9 @@ interface AgentDetailsCardProps {
   digest?: ipc.SessionDigest;
   /** TCP ports the agent's terminal is serving; each is a preview in Assets. */
   ports?: number[];
+  /** Stops whatever is listening on these ports. Absent where the process
+   *  behind a port is not known (an older core, another machine). */
+  onStopServer?: { ports: readonly number[]; stop: (port: number) => Promise<void> };
   /** The verdict from shared/agentLife for this agent's terminal, which is what
    *  decides whether a message is safe to send. The raw digest state is not
    *  compared here: it can be stale or unproven. */
@@ -377,12 +380,20 @@ interface AgentDetailsCardProps {
   onNotice?: (message: string) => void;
 }
 
+/** Ports are read every ten seconds or so; a stopped server's row can outlive
+ *  it by that long. After this, a row still there is a server again. */
+const STOP_SETTLE_MS = 15_000;
+
+/** The port of a server asset's `http://localhost:<port>` address. */
+const portOf = (path: string): number => Number(path.slice(path.lastIndexOf(":") + 1));
+
 export function AgentDetailsCard({
   agent,
   repo,
   cwd,
   digest,
   ports,
+  onStopServer,
   life,
   onOpenWorkspace,
   onDockChange,
@@ -434,6 +445,9 @@ export function AgentDetailsCard({
   const [raising, setRaising] = useState<null | {
     title: string;
     busy: boolean;
+    /** "push": the branch already has a PR, so this only commits and pushes,
+     *  and the field is the commit message. */
+    mode: "raise" | "push";
   }>(null);
   /** The brain's draft for the open form. Replies for a closed form are dropped. */
   const draftRef = useRef<{
@@ -599,6 +613,17 @@ export function AgentDetailsCard({
   // Servers the terminal is running get their own section with a link; the
   // Assets list keeps only the files the agent made.
   const servers = previewAssets(ports);
+  /** Servers asked to stop; the row goes when the port stops being reported. */
+  const [stopping, setStopping] = useState<string[]>([]);
+  // Gone from the list: forget it, so a server started there later can be stopped.
+  const portsKey = (ports ?? []).join(",");
+  useEffect(() => {
+    setStopping((cur) => {
+      const next = cur.filter((path) => (ports ?? []).includes(portOf(path)));
+      return next.length === cur.length ? cur : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portsKey]);
   const assets = collectAssets(digest?.files, cwd);
   const requests = useSyncExternalStore(subscribeRequestTasks, () =>
     requestTasksFor(digest?.session_id ?? ""),
@@ -647,13 +672,14 @@ export function AgentDetailsCard({
         : pr.mergeable === "CONFLICTING"
           ? "Resolve the conflicts first"
           : undefined;
-  const canRaise =
-    !pr &&
-    !!repo &&
-    !remoteMachine &&
-    !!branch &&
-    !DEFAULT_BRANCHES.has(branch) &&
-    ((changed ?? 0) > 0 || ahead > 0);
+  const onOwnBranch =
+    !!repo && !remoteMachine && !!branch && !DEFAULT_BRANCHES.has(branch);
+  const canRaise = !pr && onOwnBranch && ((changed ?? 0) > 0 || ahead > 0);
+  // Uncommitted work on a branch that already has its PR: commit and push
+  // adds it to that PR. Only when the PR is this branch's own — a PR shown
+  // because the session raised it from elsewhere is not where a push here goes.
+  const canPush =
+    !!pr && onOwnBranch && pr.branch === branch && pr.state.toUpperCase() === "OPEN" && (changed ?? 0) > 0;
 
   if (collapsed) {
     return (
@@ -756,6 +782,35 @@ export function AgentDetailsCard({
               >
                 Open ↗
               </button>
+              {onStopServer?.ports.includes(portOf(server.path)) && (
+                <button
+                  type="button"
+                  className="agent-card-server-stop"
+                  title={`Stop the server on ${server.name}`}
+                  aria-label={`Stop ${server.name}`}
+                  disabled={stopping.includes(server.path)}
+                  onClick={() => {
+                    setStopping((cur) => [...cur, server.path]);
+                    void onStopServer
+                      .stop(portOf(server.path))
+                      .then(() => {
+                        onNotice?.(`Stopped ${server.name}.`);
+                        // Still listed after a while (something restarted it):
+                        // let the person try again.
+                        setTimeout(
+                          () => setStopping((cur) => cur.filter((p) => p !== server.path)),
+                          STOP_SETTLE_MS,
+                        );
+                      })
+                      .catch((err) => {
+                        onNotice?.(`Could not stop ${server.name}: ${String(err instanceof Error ? err.message : err)}`);
+                        setStopping((cur) => cur.filter((p) => p !== server.path));
+                      });
+                  }}
+                >
+                  <span aria-hidden="true" />
+                </button>
+              )}
             </div>
           ))}
         </section>
@@ -1060,17 +1115,17 @@ export function AgentDetailsCard({
         </div>
       )}
 
-      {canRaise && (
+      {(canRaise || canPush) && (
         <div
           className="agent-card-row agent-card-merge"
           role="group"
-          aria-label="Raise a pull request"
+          aria-label={canPush ? "Commit and push" : "Raise a pull request"}
         >
           {raising ? (
             <>
               <input
                 className="agent-card-title-input agent-card-grow"
-                aria-label="Pull request title"
+                aria-label={raising.mode === "push" ? "Commit message" : "Pull request title"}
                 value={raising.title}
                 autoFocus
                 disabled={raising.busy}
@@ -1105,6 +1160,18 @@ export function AgentDetailsCard({
                       // one the person changed wins.
                       const title =
                         draft && typed === slot!.seed ? draft.title : typed;
+                      if (raising.mode === "push")
+                        return runCommitPushPr({
+                          repo: cwd || repo!,
+                          // Untouched (the seed, or the draft's own first
+                          // line): send the draft's whole message.
+                          message:
+                            draft && (typed === slot!.seed || typed === draft.message.split("\n")[0])
+                              ? draft.message
+                              : typed,
+                          commit: true,
+                          openPr: false,
+                        });
                       return runCommitPushPr({
                         repo: cwd || repo!,
                         message:
@@ -1122,10 +1189,13 @@ export function AgentDetailsCard({
                       onNotice?.(
                         result.prUrl
                           ? `Opened ${result.prUrl}`
-                          : result.prExisted
-                            ? "A pull request already exists for this branch."
-                            : "Committed and pushed.",
+                          : raising.mode === "push" && pr
+                            ? `Committed and pushed to #${pr.number}.`
+                            : result.prExisted
+                              ? "A pull request already exists for this branch."
+                              : "Committed and pushed.",
                       );
+                      setChanged(result.skipped.length);
                       prCache.delete(repo!);
                       setPrEpoch((n) => n + 1);
                       closeRaise();
@@ -1138,7 +1208,7 @@ export function AgentDetailsCard({
                     });
                 }}
               >
-                {raising.busy ? "Working…" : "Raise PR"}
+                {raising.busy ? "Working…" : raising.mode === "push" ? "Commit & push" : "Raise PR"}
               </button>
               <button
                 type="button"
@@ -1154,7 +1224,9 @@ export function AgentDetailsCard({
               type="button"
               className="agent-card-fix"
               onClick={() => {
-                const seed = titleFromBranch(branch!);
+                const mode = canPush ? ("push" as const) : ("raise" as const);
+                const seed =
+                  mode === "push" ? `Update ${titleFromBranch(branch!).toLowerCase()}` : titleFromBranch(branch!);
                 const ctl = new AbortController();
                 const slot = {
                   ctl,
@@ -1163,7 +1235,7 @@ export function AgentDetailsCard({
                   pending: undefined as unknown as Promise<BrainPrDraft | null>,
                 };
                 draftRef.current = slot;
-                setRaising({ title: seed, busy: false });
+                setRaising({ title: seed, busy: false, mode });
                 // The form is usable now; the brain's title fills in if it
                 // answers before the person has typed their own.
                 slot.pending = draftPrWithBrain({
@@ -1173,12 +1245,14 @@ export function AgentDetailsCard({
                   if (!d || draftRef.current !== slot || ctl.signal.aborted)
                     return null;
                   slot.draft = d;
-                  setRaising((r) => (r && r.title === slot.seed ? { ...r, title: d.title } : r));
+                  // Shown as one line; the submit sends the draft's whole message.
+                  const line = mode === "push" ? d.message.split("\n")[0] : d.title;
+                  setRaising((r) => (r && r.title === seed ? { ...r, title: line } : r));
                   return d;
                 });
               }}
             >
-              {(changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
+              {canPush ? "Commit & push" : (changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
             </button>
           )}
         </div>
@@ -1188,6 +1262,9 @@ export function AgentDetailsCard({
         <div className="agent-card-row">
           <span>Changes</span>
           <span className="agent-card-grow" />
+          {pr && (changed ?? 0) > 0 && (
+            <span className="agent-card-dim">{changed} uncommitted</span>
+          )}
           {pr ? (
             <span className="agent-card-diffstat">
               <span className="agent-card-add">+{pr.additions}</span>{" "}
