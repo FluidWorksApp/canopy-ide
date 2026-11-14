@@ -468,6 +468,10 @@ pub struct TailnetServe {
     live_allow: Allowlist,
     sync: Mutex<()>,
     run: Mutex<Option<Running>>,
+    /// The running listener's transport, behind its own short lock so a
+    /// question about a peer never waits on `run`, which a reconcile holds
+    /// across a Tailscale call. Set on bind, cleared on unbind.
+    gate: Mutex<Option<Arc<TailnetTcp>>>,
     status: Mutex<ListenerStatus>,
     handler: Arc<Handler>,
     counts: Arc<Counts>,
@@ -507,6 +511,7 @@ impl TailnetServe {
             live_allow: Allowlist::new(),
             sync: Mutex::new(()),
             run: Mutex::new(None),
+            gate: Mutex::new(None),
             status: Mutex::new(ListenerStatus {
                 state: ListenState::Off,
                 port,
@@ -540,6 +545,15 @@ impl TailnetServe {
                     }
                 }
             });
+    }
+
+    /// Whether the tailnet machine at `ip` is one the user allowed, by the gate
+    /// the terminal listener admits with. True only while that listener runs,
+    /// which is exactly while Tailscale is running and some machine is allowed,
+    /// so with nothing allowed it admits nobody.
+    pub fn admits_peer(&self, ip: IpAddr) -> bool {
+        let transport = self.gate.lock().map(|g| g.clone()).unwrap_or_default();
+        transport.is_some_and(|t| t.authorize_peer(ip).is_some())
     }
 
     pub fn status(&self) -> ListenerStatus {
@@ -605,6 +619,9 @@ impl TailnetServe {
     }
 
     fn unbind(&self, run: &mut Option<Running>, state: ListenState) {
+        if let Ok(mut g) = self.gate.lock() {
+            *g = None;
+        }
         if let Some(r) = run.take() {
             r.transport.shutdown();
         }
@@ -665,6 +682,9 @@ impl TailnetServe {
                     transport.shutdown();
                     self.set_status(ListenState::Unavailable, self.cfg.port);
                     return;
+                }
+                if let Ok(mut g) = self.gate.lock() {
+                    *g = Some(transport.clone());
                 }
                 *run = Some(Running { transport, addrs });
                 self.set_status(ListenState::Listening, port);
@@ -892,6 +912,44 @@ mod tests {
             self.serve.shutdown();
             let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
         }
+    }
+
+    /// The phone portal's question (portal.rs): the same gate as a terminal
+    /// connection, so an allowed machine is admitted and nobody else is.
+    #[test]
+    fn admits_peer_answers_with_the_listener_gate() {
+        let f = fixture("admits-allowed", &[ENTRY]);
+        f.serve.reconcile();
+        assert_eq!(f.serve.status().state, ListenState::Listening);
+        assert!(f.serve.admits_peer(loopback()));
+    }
+
+    #[test]
+    fn admits_peer_refuses_a_machine_that_is_not_allowed() {
+        // The listener runs for another allowed machine; this one is not it.
+        let f = fixture("admits-other", &[OTHER_ENTRY]);
+        f.serve.reconcile();
+        assert_eq!(f.serve.status().state, ListenState::Listening);
+        assert!(!f.serve.admits_peer(loopback()));
+    }
+
+    #[test]
+    fn admits_peer_refuses_everyone_with_nothing_allowed() {
+        let f = fixture("admits-none", &[]);
+        f.serve.reconcile();
+        assert_eq!(f.serve.status().state, ListenState::Off);
+        assert!(!f.serve.admits_peer(loopback()));
+    }
+
+    #[test]
+    fn admits_peer_stops_the_moment_allow_is_switched_off() {
+        let f = fixture("admits-revoked", &[ENTRY]);
+        f.serve.reconcile();
+        assert!(f.serve.admits_peer(loopback()));
+        let list = Allowlist::new();
+        list.save(&f.path).unwrap();
+        f.serve.allow_changed();
+        assert!(!f.serve.admits_peer(loopback()));
     }
 
     #[test]

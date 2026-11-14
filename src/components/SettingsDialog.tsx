@@ -3084,6 +3084,7 @@ function PhoneOverTailscale({ status }: { status: ipc.RemoteStatus }) {
           <div style={{ display: "grid", gap: 10, minWidth: 0, flex: 1 }}>
             <Copyable text={url} />
             {status.pin && <Copyable text={status.pin} big />}
+            <span className="set-note">A phone you allow under Tailscale below signs in without the PIN.</span>
           </div>
         </div>
       ) : (
