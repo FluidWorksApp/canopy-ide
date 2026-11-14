@@ -47,6 +47,10 @@ const REMOTE_BRANCHED = new Set([
   // are on this computer. nativeTerm.ts returns before it asks on a remote or
   // workspace host (the status reads nothing there).
   "native_term_hand_over", "native_term_take_back", "native_term_forget", "native_term_handover_status",
+  // A hover preview of an agent's scratch file reads this computer's disk;
+  // fsReadPreview rejects on a workspace host, and AssetPreview shows its
+  // "open it" note.
+  "fs_read_preview",
 ]);
 
 const SRC = join(__dirname, "..");

@@ -183,12 +183,37 @@ fn link_grant_refusal(canonical: &Path, home: Option<&Path>) -> Option<&'static 
 /// of a file; it is not a way to pull a large file through the renderer.
 const PREVIEW_MAX_BYTES: u64 = 256 * 1024;
 
-/// Read the start of a regular file anywhere on this computer, for a hover
-/// preview of something an agent listed (a screenshot in its scratch folder, a
-/// draft outside the repo). Read only, bounded, and refused for credential
-/// locations exactly as a terminal link is, whatever the Privacy setting says:
-/// the setting is about opening a file for editing, this only looks.
-/// `home` is the canonical home directory; pure so it can be tested.
+/// Where an agent's own output lives, which is what the Assets list shows: the
+/// per-session scratch folders Canopy makes under `~/.canopy/sessions`, the
+/// screenshots and drops it stages under `~/.canopy/spot`, and the system
+/// temporary folders an agent writes drafts and screenshots to. A preview is
+/// refused for a file anywhere else, because this read needs no click and no
+/// setting, and any content the webview shows could ask for it: a path under
+/// the user's documents or dotfiles is not one an agent's scratch work needs
+/// to put on screen.
+fn preview_allowed_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = home {
+        roots.push(home.join(".canopy").join("sessions"));
+        roots.push(home.join(".canopy").join("spot"));
+    }
+    roots.push(std::env::temp_dir());
+    roots.push(PathBuf::from("/tmp"));
+    roots.push(PathBuf::from("/private/tmp"));
+    roots.push(PathBuf::from("/var/tmp"));
+    // The same places, resolved: a symlinked temp folder is judged by where it
+    // leads, as the file is.
+    roots
+        .into_iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .collect()
+}
+
+/// Read the start of a regular file in one of those folders, for a hover
+/// preview. Read only and bounded. Credential locations and credential file
+/// names are refused even inside them. The file is opened first and its path
+/// checked again afterwards, so a path swapped for a symlink in between is
+/// caught. `home` is the canonical home directory; pure so it can be tested.
 fn read_preview_file(
     path: &str,
     home: Option<&Path>,
@@ -199,19 +224,33 @@ fn read_preview_file(
     if !requested.is_absolute() {
         return Err("Only an absolute path can be previewed.".into());
     }
-    // Symlinks are resolved first, so a link into a credential folder is
-    // judged by where it leads.
-    let canonical = requested.canonicalize().map_err(|e| e.to_string())?;
-    if !canonical.is_file() {
-        return Err("That is not a file.".into());
-    }
-    if let Some(reason) = link_grant_refusal(&canonical, home) {
-        return Err(reason.into());
-    }
+    let roots = preview_allowed_roots(home);
+    let authorize = || -> Result<PathBuf, String> {
+        // Symlinks are resolved first, so a link is judged by where it leads.
+        let canonical = requested.canonicalize().map_err(|e| e.to_string())?;
+        if !canonical.is_file() {
+            return Err("That is not a file.".into());
+        }
+        if !roots.iter().any(|root| canonical.starts_with(root)) {
+            return Err("That file is outside the folders previews are read from.".into());
+        }
+        if let Some(reason) = link_grant_refusal(&canonical, home) {
+            return Err(reason.into());
+        }
+        Ok(canonical)
+    };
+    let canonical = authorize()?;
     let limit = max_bytes
         .unwrap_or(PREVIEW_MAX_BYTES)
         .min(PREVIEW_MAX_BYTES);
     let mut file = std::fs::File::open(&canonical).map_err(|e| e.to_string())?;
+    let opened = same_file::Handle::from_file(file.try_clone().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let current = authorize()?;
+    let now = same_file::Handle::from_path(&current).map_err(|e| e.to_string())?;
+    if opened != now {
+        return Err("file changed while opening; retry the read".into());
+    }
     let mut bytes = Vec::new();
     file.by_ref()
         .take(limit)
@@ -220,9 +259,10 @@ fn read_preview_file(
     Ok(bytes)
 }
 
-/// Hover preview of a file that may be outside every project. Local desktop
-/// only: it is not part of the remote host adapter, so a remote or phone
-/// client cannot use it to read this computer's files.
+/// Hover preview of a file in an agent's scratch folders. Local desktop only:
+/// it is not in the remote grant table (`remote::GRANTS`, where adding a line
+/// is the decision to expose a command to a remote token), so a phone or
+/// remote client cannot call it.
 #[tauri::command]
 pub async fn fs_read_preview(
     path: String,
@@ -1835,71 +1875,94 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    fn preview_dir(tag: &str) -> std::path::PathBuf {
+    /// A fake home with `.canopy/sessions` inside it; the temp folder holds it.
+    fn preview_home(tag: &str) -> std::path::PathBuf {
         let base =
             std::env::temp_dir().join(format!("canopy-preview-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(base.join(".canopy/sessions/abc/scratchpad")).unwrap();
         base.canonicalize().unwrap()
     }
 
     #[test]
-    fn a_preview_reads_a_file_outside_every_project_and_stops_at_the_limit() {
-        let dir = preview_dir("read");
-        let file = dir.join("shot.png");
+    fn a_preview_reads_agent_scratch_files_and_stops_at_the_limit() {
+        let home = preview_home("read");
+        let file = home.join(".canopy/sessions/abc/scratchpad/shot.png");
         std::fs::write(&file, vec![7u8; 1000]).unwrap();
         let path = file.to_string_lossy().to_string();
         assert_eq!(
-            super::read_preview_file(&path, None, None).unwrap().len(),
+            super::read_preview_file(&path, Some(&home), None)
+                .unwrap()
+                .len(),
             1000
         );
         assert_eq!(
-            super::read_preview_file(&path, None, Some(10))
+            super::read_preview_file(&path, Some(&home), Some(10))
                 .unwrap()
                 .len(),
             10
         );
         // A caller cannot ask for more than the cap.
-        let big = dir.join("big.bin");
+        let big = home.join(".canopy/sessions/abc/scratchpad/big.bin");
         std::fs::write(&big, vec![1u8; super::PREVIEW_MAX_BYTES as usize + 5000]).unwrap();
-        let got = super::read_preview_file(&big.to_string_lossy(), None, Some(u64::MAX)).unwrap();
+        let got =
+            super::read_preview_file(&big.to_string_lossy(), Some(&home), Some(u64::MAX)).unwrap();
         assert_eq!(got.len() as u64, super::PREVIEW_MAX_BYTES);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The point of narrowing: the read needs no click and no setting, so an
+    /// ordinary file that is in neither scratch folder is not readable by it,
+    /// however harmless it looks. This crate's own manifest is such a file: it
+    /// exists, is absolute, and is under none of the allowed roots.
+    #[test]
+    fn a_preview_does_not_read_files_outside_the_scratch_folders() {
+        let home = preview_home("outside");
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        assert!(std::path::Path::new(manifest).is_file());
+        let err = super::read_preview_file(manifest, Some(&home), None).unwrap_err();
+        assert!(err.contains("outside the folders"), "{err}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn a_preview_never_reads_credential_locations() {
-        let home = preview_dir("home");
-        std::fs::create_dir_all(home.join(".ssh")).unwrap();
-        std::fs::write(home.join(".ssh/config"), "secret").unwrap();
-        std::fs::write(home.join("notes.txt"), "fine").unwrap();
-        std::fs::write(home.join("id_rsa"), "key").unwrap();
+    fn a_preview_never_reads_credentials_even_in_the_scratch_folders() {
+        let home = preview_home("creds");
+        let dir = home.join(".canopy/sessions/abc/scratchpad");
+        std::fs::write(dir.join("id_rsa"), "key").unwrap();
+        std::fs::write(dir.join("server.pem"), "pem").unwrap();
+        std::fs::write(dir.join("notes.txt"), "fine").unwrap();
         let refused = |p: &std::path::Path| {
             super::read_preview_file(&p.to_string_lossy(), Some(&home), None).is_err()
         };
-        assert!(refused(&home.join(".ssh/config")));
-        assert!(refused(&home.join("id_rsa"))); // by name, wherever it is
-        assert!(!refused(&home.join("notes.txt")));
-        // A link into a credential folder is judged by where it leads.
+        assert!(refused(&dir.join("id_rsa")));
+        assert!(refused(&dir.join("server.pem")));
+        assert!(!refused(&dir.join("notes.txt")));
+        // A link from a scratch folder to a credential file is judged by where
+        // it leads.
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(home.join(".ssh/config"), home.join("innocent.txt"))
-                .unwrap();
-            assert!(refused(&home.join("innocent.txt")));
+            std::fs::create_dir_all(home.join(".ssh")).unwrap();
+            std::fs::write(home.join(".ssh/config"), "secret").unwrap();
+            std::os::unix::fs::symlink(home.join(".ssh/config"), dir.join("innocent.txt")).unwrap();
+            assert!(refused(&dir.join("innocent.txt")));
         }
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn a_preview_wants_an_absolute_path_to_a_real_file() {
-        let dir = preview_dir("shape");
-        assert!(super::read_preview_file("relative/shot.png", None, None).is_err());
-        assert!(super::read_preview_file(&dir.to_string_lossy(), None, None).is_err());
-        assert!(
-            super::read_preview_file(&dir.join("missing.png").to_string_lossy(), None, None)
-                .is_err()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        let home = preview_home("shape");
+        let dir = home.join(".canopy/sessions/abc/scratchpad");
+        assert!(super::read_preview_file("relative/shot.png", Some(&home), None).is_err());
+        assert!(super::read_preview_file(&dir.to_string_lossy(), Some(&home), None).is_err());
+        assert!(super::read_preview_file(
+            &dir.join("missing.png").to_string_lossy(),
+            Some(&home),
+            None
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
