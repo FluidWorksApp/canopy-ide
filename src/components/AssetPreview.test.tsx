@@ -51,7 +51,7 @@ describe("AssetPreview outside every project", () => {
     expect(seen).toEqual(["fs_read_file"]);
   });
 
-  it("keeps the original note when both reads refuse", async () => {
+  it("says there is no preview when both reads refuse", async () => {
     mockCommands({
       fs_read_file: () => {
         throw new Error("outside");
@@ -61,6 +61,6 @@ describe("AssetPreview outside every project", () => {
       },
     });
     render(<AssetPreview asset={shot} anchor={anchor} />);
-    expect(await screen.findByText("Outside this project. Click to open.")).toBeInTheDocument();
+    expect(await screen.findByText("No preview for this file. Click to open.")).toBeInTheDocument();
   });
 });

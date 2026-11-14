@@ -83,7 +83,7 @@ export function AssetPreview({ asset, anchor }: { asset: Asset; anchor: DOMRect 
         )}
         {state.status === "running" && <span className="asset-preview-dim">Running now. Click to open it in a preview tab.</span>}
         {state.status === "open-to-view" && <span className="asset-preview-dim">Click to open it in a tab.</span>}
-        {state.status === "unreadable" && <span className="asset-preview-dim">Outside this project. Click to open.</span>}
+        {state.status === "unreadable" && <span className="asset-preview-dim">No preview for this file. Click to open.</span>}
       </div>
       <div className="asset-preview-foot" title={asset.path}>{asset.path}</div>
     </div>,
