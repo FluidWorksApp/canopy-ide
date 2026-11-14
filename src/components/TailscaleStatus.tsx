@@ -251,8 +251,9 @@ function Running({
           </span>
         </div>
         <div className="ts-foot">
-          An allowed machine can read and type into every terminal on this machine, as you. Only
-          allow machines you fully trust. It works only while Canopy is running.
+          An allowed machine can read and type into every terminal on this machine, as you. It can
+          also use Canopy from its browser without the PIN while Remote access is on. Only allow
+          machines you fully trust. It works only while Canopy is running.
         </div>
         {online.length === 0 && <div className="resume-row ts-empty">No other machines online.</div>}
         {online.map((m) => (

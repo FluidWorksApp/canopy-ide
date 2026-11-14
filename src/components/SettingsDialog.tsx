@@ -3207,15 +3207,10 @@ function SelfHostedRemoteSettings({
 }) {
   const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  // Reach + provider are UI selections that outlive this dialog, so they read
-  // from and write back to persisted settings — otherwise reopening Settings
-  // dropped "Internet" back to "This network" even while the tunnel ran on.
-  const [scope, setScope] = useState<"local" | "internet">(() => getSettings().remoteReach);
+  // Phone access is over Tailscale or a public link: the portal refuses the
+  // local network (portal.rs, peer_may_reach), so there is no "This network"
+  // reach to choose any more. The provider outlives this dialog.
   const [provider, setProvider] = useState(() => getSettings().remoteTunnelProvider);
-  const changeScope = (v: "local" | "internet") => {
-    setScope(v);
-    updateSettings({ remoteReach: v });
-  };
   const changeProvider = (v: string) => {
     setProvider(v);
     updateSettings({ remoteTunnelProvider: v });
@@ -3242,7 +3237,6 @@ function SelfHostedRemoteSettings({
   }, []);
 
   const on = status?.enabled ?? false;
-  const lanUrl = status?.urls?.[0] ?? null;
   // The portal is served under /remote, so a tunnel's bare URL needs the path
   // appended or it 404s at the domain root. The URL/QR only belong to the
   // SELECTED provider — switching tabs to one that isn't running shows no link.
@@ -3250,9 +3244,9 @@ function SelfHostedRemoteSettings({
   const tunnelForProvider = tunnel.provider === provider;
   const tunnelUrl =
     tunnelForProvider && tunnel.running && tunnel.url ? withRemote(tunnel.url) : null;
-  const activeUrl = scope === "internet" ? tunnelUrl : lanUrl;
+  const activeUrl = tunnelUrl;
 
-  // Repoint the QR at whichever URL the chosen scope resolves to.
+  // Repoint the QR at the public link.
   useEffect(() => {
     if (!on || !activeUrl) {
       setQr(null);
@@ -3317,83 +3311,67 @@ function SelfHostedRemoteSettings({
 
       {on && (
         <>
-          <Item name="Reach">
-            <Segmented
-              aria-label="Reach"
-              options={[
-                { id: "local", label: "This network" },
-                { id: "internet", label: "Internet" },
-              ]}
-              value={scope}
-              onChange={changeScope}
-            />
-          </Item>
+          {status && <PhoneOverTailscale status={status} />}
 
-          {scope === "internet" && (
-            <Item name="Public link" desc="One tunnel, shared with internet team sessions.">
-              <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
-                <Segmented
-                  aria-label="Tunnel provider"
-                  options={TUNNELS.map((t) => ({ id: t.id, label: t.name }))}
-                  value={provider}
-                  onChange={changeProvider}
-                />
-                <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                  {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
-                </div>
-                {/* Whether the link survives a restart — the thing people trip
-                    on when they bookmark a quick-tunnel URL and it 404s next
-                    session. */}
-                <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                  {prov.fixed
-                    ? "🔗 Same link every session — safe to bookmark."
-                    : "↻ A new link each session. Tailscale keeps one."}
-                </div>
-
-                {prov.needsToken && (
-                  <TextInput
-                    type="password"
-                    width="lg"
-                    placeholder={prov.tokenHelp ?? "ngrok authtoken"}
-                    value={token}
-                    onChange={(e) => {
-                      setToken(e.target.value);
-                      setTrackerKey("ngrok", e.target.value.trim());
-                    }}
-                  />
-                )}
-
-                {!provInstalled ? (
-                  <Button onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
-                    Install {prov.name}
-                  </Button>
-                ) : tunnel.running && tunnel.provider === provider ? (
-                  <Button disabled={busy} onClick={stopTunnel}>
-                    Stop public link
-                  </Button>
-                ) : (
-                  <Button disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
-                    Start public link
-                  </Button>
-                )}
-
-                {tunnel.message && tunnelForProvider && (
-                  <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
-                    {tunnel.message}
-                  </div>
-                )}
+          <Item name="Public link" desc="One tunnel, shared with internet team sessions.">
+            <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
+              <Segmented
+                aria-label="Tunnel provider"
+                options={TUNNELS.map((t) => ({ id: t.id, label: t.name }))}
+                value={provider}
+                onChange={changeProvider}
+              />
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
               </div>
-            </Item>
-          )}
+              {/* Whether the link survives a restart — the thing people trip
+                  on when they bookmark a quick-tunnel URL and it 404s next
+                  session. */}
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {prov.fixed
+                  ? "🔗 Same link every session — safe to bookmark."
+                  : "↻ A new link each session. Tailscale keeps one."}
+              </div>
+
+              {prov.needsToken && (
+                <TextInput
+                  type="password"
+                  width="lg"
+                  placeholder={prov.tokenHelp ?? "ngrok authtoken"}
+                  value={token}
+                  onChange={(e) => {
+                    setToken(e.target.value);
+                    setTrackerKey("ngrok", e.target.value.trim());
+                  }}
+                />
+              )}
+
+              {!provInstalled ? (
+                <Button onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
+                  Install {prov.name}
+                </Button>
+              ) : tunnel.running && tunnel.provider === provider ? (
+                <Button disabled={busy} onClick={stopTunnel}>
+                  Stop public link
+                </Button>
+              ) : (
+                <Button disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
+                  Start public link
+                </Button>
+              )}
+
+              {tunnel.message && tunnelForProvider && (
+                <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
+                  {tunnel.message}
+                </div>
+              )}
+            </div>
+          </Item>
 
           {activeUrl && (
             <Item
               name="Scan to connect"
-              desc={
-                scope === "local"
-                  ? "Scan, then enter the PIN."
-                  : "Scan from anywhere, then enter the PIN."
-              }
+              desc="Scan from anywhere, then enter the PIN."
             >
               <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
                 {qr && (

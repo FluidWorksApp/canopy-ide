@@ -387,6 +387,20 @@ fn admission_applies(path: &str) -> bool {
     )
 }
 
+/// Whether a client at `peer` may reach `path` on the portal's TCP listener.
+/// Phone access is over Tailscale, or through a tunnel on this computer (the
+/// Canopy link, Cloudflare, ngrok and Tailscale Funnel all arrive from
+/// loopback); a client on the local network or the open internet is refused.
+/// The team relay (`/team/ws`) is its own feature, with its own credential,
+/// and keeps the paths it had.
+fn peer_may_reach(path: &str, peer: std::net::IpAddr) -> bool {
+    if path == "/team/ws" {
+        return true;
+    }
+    let ip = peer.to_canonical();
+    ip.is_loopback() || canopy_term_net::tailnet_tcp::is_tailnet_addr(ip)
+}
+
 /// Whether a request from `peer` for `path` is from an allowed tailnet
 /// machine. Only addresses inside Tailscale's ranges are looked up at all, so a
 /// LAN or tunnel client never reaches the Tailscale lookup.
@@ -400,7 +414,9 @@ fn admitted_by_tailnet(
         && admit(peer.to_canonical())
 }
 
-/// The portal's TCP listener, in front of the router: a request from an allowed
+/// The portal's TCP listener, in front of the router. A client that is neither
+/// on this computer nor on the tailnet is refused (`peer_may_reach`). A request
+/// from an allowed
 /// tailnet machine carries `EdgeAuth { owner: true }`, as one through the
 /// Canopy link does, so the portal skips its PIN screen for it. The address is
 /// the TCP peer, never a header. That is what the decision rests on: a reply to
@@ -417,6 +433,13 @@ async fn tailnet_admission(
 ) -> Response {
     let path = req.uri().path().to_string();
     let ip = peer.ip();
+    if !peer_may_reach(&path, ip) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Remote access is over Tailscale. Open this Mac's Tailscale address instead.",
+        )
+            .into_response();
+    }
     if req.extensions().get::<EdgeAuth>().is_none()
         && admission_applies(&path)
         && canopy_term_net::tailnet_tcp::is_tailnet_addr(ip)
@@ -1894,6 +1917,49 @@ mod tailnet_admission_tests {
         assert_eq!(asked.load(Ordering::SeqCst), 2);
         assert!(!tokens.lock().unwrap().contains("phone"));
         assert!(!tailnet.lock().unwrap().contains_key("phone"));
+    }
+
+    /// The Wi-Fi path is closed: phone access is over Tailscale or a tunnel
+    /// on this computer.
+    #[test]
+    fn the_local_network_and_the_internet_cannot_reach_the_portal() {
+        for addr in [
+            "192.168.1.20",
+            "10.0.0.5",
+            "172.16.4.2",
+            "8.8.8.8",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            for path in [
+                "/remote/",
+                "/remote/auth",
+                "/remote/session",
+                "/remote/ws",
+                "/remote/assets/index.js",
+                "/",
+            ] {
+                assert!(!peer_may_reach(path, ip(addr)), "{addr} {path}");
+            }
+        }
+    }
+
+    #[test]
+    fn tunnels_on_this_computer_and_the_tailnet_still_reach_it() {
+        for addr in [
+            "127.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "100.101.102.103",
+            "fd7a:115c:a1e0::1",
+        ] {
+            assert!(peer_may_reach("/remote/auth", ip(addr)), "{addr}");
+        }
+    }
+
+    #[test]
+    fn the_team_relay_keeps_its_own_paths() {
+        assert!(peer_may_reach("/team/ws", ip("192.168.1.20")));
     }
 
     #[test]
