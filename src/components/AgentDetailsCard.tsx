@@ -453,6 +453,8 @@ export function AgentDetailsCard({
   const draftRef = useRef<{
     ctl: AbortController;
     seed: string;
+    /** The checkout and branch it was started for. */
+    key: string;
     draft: BrainPrDraft | null;
     /** Settles with the draft, or null; the submit waits on it briefly. */
     pending: Promise<BrainPrDraft | null>;
@@ -462,12 +464,25 @@ export function AgentDetailsCard({
     draftRef.current = null;
     setRaising(null);
   };
+  // A draft belongs to the checkout and branch it was started for. Compared by
+  // key rather than dropped from a cleanup: a cleanup left over from the
+  // previous branch can run after the form has just been opened on the new
+  // one, and it used to throw that new draft away (the submit then went ahead
+  // without waiting for it).
+  const draftKey = `${cwd ?? ""}\n${repo ?? ""}\n${branch ?? ""}`;
+  useEffect(() => {
+    const slot = draftRef.current;
+    if (slot && slot.key !== draftKey) {
+      slot.ctl.abort();
+      draftRef.current = null;
+    }
+  }, [draftKey]);
   useEffect(
     () => () => {
       draftRef.current?.ctl.abort();
       draftRef.current = null;
     },
-    [cwd, repo, branch],
+    [],
   );
   const [prEpoch, setPrEpoch] = useState(0);
   // The session raised a PR (or any edge changed): drop the minute cache so the
@@ -1236,6 +1251,7 @@ export function AgentDetailsCard({
                 const slot = {
                   ctl,
                   seed,
+                  key: draftKey,
                   draft: null as BrainPrDraft | null,
                   pending: undefined as unknown as Promise<BrainPrDraft | null>,
                 };
