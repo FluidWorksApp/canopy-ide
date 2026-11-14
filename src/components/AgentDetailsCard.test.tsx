@@ -145,6 +145,12 @@ function setup(extra: Partial<Parameters<typeof AgentDetailsCard>[0]> = {}) {
 }
 
 beforeEach(() => localStorage.clear());
+// A call left over from an earlier test would satisfy the next test's "was
+// called" wait before its own call lands.
+beforeEach(async () => {
+  const { runCommitPushPr } = await import("../commitPushPrIpc");
+  vi.mocked(runCommitPushPr).mockClear();
+});
 
 describe("AgentDetailsCard on another machine", () => {
   it("reads branch and changes from that machine and does not look up a PR from this Mac", async () => {
@@ -366,6 +372,63 @@ describe("AgentDetailsCard", () => {
     expect(onOpenAsset).toHaveBeenLastCalledWith("http://localhost:5173", {
       system: true,
     });
+  });
+
+  it("stops a server whose process is known, and offers no stop otherwise", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const { onNotice } = setup({
+      ports: [5173, 8080],
+      onStopServer: { ports: [5173], stop },
+      digest: { session_id: "s" },
+    }) as { onNotice?: ReturnType<typeof vi.fn> };
+    expect(screen.queryByRole("button", { name: "Stop localhost:8080" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Stop localhost:5173" }));
+    expect(stop).toHaveBeenCalledWith(5173);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Stop localhost:5173" })).toBeDisabled(),
+    );
+    void onNotice;
+  });
+
+  it("offers Commit & push for uncommitted work on a branch that has its PR", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "fix/hub-prefetch-scrcpy",
+      entries: [{}, {}, {}],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 77, title: "Hub prefetch", branch: "fix/hub-prefetch-scrcpy", base: "main", state: "OPEN", draft: false, additions: 4, deletions: 1, checks: "", url: "https://example.test/pr/77" },
+    ] as never);
+    setup({ repo: "/push", cwd: "/push" });
+    fireEvent.click(await screen.findByRole("button", { name: "Commit & push" }));
+    expect(screen.queryByRole("button", { name: /raise PR/i })).toBeNull();
+    expect(screen.getByText("3 uncommitted")).toBeTruthy();
+    const input = screen.getByLabelText("Commit message") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Fix the retry" } });
+    fireEvent.click(screen.getByRole("button", { name: "Commit & push" }));
+    const { runCommitPushPr } = await import("../commitPushPrIpc");
+    await waitFor(() =>
+      expect(runCommitPushPr).toHaveBeenCalledWith({
+        repo: "/push",
+        message: "Fix the retry",
+        commit: true,
+        openPr: false,
+      }),
+    );
+  });
+
+  it("does not offer Commit & push into a PR from another branch", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "fix/other-work",
+      entries: [{}],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 78, title: "Elsewhere", branch: "fix/somewhere-else", base: "main", state: "OPEN", draft: false, additions: 1, deletions: 0, checks: "", url: "https://example.test/pr/78" },
+    ] as never);
+    setup({ repo: "/other", cwd: "/other" });
+    await screen.findByRole("button", { name: "Commit & raise PR" });
+    expect(screen.queryByRole("button", { name: "Commit & push" })).toBeNull();
   });
 
   it("shows task progress as a bar", () => {

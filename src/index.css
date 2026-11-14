@@ -7175,6 +7175,35 @@ body.dragging-tab * {
   color: var(--accent, #4a8cff);
   background: color-mix(in srgb, var(--accent, #4a8cff) 16%, transparent);
 }
+/* Stop: the red square every player uses. */
+.agent-card-server-stop {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--danger, #e0483e) 16%, transparent);
+}
+.agent-card-server-stop span {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--danger, #e0483e);
+}
+.agent-card-server-stop:hover {
+  background: color-mix(in srgb, var(--danger, #e0483e) 30%, transparent);
+}
+.agent-card-server-stop:focus-visible {
+  outline: 1px solid var(--danger, #e0483e);
+  outline-offset: 1px;
+}
+.agent-card-server-stop:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 .agent-card-server-open:hover {
   background: color-mix(in srgb, var(--accent, #4a8cff) 28%, transparent);
 }

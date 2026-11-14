@@ -548,7 +548,8 @@ import { AgentBrowserPip, pipOwnerVisible } from "../AgentBrowserPip";
 import { listedForLaunch } from "../../agentCliVisibility";
 import { runCommitPushPr } from "../../commitPushPrIpc";
 import { diffOpenPrs, isMergedState } from "../../prMerged";
-import { isPreviewUrl } from "../../agentAssets";
+import { isAliasPty } from "../../environments/ptyRoute";
+import { isPreviewUrl, stopServerFor } from "../../agentAssets";
 import { AgentDetailsCard } from "../AgentDetailsCard";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
@@ -15487,6 +15488,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 digest={agentTermWs.digest}
                 machine={agentTermWs.machine}
                 ports={projectStats.find((s) => s.id === agentTermWs.ptyId)?.ports}
+                // A terminal on another machine reports pids of that machine.
+                onStopServer={isAliasPty(agentTermWs.ptyId) ? undefined : stopServerFor(projectStats.find((s) => s.id === agentTermWs.ptyId), ipc.killProcess)}
                 life={lifeForPty(agentTermWs.ptyId)}
                 onOpenWorkspace={() => setWsDrawerOpen(true)}
                 onDockChange={setCardDocked}
