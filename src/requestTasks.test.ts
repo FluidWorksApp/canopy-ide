@@ -112,7 +112,7 @@ describe("a reply", () => {
   it("marks a candidate done only when System 2 confirms it", async () => {
     await seed();
     decideImpl.mockResolvedValue(done({ done_0: 0.9, done_1: 0.05 }));
-    stub(brain({ done: [0] }));
+    stub(brain({ done: [1] }));
     await handleReply(S, "Fixed the card.");
     expect(requestTasksFor(S).map((t) => t.status)).toEqual(["done", "open"]);
   });
@@ -133,9 +133,19 @@ describe("a reply", () => {
   it("System 2 cannot finish a task that was not a candidate", async () => {
     await seed();
     decideImpl.mockResolvedValue(done({ done_0: 0.9, done_1: 0.01 }));
-    stub(brain({ done: [1] }));
+    stub(brain({ done: [2] }));
     await handleReply(S, "x");
     expect(requestTasksFor(S).every((t) => t.status === "open")).toBe(true);
+  });
+
+  it("numbers candidates from 1 and maps the answer back to the right task", async () => {
+    await seed();
+    decideImpl.mockResolvedValue(done({ done_0: 0.01, done_1: 0.9 }));
+    const b = brain({ done: [1] });
+    stub(b);
+    await handleReply(S, "Shipped the build.");
+    expect(String(b.mock.calls[0][0].prompt)).toContain("1. Ship build");
+    expect(requestTasksFor(S).map((t) => t.status)).toEqual(["open", "done"]);
   });
 
   it("long replies keep their tail, where the summary is", async () => {
@@ -216,6 +226,10 @@ describe("where a job stopped (content-free trace)", () => {
     expect(traced.at(-1)).toBe("reply-s2-none");
 
     stubTrace(brain({ done: [0] }));
+    await handleReply(S, "x");
+    expect(traced.at(-1)).toBe("reply-s2-unmatched");
+
+    stubTrace(brain({ done: [1] }));
     await handleReply(S, "A is done.");
     expect(traced.at(-1)).toBe("reply-marked");
     expect(requestTasksFor(S)[0].status).toBe("done");
@@ -232,6 +246,7 @@ describe("where a job stopped (content-free trace)", () => {
       "reply-s1-none",
       "reply-s2-failed",
       "reply-s2-none",
+      "reply-s2-unmatched",
       "reply-marked",
     ];
     for (const c of codes) expect(lib).toContain(`"requests-stage:${c}"`);

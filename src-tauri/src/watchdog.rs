@@ -596,7 +596,8 @@ fn start_webview_watchdog(app: AppHandle) {
                 // wedge WebKit's dispatcher while the page was being replaced.
                 let stale = ping_is_stale(age_ms, STALE_AFTER.as_millis() as u64);
                 match heartbeat.observe(now_ms(), stale) {
-                    HeartbeatAction::Healthy | HeartbeatAction::Waiting => {}
+                    HeartbeatAction::Healthy => crate::freeze_sample::refresh_pid(&main),
+                    HeartbeatAction::Waiting => {}
                     HeartbeatAction::RecoveredAfterShed => {
                         ack.record("heartbeat_pressure_probe", age_ms, "recovered");
                     }
@@ -615,6 +616,7 @@ fn start_webview_watchdog(app: AppHandle) {
                             "webview-watchdog: renderer heartbeat stalled (ack {}ms stale); requesting recovery",
                             age_ms
                         );
+                        crate::freeze_sample::log_freeze(&main);
                         match ack.request_reload(&main, "heartbeat_stall", age_ms) {
                             ReloadDecision::Started | ReloadDecision::InRecovery => {}
                             ReloadDecision::RateLimited => {

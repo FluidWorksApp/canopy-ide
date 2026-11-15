@@ -81,6 +81,7 @@ mod session_doc;
 mod session_transfer;
 mod shortcuts;
 mod snapshot;
+mod freeze_sample;
 mod spot;
 mod stores;
 mod structured_runner;
@@ -429,6 +430,7 @@ const REQUEST_STAGES: &[&str] = &[
     "requests-stage:reply-s1-none",
     "requests-stage:reply-s2-failed",
     "requests-stage:reply-s2-none",
+    "requests-stage:reply-s2-unmatched",
     "requests-stage:reply-marked",
 ];
 
