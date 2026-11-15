@@ -80,11 +80,15 @@ describe("what a collab frame changes", () => {
 });
 
 describe("a file too big to share live", () => {
-  it("is measured in UTF-8 bytes against the limit", async () => {
+  it("is measured as it is sent: escaped JSON, in UTF-8 bytes", async () => {
     const { tooBigToShare, LIVE_SHARE_MAX_BYTES } = await import("./collab");
-    expect(tooBigToShare("a".repeat(LIVE_SHARE_MAX_BYTES))).toBe(false);
-    expect(tooBigToShare("a".repeat(LIVE_SHARE_MAX_BYTES + 1))).toBe(true);
-    expect(tooBigToShare("é".repeat(LIVE_SHARE_MAX_BYTES / 2 + 1))).toBe(true);
+    // Two bytes go to the quotes around it.
+    expect(tooBigToShare("a".repeat(LIVE_SHARE_MAX_BYTES - 2))).toBe(false);
+    expect(tooBigToShare("a".repeat(LIVE_SHARE_MAX_BYTES - 1))).toBe(true);
+    expect(tooBigToShare("é".repeat(LIVE_SHARE_MAX_BYTES / 2))).toBe(true);
+    // Escaping doubles quotes and backslashes.
+    expect(tooBigToShare('"'.repeat(LIVE_SHARE_MAX_BYTES / 2))).toBe(true);
+    expect(tooBigToShare('"'.repeat(LIVE_SHARE_MAX_BYTES / 4))).toBe(false);
   });
 
   it("the owner's refusal clears the pending offer and says why", () => {

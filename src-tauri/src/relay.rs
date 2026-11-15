@@ -2219,7 +2219,6 @@ pub async fn relay_send_collab(
             ts: now_ms(),
         };
         let frame = Frame::Collab(msg);
-        fits(&frame)?;
         if let Some(host) = &inner.host {
             let targets = route_targets(host, &host.self_id, &to).0;
             if targets.is_empty() && to.is_some() {
@@ -2232,6 +2231,8 @@ pub async fn relay_send_collab(
             return Err("Not connected to a relay.".into());
         }
     };
+    // Outside the lock: a snapshot can be megabytes.
+    fits(&frame)?;
     if let Some(sender) = upstream {
         return if peer_send(&sender, &frame) {
             Ok(())

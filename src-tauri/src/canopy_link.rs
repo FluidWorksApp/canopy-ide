@@ -307,7 +307,13 @@ async fn run_once(
     // their senders open and the writer would never finish.
     streams.lock().unwrap().clear();
     drop(out_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
+    let stuck = writer.abort_handle();
+    if tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .is_err()
+    {
+        stuck.abort();
+    }
     outcome
 }
 

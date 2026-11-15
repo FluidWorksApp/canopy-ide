@@ -749,6 +749,9 @@ fn pump(link: Arc<Link>, first: AttachedStream, tx: mpsc::SyncSender<Vec<u8>>) {
             0
         };
         if let Some(wait) = quick_drop_wait(quick, &link.timing.backoff) {
+            // Say so while waiting; the tab must not read Connected with no writer.
+            link.set_phase(Phase::Reconnecting);
+            link.emit(State::Reconnecting, Some(1), None);
             if link.sleep(wait) {
                 return;
             }

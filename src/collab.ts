@@ -95,15 +95,15 @@ interface Wire {
   send: (to: string | null, doc: string, body: CollabBody) => void;
 }
 
-/** Under the team link's 2 MB frame limit even after JSON escaping. */
+/** The snapshot's text as sent (JSON-escaped), kept well under the team link's 2 MB frame limit. */
 export const LIVE_SHARE_MAX_BYTES = 1.5 * 1024 * 1024;
 const TOO_BIG = "too-big";
 const TOO_BIG_NOTICE = "This file is too big to share live (over 1.5 MB).";
 
 export function tooBigToShare(text: string): boolean {
-  // Cheap bound first: UTF-8 is at most 3 bytes per UTF-16 unit.
-  if (text.length * 3 <= LIVE_SHARE_MAX_BYTES) return false;
-  return new TextEncoder().encode(text).length > LIVE_SHARE_MAX_BYTES;
+  // Cheap bound first: escaping costs at most 6 bytes per UTF-16 unit.
+  if (text.length * 6 + 2 <= LIVE_SHARE_MAX_BYTES) return false;
+  return new TextEncoder().encode(JSON.stringify(text)).length > LIVE_SHARE_MAX_BYTES;
 }
 
 /** Shared behaviour: own the model subscription, expose remote cursors, and

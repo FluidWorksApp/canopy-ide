@@ -82,6 +82,8 @@ const OUTPUT_BACKLOG_BYTES: usize = 8 * 1024 * 1024;
 const BRIDGE_POLL: Duration = Duration::from_millis(250);
 /// How often a bridge with held-back output offers it again.
 const BACKLOG_POLL: Duration = Duration::from_millis(20);
+/// How long an ended terminal's held-back output may take to go out.
+const BACKLOG_DRAIN: Duration = Duration::from_secs(30);
 
 /// Output a slow peer has not taken yet. Without it a busy terminal filled the
 /// queue before the snapshot was out, and the peer re-attached in a loop.
@@ -393,6 +395,19 @@ impl SessionHandler for Handler {
                     // The wire has no resize event; the size travels in the
                     // attach reply.
                     Ok(Ok(PtyEvent::Resize(..))) => {}
+                    // The terminal ended: its last output still goes out.
+                    Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        let deadline = Instant::now() + BACKLOG_DRAIN;
+                        while !backlog.is_empty()
+                            && !stop.load(Ordering::SeqCst)
+                            && Instant::now() < deadline
+                            && backlog.flush(&tx).is_ok()
+                        {
+                            tokio::time::sleep(BACKLOG_POLL).await;
+                        }
+                        break;
+                    }
+                    // Lagged: there is a gap, so a fresh snapshot instead.
                     Ok(Err(_)) => break,
                 }
             }
