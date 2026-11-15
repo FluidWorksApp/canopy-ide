@@ -100,9 +100,7 @@ fn open_db() -> Result<Connection, String> {
     // a cache: a crash can lose the last commits, and this index is rebuilt
     // from files on disk anyway, which is what SCHEMA_VERSION already assumes.
     let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
-    // The WAL file keeps the size of its largest transaction until it is told
-    // otherwise, and the purge below measures the file, not what is in it: one
-    // big pass left a 300 MB log that read as an oversized index.
+    // Cap the WAL: it keeps its largest transaction's size, and the purge below measures file size.
     let _ = conn.execute_batch("PRAGMA journal_size_limit = 67108864;");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -296,8 +294,7 @@ struct SyncDoc {
     ts: i64,
 }
 
-/// FNV-1a over every column that is stored, with a separator that cannot occur
-/// inside the text, so a change to any of them changes the stamp.
+/// FNV-1a over every stored column, with a separator so field boundaries count.
 fn doc_stamp(d: &SyncDoc) -> i64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut feed = |bytes: &[u8]| {
@@ -317,20 +314,13 @@ fn doc_stamp(d: &SyncDoc) -> i64 {
     hash as i64
 }
 
-/// Make the index hold exactly `docs` for `kind`, writing only what differs:
-/// a new or edited entry is replaced, a removed one is deleted, an unchanged
-/// one is not touched. Returns how many entries were written.
-///
-/// Rows are found by the rowid kept in `doc_stamps`, because the full-text
-/// table has no index on `key`: looking one up that way reads every row. If the
-/// bookkeeping and the table ever disagree (rows from an older build, a stamp
-/// with no row), the kind is rebuilt from scratch once rather than trusted.
+/// Sync the index to exactly `docs` for `kind`, writing only changes; returns rows written.
+/// Rows are found via `doc_stamps` rowids (FTS has no `key` index); any mismatch rebuilds the kind.
 fn sync_docs(conn: &Connection, kind: &str, docs: Vec<SyncDoc>) -> Result<usize, String> {
     use std::collections::HashMap;
     let err = |e: rusqlite::Error| e.to_string();
 
-    // Last one wins, so a repeated key cannot make the counts below disagree
-    // on every pass.
+    // Dedupe by key (last wins) so the counts below stay consistent.
     let mut unique: HashMap<String, SyncDoc> = HashMap::new();
     for d in docs {
         unique.insert(d.key.clone(), d);
@@ -355,10 +345,8 @@ fn sync_docs(conn: &Connection, kind: &str, docs: Vec<SyncDoc>) -> Result<usize,
         })
         .map_err(err)?;
 
-    // Every stamp must point at a row that is really that document. Counts
-    // alone are not enough: an older build sharing this index (a downgrade, a
-    // development build) rewrites research with new row ids and leaves the
-    // count unchanged, and the next edit would delete somebody else's row.
+    // Each stamp must point at its own document: an older build can rewrite rows under the same
+    // count, and stale rowids would delete the wrong row.
     let pointing: i64 = conn
         .query_row(
             "SELECT count(*) FROM doc_stamps s JOIN docs d ON d.rowid = s.rowid_in_docs
@@ -376,7 +364,6 @@ fn sync_docs(conn: &Connection, kind: &str, docs: Vec<SyncDoc>) -> Result<usize,
         kept.clear();
     }
 
-    // Gone from the set: delete the row and its stamp.
     let gone: Vec<String> = kept
         .keys()
         .filter(|k| !unique.contains_key(*k))
@@ -805,24 +792,18 @@ pub async fn spot_ingest(
         }
 
         // ---- research and notes ----
-        // Re-read whole on every ingest, but written only where something
-        // changed. They used to be deleted and inserted again every pass on the
-        // reasoning that there were tens of entries; a machine with 6,400
-        // research documents (54 MB) pushed all of it through the full-text
-        // index each time, which is how one process wrote 137 GB in 73 minutes.
+        // Written only where changed (rewriting everything once wrote 137 GB in 73 min).
         let research_docs: Vec<SyncDoc> = crate::research::index_docs()
             .into_iter()
             .map(|doc| SyncDoc {
-                // Project-qualified, because entry numbers restart per
-                // project and `key` has to be unique across the index.
+                // Entry numbers restart per project; `key` must be unique.
                 key: format!("{}/{}", doc.project_id, doc.id),
                 agent: if doc.agent.is_empty() {
                     "research".to_string()
                 } else {
                     doc.agent
                 },
-                // The cwd the research was done in, which is what
-                // under_roots() scopes a hit by.
+                // under_roots() scopes hits by this cwd.
                 cwd: doc.cwd,
                 title: doc.title,
                 body: doc.body,
@@ -1243,9 +1224,7 @@ mod tests {
             .collect()
     }
 
-    /// The bug: every ingest deleted and re-inserted all of research, so 54 MB
-    /// went through the full-text index on every pass. A pass over the same
-    /// entries must write nothing.
+    /// Re-syncing unchanged entries must write nothing.
     #[test]
     fn a_second_pass_over_unchanged_entries_writes_nothing() {
         let conn = memory_index();
@@ -1327,8 +1306,7 @@ mod tests {
         assert_eq!(bodies(&conn, "research"), vec![("a/1".into(), "r".into())]);
     }
 
-    /// Rows with no stamps (an index written by an older build) or stray rows
-    /// are rebuilt once, never left as duplicates.
+    /// Unstamped or stray rows (older build) trigger one rebuild, never duplicates.
     #[test]
     fn rows_the_bookkeeping_does_not_know_about_are_rebuilt_not_duplicated() {
         let conn = memory_index();
@@ -1352,9 +1330,7 @@ mod tests {
         );
     }
 
-    /// An older build rewrote the table under the same count: the row ids in
-    /// the stamps now point at other documents, and trusting them would delete
-    /// the wrong row on the next edit.
+    /// Stamps pointing at other documents (older build, same count) force a rebuild.
     #[test]
     fn stamps_pointing_at_other_rows_are_rebuilt_not_trusted() {
         let conn = memory_index();
@@ -1373,10 +1349,8 @@ mod tests {
             .unwrap()
         };
         let (one, two) = (rowid_of("a/1"), rowid_of("a/2"));
-        // What an older build does: the same documents written again, here on
-        // each other's rows, so every stamp now points at the other document.
-        // (Explicit rowids: which row each lands on otherwise depends on the
-        // order the first sync wrote them in, which is a hash map's order.)
+        // Simulate an older build: swap the two documents' rows (explicit rowids, since
+        // hash map order decides them otherwise).
         conn.execute("DELETE FROM docs WHERE kind = 'research'", [])
             .unwrap();
         for (rowid, k, b) in [(two, "a/1", "one"), (one, "a/2", "two")] {

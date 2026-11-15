@@ -418,9 +418,7 @@ fn set_shortcut_profile(app: tauri::AppHandle, profile: String) -> Result<(), St
     Ok(())
 }
 
-/// Where the person's request list (requestTasks.ts) stopped with one prompt or
-/// reply. Codes only: never a title, a prompt or a reply. Enough to tell a
-/// finished request that never closed apart by the step that dropped it.
+/// Codes for where requestTasks.ts dropped a prompt or reply. Codes only, never content.
 const REQUEST_STAGES: &[&str] = &[
     "requests-stage:prompt-notification-skipped",
     "requests-stage:reply-no-open",

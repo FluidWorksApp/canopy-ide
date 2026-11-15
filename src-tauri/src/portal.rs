@@ -291,22 +291,19 @@ struct Portal {
     /// first answer back rather than starting a second run.
     verbs: Arc<VerbRouter>,
     sockets: Arc<SocketMetrics>,
-    /// Tokens signed in by an allowed tailnet machine's identity rather than
-    /// the PIN, with that machine's address. Each is checked again at every
-    /// socket ticket and, while its socket is open, every few seconds, so a
-    /// machine whose Allow is switched off is signed out within seconds.
+    /// Tokens signed in by tailnet identity, with the peer address; re-checked per ticket and
+    /// every few seconds while the socket is open.
     tailnet_tokens: TailnetTokens,
-    /// The tailnet identity check (tailnet_serve.rs), for those re-checks.
+    /// Tailnet identity check (tailnet_serve.rs).
     admit: Admit,
 }
 
 type TailnetTokens = Arc<Mutex<HashMap<String, std::net::IpAddr>>>;
 
-/// How often an open socket signed in by tailnet identity is checked again.
+/// Re-check interval for sockets signed in by tailnet identity.
 const TAILNET_RECHECK: Duration = Duration::from_secs(5);
 
-/// Remember how a token was signed in: by an allowed tailnet machine (its
-/// address is kept for the re-checks), or by the PIN or the Canopy link.
+/// Record a tailnet sign-in (with its address) for later re-checks.
 fn record_sign_in(
     tailnet_tokens: &TailnetTokens,
     token: &str,
@@ -318,9 +315,7 @@ fn record_sign_in(
     }
 }
 
-/// Whether a token is still good for a socket ticket. A token signed in by
-/// tailnet identity is good only while the request is admitted the same way;
-/// otherwise it is revoked here, from both sets. Any other token is untouched.
+/// Socket ticket check: a tailnet token no longer admitted is revoked; other tokens pass.
 fn ticket_allowed(
     tokens: &Tokens,
     tailnet_tokens: &TailnetTokens,
@@ -337,9 +332,7 @@ fn ticket_allowed(
     true
 }
 
-/// Whether an open socket's token is still good. Only a token signed in by
-/// tailnet identity is asked about, by its machine's address; one that is
-/// refused now is revoked from both sets and the socket closes.
+/// Open-socket check: revokes a tailnet token whose machine is no longer admitted.
 fn socket_still_admitted(
     tokens: &Tokens,
     tailnet_tokens: &TailnetTokens,
@@ -357,29 +350,21 @@ fn socket_still_admitted(
     false
 }
 
-/// Set alongside `EdgeAuth` on a request from an allowed tailnet machine
-/// (`tailnet_admission`), with that machine's address, so the session answer
-/// can say so and a token signed in this way can be checked again later.
+/// Marks a request from an allowed tailnet machine, so its token can be re-checked later.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TailnetAdmitted(pub std::net::IpAddr);
 
 /// Set on requests that reached the portal through Canopy's edge
-/// (canopy_link.rs), or from an allowed tailnet machine (`tailnet_admission`).
-/// `owner` means the person was already identified, by Canopy's sign-in for
-/// the link or by Tailscale for the machine, so the PIN is not asked again. A
-/// LAN or tunnel client never carries it.
+/// (canopy_link.rs) or from an allowed tailnet machine; `owner` skips the PIN.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EdgeAuth {
     pub owner: bool,
 }
 
-/// Whether the machine at an address is an allowed tailnet machine, decided by
-/// the app's Tailscale support (tailnet_serve.rs).
+/// Tailnet allow check, supplied by tailnet_serve.rs.
 type Admit = Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>;
 
-/// The requests an allowed machine's identity is asked about: whether to skip
-/// the PIN screen, signing in, and each socket ticket (where a token signed in
-/// that way is checked again). Nothing else asks.
+/// The only paths tailnet admission applies to.
 fn admission_applies(path: &str) -> bool {
     matches!(
         path,
@@ -387,12 +372,8 @@ fn admission_applies(path: &str) -> bool {
     )
 }
 
-/// Whether a client at `peer` may reach `path` on the portal's TCP listener.
-/// Phone access is over Tailscale, or through a tunnel on this computer (the
-/// Canopy link, Cloudflare, ngrok and Tailscale Funnel all arrive from
-/// loopback); a client on the local network or the open internet is refused.
-/// The team relay (`/team/ws`) is its own feature, with its own credential,
-/// and keeps the paths it had.
+/// Only loopback (local tunnels) and tailnet peers may reach the TCP listener; LAN is refused.
+/// `/team/ws` has its own credential and is unaffected.
 fn peer_may_reach(path: &str, peer: std::net::IpAddr) -> bool {
     if path == "/team/ws" {
         return true;
@@ -401,9 +382,7 @@ fn peer_may_reach(path: &str, peer: std::net::IpAddr) -> bool {
     ip.is_loopback() || canopy_term_net::tailnet_tcp::is_tailnet_addr(ip)
 }
 
-/// Whether a request from `peer` for `path` is from an allowed tailnet
-/// machine. Only addresses inside Tailscale's ranges are looked up at all, so a
-/// LAN or tunnel client never reaches the Tailscale lookup.
+/// Tailnet admission; only addresses in Tailscale's ranges are ever looked up.
 fn admitted_by_tailnet(
     path: &str,
     peer: std::net::IpAddr,
@@ -414,17 +393,8 @@ fn admitted_by_tailnet(
         && admit(peer.to_canonical())
 }
 
-/// The portal's TCP listener, in front of the router. A client that is neither
-/// on this computer nor on the tailnet is refused (`peer_may_reach`). A request
-/// from an allowed
-/// tailnet machine carries `EdgeAuth { owner: true }`, as one through the
-/// Canopy link does, so the portal skips its PIN screen for it. The address is
-/// the TCP peer, never a header. That is what the decision rests on: a reply to
-/// a tailnet source address is routed only through the tunnel, so a client
-/// that claims a tailnet address it does not hold never completes the
-/// handshake. A request that is not admitted is left alone and asks for the
-/// PIN as before. Not applied to the router the Canopy link serves, which sets
-/// its own `EdgeAuth`.
+/// Gives allowed tailnet machines `EdgeAuth { owner: true }` (no PIN). Trusts the TCP peer,
+/// never a header: a spoofed tailnet source can't complete the handshake.
 async fn tailnet_admission(
     AxumState(admit): AxumState<Admit>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -615,9 +585,7 @@ pub async fn remote_enable(
     .ok()
     .flatten();
 
-    // The TCP listener's router gains tailnet admission; the stored router
-    // (served for the Canopy link's streams) does not, since the link sets its
-    // own EdgeAuth.
+    // Only the TCP listener gets tailnet admission; the Canopy link sets its own EdgeAuth.
     let serve_router = router.clone().layer(axum::middleware::from_fn_with_state(
         admit,
         tailnet_admission,
@@ -779,8 +747,7 @@ async fn session_handler(
     edge: Option<axum::Extension<EdgeAuth>>,
     tailnet: Option<axum::Extension<TailnetAdmitted>>,
 ) -> Response {
-    // `tailnet` tells the page which kind of no-PIN sign-in this is: signing
-    // out of a Canopy link goes through the edge, which a tailnet has none of.
+    // The page needs the kind: a tailnet sign-in has no edge to sign out of.
     Json(json!({
         "edge": edge.is_some_and(|e| e.owner),
         "tailnet": tailnet.is_some(),
@@ -826,9 +793,7 @@ async fn ws_ticket_handler(
     let Some(token) = token.filter(|token| valid_token(&p.tokens, token)) else {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     };
-    // A token a tailnet machine got by being allowed is good only while it
-    // still is: Allow off, or the request no longer coming from that machine,
-    // ends it here and the page drops back to its sign-in.
+    // A tailnet token is revoked once its machine is no longer admitted.
     if !ticket_allowed(&p.tokens, &p.tailnet_tokens, token, tailnet.is_some()) {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
@@ -984,8 +949,7 @@ async fn ws_conn(
     let mut attaches: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
     let idle = tokio::time::sleep(PORTAL_IDLE_TIMEOUT);
     tokio::pin!(idle);
-    // A socket signed in by tailnet identity is asked about again while open,
-    // so Allow off ends it within seconds instead of at its next reconnect.
+    // Re-check tailnet sockets while open so Allow off takes effect within seconds.
     let mut recheck = tokio::time::interval(TAILNET_RECHECK);
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     recheck.tick().await;
@@ -1850,7 +1814,7 @@ mod tailnet_admission_tests {
         s.parse().unwrap()
     }
 
-    /// Counts how many lookups were made and answers `answer` to each.
+    /// Counts lookups; answers `answer` to each.
     fn admit_with(answer: bool, asked: Arc<AtomicUsize>) -> impl Fn(IpAddr) -> bool {
         move |_| {
             asked.fetch_add(1, Ordering::SeqCst);
@@ -1880,8 +1844,7 @@ mod tailnet_admission_tests {
         record_sign_in(&tailnet, "phone", true, Some(ip("100.101.102.103")));
         assert!(ticket_allowed(&tokens, &tailnet, "phone", true));
         assert!(tokens.lock().unwrap().contains("phone"));
-        // Allow switched off: the next ticket request is refused and the token
-        // is gone from both sets, so a retry is refused too.
+        // Allow off: the ticket is refused and the token revoked, so a retry fails too.
         assert!(!ticket_allowed(&tokens, &tailnet, "phone", false));
         assert!(!tokens.lock().unwrap().contains("phone"));
         assert!(!tailnet.lock().unwrap().contains_key("phone"));
@@ -1919,8 +1882,7 @@ mod tailnet_admission_tests {
         assert!(!tailnet.lock().unwrap().contains_key("phone"));
     }
 
-    /// The Wi-Fi path is closed: phone access is over Tailscale or a tunnel
-    /// on this computer.
+    /// LAN clients are refused; phone access is Tailscale or a local tunnel.
     #[test]
     fn the_local_network_and_the_internet_cannot_reach_the_portal() {
         for addr in [
@@ -2013,9 +1975,7 @@ mod tailnet_admission_tests {
         assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 
-    /// The point of the range check: a LAN, loopback or tunnel client never
-    /// reaches the Tailscale lookup, so nothing off the tailnet can be admitted
-    /// by it, whatever the lookup would say.
+    /// Non-tailnet addresses never reach the Tailscale lookup, whatever it would say.
     #[test]
     fn nothing_outside_the_tailnet_is_looked_up_or_admitted() {
         let asked = Arc::new(AtomicUsize::new(0));

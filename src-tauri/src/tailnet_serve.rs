@@ -33,10 +33,8 @@
 //! into it, which is a shell as this user. There is no per-terminal scope or
 //! view-only mode. Reachable only while the app runs.
 //!
-//! Allow also signs the machine in to the phone portal without its PIN, while
-//! Remote access is on (portal.rs asks [`TailnetServe::admits_peer`], the same
-//! gate, about requests from tailnet addresses). There it can do what a PIN
-//! sign-in can, including starting agents. Allow off ends that within seconds.
+//! Allow also skips the phone portal's PIN for that machine while Remote access is on
+//! (portal.rs asks [`TailnetServe::admits_peer`]); Allow off ends it within seconds.
 //!
 //! Nothing here logs a tailnet name, address, peer identity or key.
 
@@ -473,9 +471,7 @@ pub struct TailnetServe {
     live_allow: Allowlist,
     sync: Mutex<()>,
     run: Mutex<Option<Running>>,
-    /// The running listener's transport, behind its own short lock so a
-    /// question about a peer never waits on `run`, which a reconcile holds
-    /// across a Tailscale call. Set on bind, cleared on unbind.
+    /// Listener transport on its own lock, so peer checks never wait on `run` (held across Tailscale calls).
     gate: Mutex<Option<Arc<TailnetTcp>>>,
     status: Mutex<ListenerStatus>,
     handler: Arc<Handler>,
@@ -552,10 +548,7 @@ impl TailnetServe {
             });
     }
 
-    /// Whether the tailnet machine at `ip` is one the user allowed, by the gate
-    /// the terminal listener admits with. True only while that listener runs,
-    /// which is exactly while Tailscale is running and some machine is allowed,
-    /// so with nothing allowed it admits nobody.
+    /// Whether `ip` is an allowed tailnet machine, per the terminal listener's gate (false when it isn't running).
     pub fn admits_peer(&self, ip: IpAddr) -> bool {
         let transport = self.gate.lock().map(|g| g.clone()).unwrap_or_default();
         transport.is_some_and(|t| t.authorize_peer(ip).is_some())
@@ -919,8 +912,7 @@ mod tests {
         }
     }
 
-    /// The phone portal's question (portal.rs): the same gate as a terminal
-    /// connection, so an allowed machine is admitted and nobody else is.
+    /// Portal admission uses the terminal listener's gate.
     #[test]
     fn admits_peer_answers_with_the_listener_gate() {
         let f = fixture("admits-allowed", &[ENTRY]);

@@ -149,8 +149,7 @@ function titlesPrompt(state: string, open: string[]): string {
   );
 }
 
-/** A background task reporting back arrives as a prompt event, but the person
- *  did not write it and it asks for nothing: it is never a request. */
+/** Background-task reports arrive as prompts but are never requests. */
 export const isNotification = (prompt: string) => /^\s*<task-notification>/.test(prompt);
 
 export async function handlePrompt(sessionId: string, prompt: string): Promise<void> {

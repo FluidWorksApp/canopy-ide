@@ -198,10 +198,9 @@ describe("the reply's closing words", () => {
     observeAgentTurns([ev("Stop", { lastAssistantMessage: long })], 101_000);
     await flush();
     expect(ends).toHaveLength(1);
-    // The start is still the start (receipts and live rooms read that)...
+    // lastMessage keeps the start (receipts and live rooms read it).
     expect(ends[0].lastMessage?.startsWith("I'll start by reading")).toBe(true);
     expect(ends[0].lastMessage).not.toContain("Done: the PRs");
-    // ...and the closing words carry the summary.
     expect(ends[0].closing?.endsWith("Done: the PRs now point at the release.")).toBe(true);
     expect(ends[0].closing!.length).toBeLessThanOrEqual(6001);
   });

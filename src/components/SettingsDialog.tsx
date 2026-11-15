@@ -3035,9 +3035,7 @@ function TailscaleSettings() {
 /** The portal is served under /remote. */
 const remotePath = (u: string) => (u.endsWith("/remote") ? u : `${u.replace(/\/+$/, "")}/remote`);
 
-/** Phone access over the Tailscale already on this Mac: the portal listens on
- *  this machine's tailnet address too, so a phone on the same tailnet reaches
- *  it from anywhere. Shown with the address to open, a QR for it, and the PIN. */
+/** Phone access over this Mac's Tailscale: address, QR and PIN. */
 function PhoneOverTailscale({ status }: { status: ipc.RemoteStatus }) {
   const [view, setView] = useState<ipc.TailscaleView | null>(null);
   const [qr, setQr] = useState<string | null>(null);
@@ -3058,8 +3056,7 @@ function PhoneOverTailscale({ status }: { status: ipc.RemoteStatus }) {
   }, []);
 
   const me = view?.kind === "running" ? view.thisMachine : null;
-  // The MagicDNS name when there is one (it survives an address change), else
-  // the tailnet address.
+  // MagicDNS name (survives address changes), else the tailnet address.
   const host = me ? me.dnsName.replace(/\.$/, "") || me.ip : null;
   const url = host ? `http://${host}:${status.port}/remote` : null;
 
@@ -3147,9 +3144,7 @@ function CanopyLinkSettings() {
     void op.then(setStatus).catch(() => {}).finally(() => setBusy(false));
   };
 
-  // Only what is true of the Canopy link when it is there. While Canopy's
-  // server does not offer links yet (`pending`) the link says nothing: phone
-  // access is the Tailscale block below, which does not depend on it.
+  // While links are `pending`, say nothing: phone access doesn't depend on the link.
   const state = !on
     ? null
     : connected
@@ -3207,9 +3202,7 @@ function SelfHostedRemoteSettings({
 }) {
   const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  // Phone access is over Tailscale or a public link: the portal refuses the
-  // local network (portal.rs, peer_may_reach), so there is no "This network"
-  // reach to choose any more. The provider outlives this dialog.
+  // No LAN option: the portal refuses LAN clients (peer_may_reach). The provider outlives this dialog.
   const [provider, setProvider] = useState(() => getSettings().remoteTunnelProvider);
   const changeProvider = (v: string) => {
     setProvider(v);

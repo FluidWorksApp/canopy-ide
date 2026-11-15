@@ -36,8 +36,7 @@ import type { Transport } from '@shared/transport'
 
 export default function App() {
   const [token, setToken] = useState<string | null>(savedToken())
-  /** Signed in already, no PIN: through the person's Canopy link, or from a
-   *  machine they allowed under Tailscale. `undefined` while asking. */
+  /** Signed in without a PIN (Canopy link or allowed tailnet machine); `undefined` while asking. */
   const [kind, setKind] = useState<NoPinSession | undefined>(undefined)
   const edge = kind === undefined ? null : kind !== null
   useViewportFit()
@@ -52,9 +51,7 @@ export default function App() {
     setToken(null)
   }, [])
   if (!token) return <PinGate edge={edge} onToken={setToken} />
-  // Signing out of a Canopy link goes through the edge. A tailnet machine has
-  // no edge to sign out of: its identity is what lets it in, and switching its
-  // Allow off on the desktop is how it is let out.
+  // A tailnet machine has no edge to sign out of; Allow off on the desktop lets it out.
   return <Console token={token} onAuthFail={expire} onLogout={kind === 'link' ? edgeSignOut : expire} />
 }
 

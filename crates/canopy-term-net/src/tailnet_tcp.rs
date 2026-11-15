@@ -780,12 +780,7 @@ impl TailnetTcp {
         self.gate.authorize(ip)
     }
 
-    /// The allowlist entry for the machine at `ip` when it is an allowed
-    /// machine of this machine's own tailnet, else `None`: the same check, with
-    /// the same whois lookup, rate limits and refusals, that every connection
-    /// to this listener passes before a byte of it is read. For a service that
-    /// admits by tailnet identity but speaks its own protocol on its own port
-    /// (the phone portal). Any failure is `None`.
+    /// Allowlist entry for `ip` if it's an allowed machine on our tailnet (same check as incoming connections).
     pub fn authorize_peer(&self, ip: IpAddr) -> Option<String> {
         self.gate.authorize(ip)
     }

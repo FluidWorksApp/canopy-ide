@@ -39,10 +39,8 @@ export function AssetPreview({ asset, anchor }: { asset: Asset; anchor: DOMRect 
       setState({ status: "open-to-view" });
       return;
     }
-    // Inside a project folder the normal read applies (and it is what works
-    // for a workspace on another machine). An agent's screenshot or draft in
-    // its scratch folder is outside every project and refused by it, so the
-    // preview falls back to the read-only one, which reads only those folders.
+    // Project files use the normal read (works for remote workspaces); agent scratch files
+    // outside every project fall back to the scratch-only preview read.
     ipc
       .fsReadFile(asset.path, READ_BYTES)
       .catch(() => ipc.fsReadPreview(asset.path, READ_BYTES))

@@ -53,13 +53,10 @@ export interface AgentTurnEnd extends AgentTurnStart {
    *  `filesTouched` covers that window. */
   partial?: boolean;
   /** The agent's own closing words for the turn, when its Stop hook carries
-   *  them — a claim, which proof receipts show beside (never as) evidence.
-   *  The start of the message, at most LAST_MESSAGE_CHARS. */
+   *  them (a claim, never evidence). The first LAST_MESSAGE_CHARS. */
   lastMessage?: string;
-  /** The end of the same message, at most CLOSING_CHARS: where an agent sums up
-   *  what it finished. The request list's "did this reply finish it?" check
-   *  reads this; reading `lastMessage` it never saw the summary of any long
-   *  reply, so finished requests stayed open. */
+  /** The last CLOSING_CHARS of the message, where agents sum up; the request list's
+   *  "did this reply finish it?" check reads this. */
   closing?: string;
 }
 

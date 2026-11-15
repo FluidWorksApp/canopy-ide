@@ -50,12 +50,9 @@ describe("Remote access, signed in to Canopy", () => {
     expect(screen.queryByText("Cloudflare")).toBeNull();
     await userEvent.click(toggle);
     await waitFor(() => expect(calls).toEqual(["remote_enable", "tunnel_start canopy 6680"]));
-    // The hosted link, when there is one.
     expect(await screen.findByText("https://vj.remote.canopyide.dev/remote")).toBeInTheDocument();
-    // The Tailscale address to open on the phone, with the PIN, right there.
     expect(await screen.findByText("http://mac.example.ts.net:6680/remote")).toBeInTheDocument();
     expect(screen.getByText("123456")).toBeInTheDocument();
-    // There is no local-network section any more.
     expect(screen.queryByText("On this network")).toBeNull();
     expect(screen.queryByRole("button", { name: "Show address and PIN" })).toBeNull();
     setTeamIdentityFetchForTests(null);
@@ -90,8 +87,7 @@ describe("Remote access, signed in to Canopy", () => {
       commands([], null, message);
       render(<RemoteSettings runInTerminal={() => {}} />);
       await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
-      // Waiting on the server is not an error and not worth a line: phone access
-      // is the Tailscale block, which does not depend on the link.
+      // A pending link shows no error: phone access doesn't depend on it.
       expect(await screen.findByText("Open on your phone")).toBeInTheDocument();
       expect(screen.queryByText(/Not live yet/)).toBeNull();
       expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
