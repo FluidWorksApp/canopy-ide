@@ -16,6 +16,24 @@ const OVERFLOW = "Couldn't send input — reconnecting. Type it again once conne
 const EXPIRED = "Input typed while disconnected was not sent. Type it again.";
 const PARTIAL = "Some input typed while disconnected was not sent. Check the prompt before continuing.";
 
+/** Characters per input message; JSON-escaped it stays well under the host's 1 MiB cap. */
+export const INPUT_PIECE_CHARS = 64 * 1024;
+
+/** `data` in pieces of at most INPUT_PIECE_CHARS, never splitting a surrogate pair. */
+export function inputPieces(data: string): string[] {
+  if (data.length <= INPUT_PIECE_CHARS) return [data];
+  const pieces: string[] = [];
+  let at = 0;
+  while (at < data.length) {
+    let end = Math.min(at + INPUT_PIECE_CHARS, data.length);
+    const last = data.charCodeAt(end - 1);
+    if (end < data.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    pieces.push(data.slice(at, end));
+    at = end;
+  }
+  return pieces;
+}
+
 type Backlog = { chunks: string[]; chars: number; since: number; dropped: boolean };
 
 /** One subscription per host PTY, shared by all views in this client. A socket
@@ -131,8 +149,11 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     },
     writePty(pty, data) {
       if (disposed || !data) return;
-      // Behind a backlog, new input queues too: it must not overtake it.
-      if (backlogs.has(pty) || !wire.send({ t: "input", pty, data })) enqueue(pty, data);
+      // The host drops a socket on any message over 1 MiB, so a big paste goes in pieces.
+      for (const piece of inputPieces(data)) {
+        // Behind a backlog, new input queues too: it must not overtake it.
+        if (backlogs.has(pty) || !wire.send({ t: "input", pty, data: piece })) enqueue(pty, piece);
+      }
     },
     killPty(pty) { if (!disposed) wire.send({ t: "kill", pty }); },
     dispose() {

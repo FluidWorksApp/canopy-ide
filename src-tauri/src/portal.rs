@@ -95,25 +95,52 @@ impl PortalOut {
         )
     }
 
-    async fn send(&self, text: String) -> Result<(), ()> {
+    async fn send(&self, text: String) -> Result<(), SendError> {
         let len = text.len().max(1);
         if len > PORTAL_MAX_MESSAGE_BYTES {
-            return Err(());
+            return Err(SendError::TooLarge);
         }
         let permit = self
             .bytes
             .clone()
             .acquire_many_owned(len as u32)
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| SendError::Closed)?;
         self.tx
             .send(OutboundMessage {
                 text,
                 _permit: permit,
             })
             .await
-            .map_err(|_| ())
+            .map_err(|_| SendError::Closed)
     }
+}
+
+/// Why a send failed: one message over the cap, or the socket is gone.
+#[derive(Debug, PartialEq, Eq)]
+enum SendError {
+    TooLarge,
+    Closed,
+}
+
+/// Catch-up replay on attach: the newest bytes only (the phone keeps 1,000 lines).
+const SNAPSHOT_TAIL_BYTES: usize = 1024 * 1024;
+/// Raw bytes per replay frame; base64 + JSON keeps it well under the message cap.
+const SNAPSHOT_FRAME_BYTES: usize = 256 * 1024;
+
+/// The replay frames for `snapshot`: its tail, starting after a newline so it
+/// doesn't open mid escape sequence, split into frames that fit the cap.
+fn snapshot_frames(id: u32, snapshot: &[u8]) -> Vec<String> {
+    let mut start = snapshot.len().saturating_sub(SNAPSHOT_TAIL_BYTES);
+    if start > 0 {
+        if let Some(nl) = snapshot[start..].iter().position(|b| *b == b'\n') {
+            start += nl + 1;
+        }
+    }
+    snapshot[start..]
+        .chunks(SNAPSHOT_FRAME_BYTES)
+        .map(|chunk| pty_chunk(id, chunk))
+        .collect()
 }
 
 /// Live bearer tokens for the *current* enable session. The set is created fresh
@@ -296,6 +323,8 @@ struct Portal {
     tailnet_tokens: TailnetTokens,
     /// Tailnet identity check (tailnet_serve.rs).
     admit: Admit,
+    /// Flips to true when remote access is turned off or the PIN rotates; open sockets close.
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 type TailnetTokens = Arc<Mutex<HashMap<String, std::net::IpAddr>>>;
@@ -534,7 +563,9 @@ pub async fn remote_enable(
             .try_state::<Arc<crate::tailnet_serve::TailnetServe>>()
             .is_some_and(|serve| serve.admits_peer(ip))
     });
+    let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     let portal = Portal {
+        closed: sd_rx.clone(),
         app: app.clone(),
         pin: Arc::new(pin.clone()),
         tokens,
@@ -590,7 +621,6 @@ pub async fn remote_enable(
         admit,
         tailnet_admission,
     ));
-    let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         let shutdown = async move {
             // Resolve when the flag flips to true.
@@ -937,9 +967,17 @@ async fn ws_conn(
         let out = out_tx.clone();
         let mut ev_rx = p.events.subscribe();
         tokio::spawn(async move {
-            while let Ok(msg) = ev_rx.recv().await {
-                if out.send(msg).await.is_err() {
-                    break;
+            loop {
+                match ev_rx.recv().await {
+                    // An oversized event is skipped; only a closed socket ends forwarding.
+                    Ok(msg) => {
+                        if out.send(msg).await == Err(SendError::Closed) {
+                            break;
+                        }
+                    }
+                    // A slow phone missed some events; keep forwarding the rest.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -954,9 +992,20 @@ async fn ws_conn(
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     recheck.tick().await;
 
+    // Graceful shutdown doesn't reach upgraded sockets; they watch for it themselves.
+    let mut closed = p.closed.clone();
+    if *closed.borrow() {
+        return;
+    }
+
     loop {
         tokio::select! {
             () = &mut idle => break,
+            changed = closed.changed() => {
+                if changed.is_err() || *closed.borrow() {
+                    break;
+                }
+            }
             _ = recheck.tick(), if p.tailnet_tokens.lock().unwrap().contains_key(&principal) => {
                 let (tokens, tailnet_tokens, admit, token) =
                     (p.tokens.clone(), p.tailnet_tokens.clone(), p.admit.clone(), principal.clone());
@@ -1072,7 +1121,8 @@ fn handle_client_msg(
         Some("attach") => {
             if let Some(id) = v.get("pty").and_then(|x| x.as_u64()) {
                 let id = id as u32;
-                if attaches.contains_key(&id) {
+                // A stream that ended (session gone, socket hiccup) can be re-attached.
+                if attaches.get(&id).is_some_and(|h| !h.is_finished()) {
                     return;
                 }
                 let app = p.app.clone();
@@ -1262,7 +1312,7 @@ fn act(v: &Value, p: &Portal, out: &PortalOut, principal: &str) {
 
         match router.begin_request(&action, guard, &request_key, &args) {
             Begin::Replay(Answer::Ok(value)) => {
-                let _ = out.send(ack_ok(&id, value)).await;
+                send_ack(&out, &id, ack_ok(&id, value)).await;
                 return;
             }
             Begin::Replay(Answer::Err(why)) | Begin::Refused(why) => {
@@ -1283,8 +1333,16 @@ fn act(v: &Value, p: &Portal, out: &PortalOut, principal: &str) {
                 ack_err(&id, why.clone())
             }
         };
-        let _ = out.send(msg).await;
+        send_ack(&out, &id, msg).await;
     });
+}
+
+/// An answer over the message cap still answers, so the caller isn't left waiting.
+async fn send_ack(out: &PortalOut, id: &str, msg: String) {
+    if out.send(msg).await == Err(SendError::TooLarge) {
+        let why = "The result is too large to send to this device.".to_string();
+        let _ = out.send(ack_err(id, why)).await;
+    }
 }
 
 /// Preserve existing portal pages while keeping versioned IDE command results
@@ -1343,8 +1401,11 @@ async fn stream_pty(app: AppHandle, id: u32, out: PortalOut) {
         {
             return;
         }
-        if !snapshot.is_empty() && out.send(pty_chunk(id, &snapshot)).await.is_err() {
-            return;
+        // Sent whole, a full 4 MiB ring was over the message cap and the stream ended.
+        for frame in snapshot_frames(id, &snapshot) {
+            if out.send(frame).await.is_err() {
+                return;
+            }
         }
         loop {
             match rx.recv().await {
@@ -2076,10 +2137,51 @@ mod tests {
     #[tokio::test]
     async fn portal_rejects_one_message_larger_than_its_wire_budget() {
         let (out, _rx) = PortalOut::channel();
-        assert!(out
-            .send("x".repeat(PORTAL_MAX_MESSAGE_BYTES + 1))
-            .await
-            .is_err());
+        assert_eq!(
+            out.send("x".repeat(PORTAL_MAX_MESSAGE_BYTES + 1)).await,
+            Err(SendError::TooLarge)
+        );
+    }
+
+    fn replayed(frames: &[String]) -> Vec<u8> {
+        use base64::Engine;
+        frames
+            .iter()
+            .flat_map(|f| {
+                let v: Value = serde_json::from_str(f).unwrap();
+                assert_eq!(v["t"], "pty");
+                base64::engine::general_purpose::STANDARD
+                    .decode(v["b64"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_full_scrollback_ring_replays_its_tail_in_frames_that_fit() {
+        // A full ring (pty.rs SCROLLBACK_CAP, 4 MiB) of 100-byte lines.
+        let line = format!("{}\r\n", "y".repeat(98));
+        let ring: Vec<u8> = line.as_bytes().repeat(4 * 1024 * 1024 / line.len() + 1);
+        let frames = snapshot_frames(7, &ring);
+        assert!(frames.iter().all(|f| f.len() <= PORTAL_MAX_MESSAGE_BYTES));
+        let bytes = replayed(&frames);
+        assert!(
+            bytes.len() <= SNAPSHOT_TAIL_BYTES && bytes.len() > SNAPSHOT_TAIL_BYTES - line.len()
+        );
+        assert!(ring.ends_with(&bytes), "the newest bytes, in order");
+        assert!(
+            bytes.starts_with(line.as_bytes()),
+            "starts on a line boundary"
+        );
+    }
+
+    #[test]
+    fn a_small_snapshot_replays_whole_and_an_empty_one_sends_nothing() {
+        assert_eq!(
+            replayed(&snapshot_frames(1, b"hello\r\n$ ")),
+            b"hello\r\n$ "
+        );
+        assert!(snapshot_frames(1, b"").is_empty());
     }
 
     #[test]
