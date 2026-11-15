@@ -43,6 +43,7 @@ mod canopy_link;
 #[cfg(not(feature = "dictation"))]
 #[path = "dictation_stub.rs"]
 mod dictation;
+mod freeze_sample;
 mod fsx;
 mod gates;
 mod gates_commands;
@@ -81,7 +82,6 @@ mod session_doc;
 mod session_transfer;
 mod shortcuts;
 mod snapshot;
-mod freeze_sample;
 mod spot;
 mod stores;
 mod structured_runner;

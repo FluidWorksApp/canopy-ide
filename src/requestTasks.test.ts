@@ -144,7 +144,8 @@ describe("a reply", () => {
     const b = brain({ done: [1] });
     stub(b);
     await handleReply(S, "Shipped the build.");
-    expect(String(b.mock.calls[0][0].prompt)).toContain("1. Ship build");
+    const sent = (b.mock.calls as unknown as [{ prompt: string }][])[0][0].prompt;
+    expect(sent).toContain("1. Ship build");
     expect(requestTasksFor(S).map((t) => t.status)).toEqual(["open", "done"]);
   });
 
