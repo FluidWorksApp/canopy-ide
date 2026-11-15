@@ -5598,6 +5598,25 @@ body.dragging-tab * {
   scroll-snap-stop: always;
 }
 
+/* The pinned tabs stay at the strip's left edge while everything else scrolls
+   underneath, so the tabs you pinned are always in reach. The group is a direct
+   child of the scrolling strip, so it holds for the whole strip (the status
+   chips hold only within their own section). Opaque, like a chip, because tabs
+   slide beneath it; above the chips, which stick just after it. Its width is
+   measured into --tab-pinned-width (tabSticky.ts). */
+.tab-group-pinned {
+  position: sticky;
+  left: 0;
+  z-index: 30;
+  background: var(--bg-alt-opaque, var(--bg-alt));
+  box-shadow: 10px 0 14px -12px rgba(0, 0, 0, 0.9);
+}
+
+:root[data-theme="vitrine"] .tab-group-pinned {
+  background: transparent;
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
 .tab-group-sep {
   flex: 0 0 auto;
   align-self: stretch;
@@ -5636,7 +5655,8 @@ body.dragging-tab * {
    show through the gap around the chip. */
 .tab-stack {
   position: sticky;
-  left: var(--pin-left, 0px);
+  /* After the pinned tabs held at the edge, when there are any. */
+  left: calc(var(--pin-left, 0px) + var(--tab-pinned-width, 0px));
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -7239,6 +7259,12 @@ body.dragging-tab * {
   padding: 0 4px;
   max-height: 240px;
   overflow-y: auto;
+  /* Scrolls, with no bar: an overlay scrollbar sat on top of each row's
+     close button and took its clicks. */
+  scrollbar-width: none;
+}
+.agent-card-tasks::-webkit-scrollbar {
+  display: none;
 }
 .agent-card-task {
   display: grid;

@@ -1610,6 +1610,21 @@ export async function fsReadFile(
     : Uint8Array.from(data);
 }
 
+/** Start of a file for a hover preview, including agent scratch outside projects.
+ *  Capped; desktop only (rejects on a workspace host). */
+export async function fsReadPreview(
+  path: string,
+  maxBytes?: number,
+): Promise<Uint8Array> {
+  // Never sent to a workspace host: its paths are not this computer's files.
+  if (isRemoteHost()) throw new Error("no preview outside a workspace on this computer");
+  const data = await invoke<ArrayBuffer | number[]>("fs_read_preview", {
+    path,
+    maxBytes,
+  });
+  return data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data);
+}
+
 const textDecoder = new TextDecoder();
 export async function fsReadText(
   path: string,

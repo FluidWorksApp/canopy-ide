@@ -163,7 +163,15 @@ import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "../../sessionDigest
  *  different questions ("is anything running" and "is this runaway") that had
  *  drifted into sharing a threshold. */
 const QUIET_CPU = POLICY.quietCpuPercent;
-import { contentLeft, expandedStackScroll, GROUP_ATTR, revealScroll } from "../../tabSticky";
+import {
+  contentLeft,
+  expandedStackScroll,
+  GROUP_ATTR,
+  isInPinnedGroup,
+  pinnedWidthOf,
+  revealClearance,
+  revealScroll,
+} from "../../tabSticky";
 import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
@@ -11316,11 +11324,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const root = stripRef.current;
       const el = activeTabElRef.current;
       if (!root || !el || root.offsetParent === null) return;
+      // A pinned tab is held at the left edge and is never out of view.
+      if (isInPinnedGroup(root, el)) return;
       const group = el.closest(".tab-group");
       const chip = group?.querySelector<HTMLElement>("[data-stack-chip]");
-      // One full section chip owns the edge, so revealing a tab only has to
-      // clear that chip.
-      const pinned = chip?.offsetWidth ?? 0;
+      // Revealing a tab must clear both the pinned tabs and the section chip.
+      const pinned = revealClearance(
+        chip?.offsetWidth ?? 0,
+        pinnedWidthOf(root),
+        false,
+      );
       const to = revealScroll(
         root.scrollLeft,
         root.clientWidth,

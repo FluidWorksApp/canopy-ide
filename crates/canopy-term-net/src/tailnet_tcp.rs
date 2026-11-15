@@ -779,6 +779,11 @@ impl TailnetTcp {
     pub(crate) fn authorize(&self, ip: IpAddr) -> Option<String> {
         self.gate.authorize(ip)
     }
+
+    /// Allowlist entry for `ip` if it's an allowed machine on our tailnet (same check as incoming connections).
+    pub fn authorize_peer(&self, ip: IpAddr) -> Option<String> {
+        self.gate.authorize(ip)
+    }
 }
 
 /// Split `host:port`, `1.2.3.4:port` or `[v6]:port`.

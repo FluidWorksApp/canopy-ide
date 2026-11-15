@@ -53,8 +53,19 @@ export interface AgentTurnEnd extends AgentTurnStart {
    *  `filesTouched` covers that window. */
   partial?: boolean;
   /** The agent's own closing words for the turn, when its Stop hook carries
-   *  them — a claim, which proof receipts show beside (never as) evidence. */
+   *  them (a claim, never evidence). The first LAST_MESSAGE_CHARS. */
   lastMessage?: string;
+  /** The last CLOSING_CHARS of the message, where agents sum up; the request list's
+   *  "did this reply finish it?" check reads this. */
+  closing?: string;
+}
+
+const LAST_MESSAGE_CHARS = 4000;
+const CLOSING_CHARS = 6000;
+
+/** The end of a message, marked when its start was cut. */
+export function closingOf(message: string, max = CLOSING_CHARS): string {
+  return message.length > max ? `…${message.slice(-max)}` : message;
 }
 
 /** An agent session is over: its CLI reported SessionEnd, or the terminal it
@@ -293,7 +304,12 @@ async function end(e: AgentEventData, at: number): Promise<void> {
     endedAt: at,
     filesTouched: filesInWindow(edits, startedAt, at),
     ...(began ? {} : { partial: true }),
-    ...(e.lastAssistantMessage ? { lastMessage: e.lastAssistantMessage.slice(0, 4000) } : {}),
+    ...(e.lastAssistantMessage
+      ? {
+          lastMessage: e.lastAssistantMessage.slice(0, LAST_MESSAGE_CHARS),
+          closing: closingOf(e.lastAssistantMessage),
+        }
+      : {}),
   };
   emit(endListeners, turn);
 }

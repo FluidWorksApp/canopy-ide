@@ -30,6 +30,7 @@ import {
   type Question,
 } from "./systemOne";
 import { onAgentTurnEnd, onAgentTurnStart } from "./agentTurns";
+import * as ipc from "./ipc";
 
 export interface RequestTask {
   id: string;
@@ -49,6 +50,8 @@ export interface Deps {
   askBrain: typeof askBrain;
   enabled: () => boolean;
   now: () => number;
+  /** Where a job stopped, as a code (lib.rs REQUEST_STAGES): never a title. */
+  trace: (stage: string) => void;
 }
 
 const defaults: Deps = {
@@ -56,6 +59,7 @@ const defaults: Deps = {
   askBrain,
   enabled: systemOneOn,
   now: Date.now,
+  trace: (stage) => void ipc.jsLog("boot", `requests-stage:${stage}`),
 };
 let deps: Deps = defaults;
 export const setRequestTaskDepsForTests = (next: Partial<Deps> | null) => {
@@ -145,8 +149,15 @@ function titlesPrompt(state: string, open: string[]): string {
   );
 }
 
+/** Background-task reports arrive as prompts but are never requests. */
+export const isNotification = (prompt: string) => /^\s*<task-notification>/.test(prompt);
+
 export async function handlePrompt(sessionId: string, prompt: string): Promise<void> {
   if (!deps.enabled() || !prompt.trim()) return;
+  if (isNotification(prompt)) {
+    deps.trace("prompt-notification-skipped");
+    return;
+  }
   const open = openOf(sessionId);
   const state = promptState(prompt, lastReply.get(sessionId));
   const d = await deps.decide(state, promptQuestions(open.map((t) => t.title)));
@@ -189,12 +200,12 @@ export async function handleReply(sessionId: string, reply: string): Promise<voi
   if (!deps.enabled() || !reply.trim()) return;
   lastReply.set(sessionId, reply);
   const open = openOf(sessionId).slice(0, MAX_OPEN_CHECKED);
-  if (!open.length) return;
+  if (!open.length) return deps.trace("reply-no-open");
   const state = replyState(reply);
   const d = await deps.decide(state, replyQuestions(open.map((t) => t.title)));
-  if (!d.ok) return;
+  if (!d.ok) return deps.trace(`reply-s1-${d.reason}`);
   const candidates = readReply(d.answers as Record<string, Answer>).doneCandidates.filter((i) => i < open.length);
-  if (!candidates.length) return;
+  if (!candidates.length) return deps.trace("reply-s1-none");
   const ask = await deps.askBrain<DoneAnswer>({
     feature: "tasks",
     tier: "background",
@@ -208,9 +219,11 @@ export async function handleReply(sessionId: string, reply: string): Promise<voi
     validate: validateDone,
     timeoutMs: 60_000,
   });
-  if (!ask.ok || !ask.value) return;
+  if (!ask.ok || !ask.value) return deps.trace("reply-s2-failed");
   const ids = ask.value.done.filter((i) => candidates.includes(i)).map((i) => open[i].id);
-  if (ids.length) markDone(sessionId, ids);
+  if (!ids.length) return deps.trace("reply-s2-none");
+  markDone(sessionId, ids);
+  deps.trace("reply-marked");
 }
 
 // -- wiring ------------------------------------------------------------------------
@@ -222,7 +235,9 @@ export function startRequestTasks(): () => void {
     if (s.prompt) void enqueue(s.sessionId, () => handlePrompt(s.sessionId, s.prompt!));
   });
   const off2 = onAgentTurnEnd((e) => {
-    if (e.lastMessage) void enqueue(e.sessionId, () => handleReply(e.sessionId, e.lastMessage!));
+    // The end of the reply, where the agent says what it finished.
+    const reply = e.closing ?? e.lastMessage;
+    if (reply) void enqueue(e.sessionId, () => handleReply(e.sessionId, reply));
   });
   return () => {
     off1();

@@ -23,7 +23,7 @@
 //! gated by their own separate PINs.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State as AxumState};
+use axum::extract::{ConnectInfo, Query, State as AxumState};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -291,15 +291,141 @@ struct Portal {
     /// first answer back rather than starting a second run.
     verbs: Arc<VerbRouter>,
     sockets: Arc<SocketMetrics>,
+    /// Tokens signed in by tailnet identity, with the peer address; re-checked per ticket and
+    /// every few seconds while the socket is open.
+    tailnet_tokens: TailnetTokens,
+    /// Tailnet identity check (tailnet_serve.rs).
+    admit: Admit,
 }
 
+type TailnetTokens = Arc<Mutex<HashMap<String, std::net::IpAddr>>>;
+
+/// Re-check interval for sockets signed in by tailnet identity.
+const TAILNET_RECHECK: Duration = Duration::from_secs(5);
+
+/// Record a tailnet sign-in (with its address) for later re-checks.
+fn record_sign_in(
+    tailnet_tokens: &TailnetTokens,
+    token: &str,
+    owner: bool,
+    tailnet: Option<std::net::IpAddr>,
+) {
+    if let (true, Some(ip)) = (owner, tailnet) {
+        tailnet_tokens.lock().unwrap().insert(token.to_string(), ip);
+    }
+}
+
+/// Socket ticket check: a tailnet token no longer admitted is revoked; other tokens pass.
+fn ticket_allowed(
+    tokens: &Tokens,
+    tailnet_tokens: &TailnetTokens,
+    token: &str,
+    admitted_now: bool,
+) -> bool {
+    if admitted_now {
+        return true;
+    }
+    if tailnet_tokens.lock().unwrap().remove(token).is_some() {
+        tokens.lock().unwrap().remove(token);
+        return false;
+    }
+    true
+}
+
+/// Open-socket check: revokes a tailnet token whose machine is no longer admitted.
+fn socket_still_admitted(
+    tokens: &Tokens,
+    tailnet_tokens: &TailnetTokens,
+    token: &str,
+    admit: &dyn Fn(std::net::IpAddr) -> bool,
+) -> bool {
+    let Some(ip) = tailnet_tokens.lock().unwrap().get(token).copied() else {
+        return true;
+    };
+    if admit(ip) {
+        return true;
+    }
+    tailnet_tokens.lock().unwrap().remove(token);
+    tokens.lock().unwrap().remove(token);
+    false
+}
+
+/// Marks a request from an allowed tailnet machine, so its token can be re-checked later.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TailnetAdmitted(pub std::net::IpAddr);
+
 /// Set on requests that reached the portal through Canopy's edge
-/// (canopy_link.rs). `owner` means the edge already checked the person's
-/// Canopy sign-in for this link, so the PIN is not asked again; the LAN
-/// listener never carries it.
+/// (canopy_link.rs) or from an allowed tailnet machine; `owner` skips the PIN.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EdgeAuth {
     pub owner: bool,
+}
+
+/// Tailnet allow check, supplied by tailnet_serve.rs.
+type Admit = Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>;
+
+/// The only paths tailnet admission applies to.
+fn admission_applies(path: &str) -> bool {
+    matches!(
+        path,
+        "/remote/session" | "/remote/auth" | "/remote/ws-ticket"
+    )
+}
+
+/// Only loopback (local tunnels) and tailnet peers may reach the TCP listener; LAN is refused.
+/// `/team/ws` has its own credential and is unaffected.
+fn peer_may_reach(path: &str, peer: std::net::IpAddr) -> bool {
+    if path == "/team/ws" {
+        return true;
+    }
+    let ip = peer.to_canonical();
+    ip.is_loopback() || canopy_term_net::tailnet_tcp::is_tailnet_addr(ip)
+}
+
+/// Tailnet admission; only addresses in Tailscale's ranges are ever looked up.
+fn admitted_by_tailnet(
+    path: &str,
+    peer: std::net::IpAddr,
+    admit: &dyn Fn(std::net::IpAddr) -> bool,
+) -> bool {
+    admission_applies(path)
+        && canopy_term_net::tailnet_tcp::is_tailnet_addr(peer)
+        && admit(peer.to_canonical())
+}
+
+/// Gives allowed tailnet machines `EdgeAuth { owner: true }` (no PIN). Trusts the TCP peer,
+/// never a header: a spoofed tailnet source can't complete the handshake.
+async fn tailnet_admission(
+    AxumState(admit): AxumState<Admit>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let ip = peer.ip();
+    if !peer_may_reach(&path, ip) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Remote access is over Tailscale. Open this Mac's Tailscale address instead.",
+        )
+            .into_response();
+    }
+    if req.extensions().get::<EdgeAuth>().is_none()
+        && admission_applies(&path)
+        && canopy_term_net::tailnet_tcp::is_tailnet_addr(ip)
+    {
+        // The lookup runs the Tailscale CLI, so it stays off the async threads.
+        let admit = admit.clone();
+        let admitted = tokio::task::spawn_blocking(move || admitted_by_tailnet(&path, ip, &*admit))
+            .await
+            .unwrap_or(false);
+        if admitted {
+            req.extensions_mut().insert(EdgeAuth { owner: true });
+            req.extensions_mut()
+                .insert(TailnetAdmitted(ip.to_canonical()));
+        }
+    }
+    next.run(req).await
 }
 
 /// The running portal's router, for serving connections that arrive some
@@ -402,6 +528,12 @@ pub async fn remote_enable(
         listeners.push(id);
     }
 
+    let admit_app = app.clone();
+    let admit: Admit = Arc::new(move |ip| {
+        admit_app
+            .try_state::<Arc<crate::tailnet_serve::TailnetServe>>()
+            .is_some_and(|serve| serve.admits_peer(ip))
+    });
     let portal = Portal {
         app: app.clone(),
         pin: Arc::new(pin.clone()),
@@ -414,6 +546,8 @@ pub async fn remote_enable(
         roots: mgr.roots.clone(),
         verbs: Arc::new(VerbRouter::default()),
         sockets: mgr.sockets.clone(),
+        tailnet_tokens: Default::default(),
+        admit: admit.clone(),
     };
     let router = Router::new()
         .route("/remote/auth", post(auth_handler))
@@ -451,7 +585,11 @@ pub async fn remote_enable(
     .ok()
     .flatten();
 
-    let serve_router = router.clone();
+    // Only the TCP listener gets tailnet admission; the Canopy link sets its own EdgeAuth.
+    let serve_router = router.clone().layer(axum::middleware::from_fn_with_state(
+        admit,
+        tailnet_admission,
+    ));
     let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         let shutdown = async move {
@@ -462,9 +600,12 @@ pub async fn remote_enable(
                 }
             }
         };
-        let _ = axum::serve(listener, serve_router)
-            .with_graceful_shutdown(shutdown)
-            .await;
+        let _ = axum::serve(
+            listener,
+            serve_router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await;
     });
 
     // Re-check under lock in case two enables raced; if so, keep the first and
@@ -602,13 +743,22 @@ struct AuthReq {
 
 /// Whether this request came through the Canopy link as the signed-in owner,
 /// so the portal can skip its PIN screen.
-async fn session_handler(edge: Option<axum::Extension<EdgeAuth>>) -> Response {
-    Json(json!({ "edge": edge.is_some_and(|e| e.owner) })).into_response()
+async fn session_handler(
+    edge: Option<axum::Extension<EdgeAuth>>,
+    tailnet: Option<axum::Extension<TailnetAdmitted>>,
+) -> Response {
+    // The page needs the kind: a tailnet sign-in has no edge to sign out of.
+    Json(json!({
+        "edge": edge.is_some_and(|e| e.owner),
+        "tailnet": tailnet.is_some(),
+    }))
+    .into_response()
 }
 
 async fn auth_handler(
     AxumState(p): AxumState<Portal>,
     edge: Option<axum::Extension<EdgeAuth>>,
+    tailnet: Option<axum::Extension<TailnetAdmitted>>,
     Json(body): Json<AuthReq>,
 ) -> Response {
     let owner = edge.is_some_and(|e| e.owner);
@@ -622,6 +772,7 @@ async fn auth_handler(
     }
     let token = gen_token();
     p.tokens.lock().unwrap().insert(token.clone());
+    record_sign_in(&p.tailnet_tokens, &token, owner, tailnet.map(|t| t.0 .0));
     Json(json!({ "token": token })).into_response()
 }
 
@@ -632,6 +783,7 @@ struct WsQuery {
 
 async fn ws_ticket_handler(
     AxumState(p): AxumState<Portal>,
+    tailnet: Option<axum::Extension<TailnetAdmitted>>,
     headers: header::HeaderMap,
 ) -> Response {
     let token = headers
@@ -641,6 +793,10 @@ async fn ws_ticket_handler(
     let Some(token) = token.filter(|token| valid_token(&p.tokens, token)) else {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     };
+    // A tailnet token is revoked once its machine is no longer admitted.
+    if !ticket_allowed(&p.tokens, &p.tailnet_tokens, token, tailnet.is_some()) {
+        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    }
     let ticket = gen_token();
     let expires = Instant::now() + WS_TICKET_TTL;
     let mut tickets = p.tickets.lock().unwrap();
@@ -793,10 +949,26 @@ async fn ws_conn(
     let mut attaches: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
     let idle = tokio::time::sleep(PORTAL_IDLE_TIMEOUT);
     tokio::pin!(idle);
+    // Re-check tailnet sockets while open so Allow off takes effect within seconds.
+    let mut recheck = tokio::time::interval(TAILNET_RECHECK);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    recheck.tick().await;
 
     loop {
         tokio::select! {
             () = &mut idle => break,
+            _ = recheck.tick(), if p.tailnet_tokens.lock().unwrap().contains_key(&principal) => {
+                let (tokens, tailnet_tokens, admit, token) =
+                    (p.tokens.clone(), p.tailnet_tokens.clone(), p.admit.clone(), principal.clone());
+                let still = tokio::task::spawn_blocking(move || {
+                    socket_still_admitted(&tokens, &tailnet_tokens, &token, &*admit)
+                })
+                .await
+                .unwrap_or(false);
+                if !still {
+                    break;
+                }
+            }
             inbound = socket.recv() => {
                 // Anything from the client — a ping, a pong, a keystroke —
                 // proves it is still there.
@@ -1630,6 +1802,218 @@ fn local_ips() -> Vec<String> {
         }
     }
     ips
+}
+
+#[cfg(test)]
+mod tailnet_admission_tests {
+    use super::*;
+    use std::net::IpAddr;
+    use std::sync::atomic::AtomicUsize;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// Counts lookups; answers `answer` to each.
+    fn admit_with(answer: bool, asked: Arc<AtomicUsize>) -> impl Fn(IpAddr) -> bool {
+        move |_| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            answer
+        }
+    }
+
+    fn sets() -> (Tokens, TailnetTokens) {
+        (Default::default(), Default::default())
+    }
+
+    #[test]
+    fn only_identity_sign_ins_are_remembered_for_re_checks() {
+        let (_, tailnet) = sets();
+        record_sign_in(&tailnet, "pin-token", false, None);
+        record_sign_in(&tailnet, "link-token", true, None);
+        record_sign_in(&tailnet, "phone-token", true, Some(ip("100.101.102.103")));
+        let held = tailnet.lock().unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held.get("phone-token"), Some(&ip("100.101.102.103")));
+    }
+
+    #[test]
+    fn a_tailnet_token_gets_tickets_only_while_its_machine_is_admitted() {
+        let (tokens, tailnet) = sets();
+        tokens.lock().unwrap().insert("phone".into());
+        record_sign_in(&tailnet, "phone", true, Some(ip("100.101.102.103")));
+        assert!(ticket_allowed(&tokens, &tailnet, "phone", true));
+        assert!(tokens.lock().unwrap().contains("phone"));
+        // Allow off: the ticket is refused and the token revoked, so a retry fails too.
+        assert!(!ticket_allowed(&tokens, &tailnet, "phone", false));
+        assert!(!tokens.lock().unwrap().contains("phone"));
+        assert!(!tailnet.lock().unwrap().contains_key("phone"));
+    }
+
+    #[test]
+    fn a_pin_token_is_never_touched_by_the_tailnet_checks() {
+        let (tokens, tailnet) = sets();
+        tokens.lock().unwrap().insert("pin".into());
+        assert!(ticket_allowed(&tokens, &tailnet, "pin", false));
+        assert!(socket_still_admitted(&tokens, &tailnet, "pin", &|_| false));
+        assert!(tokens.lock().unwrap().contains("pin"));
+    }
+
+    #[test]
+    fn an_open_socket_is_closed_once_its_machine_is_refused() {
+        let (tokens, tailnet) = sets();
+        tokens.lock().unwrap().insert("phone".into());
+        record_sign_in(&tailnet, "phone", true, Some(ip("100.101.102.103")));
+        let asked = Arc::new(AtomicUsize::new(0));
+        assert!(socket_still_admitted(
+            &tokens,
+            &tailnet,
+            "phone",
+            &admit_with(true, asked.clone())
+        ));
+        assert!(!socket_still_admitted(
+            &tokens,
+            &tailnet,
+            "phone",
+            &admit_with(false, asked.clone())
+        ));
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        assert!(!tokens.lock().unwrap().contains("phone"));
+        assert!(!tailnet.lock().unwrap().contains_key("phone"));
+    }
+
+    /// LAN clients are refused; phone access is Tailscale or a local tunnel.
+    #[test]
+    fn the_local_network_and_the_internet_cannot_reach_the_portal() {
+        for addr in [
+            "192.168.1.20",
+            "10.0.0.5",
+            "172.16.4.2",
+            "8.8.8.8",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            for path in [
+                "/remote/",
+                "/remote/auth",
+                "/remote/session",
+                "/remote/ws",
+                "/remote/assets/index.js",
+                "/",
+            ] {
+                assert!(!peer_may_reach(path, ip(addr)), "{addr} {path}");
+            }
+        }
+    }
+
+    #[test]
+    fn tunnels_on_this_computer_and_the_tailnet_still_reach_it() {
+        for addr in [
+            "127.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "100.101.102.103",
+            "fd7a:115c:a1e0::1",
+        ] {
+            assert!(peer_may_reach("/remote/auth", ip(addr)), "{addr}");
+        }
+    }
+
+    #[test]
+    fn the_team_relay_keeps_its_own_paths() {
+        assert!(peer_may_reach("/team/ws", ip("192.168.1.20")));
+    }
+
+    #[test]
+    fn only_the_sign_in_requests_can_be_admitted_by_identity() {
+        assert!(admission_applies("/remote/session"));
+        assert!(admission_applies("/remote/auth"));
+        assert!(admission_applies("/remote/ws-ticket"));
+        for path in [
+            "/remote/ws",
+            "/remote/health",
+            "/remote/",
+            "/team/ws",
+            "/remote/auth/x",
+        ] {
+            assert!(!admission_applies(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn an_allowed_tailnet_machine_is_admitted_without_a_pin() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let admit = admit_with(true, asked.clone());
+        assert!(admitted_by_tailnet(
+            "/remote/session",
+            ip("100.101.102.103"),
+            &admit
+        ));
+        assert!(admitted_by_tailnet(
+            "/remote/auth",
+            ip("fd7a:115c:a1e0::1"),
+            &admit
+        ));
+        // An IPv4 address that arrives mapped into IPv6 is the same address.
+        assert!(admitted_by_tailnet(
+            "/remote/auth",
+            ip("::ffff:100.101.102.103"),
+            &admit
+        ));
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_machine_that_is_not_allowed_is_not_admitted() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let admit = admit_with(false, asked.clone());
+        assert!(!admitted_by_tailnet(
+            "/remote/session",
+            ip("100.101.102.103"),
+            &admit
+        ));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// Non-tailnet addresses never reach the Tailscale lookup, whatever it would say.
+    #[test]
+    fn nothing_outside_the_tailnet_is_looked_up_or_admitted() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let admit = admit_with(true, asked.clone());
+        for addr in [
+            "192.168.1.20",
+            "10.0.0.5",
+            "127.0.0.1",
+            "::1",
+            "8.8.8.8",
+            "100.63.255.255",
+            "100.128.0.1",
+            "fd00::1",
+        ] {
+            assert!(
+                !admitted_by_tailnet("/remote/session", ip(addr), &admit),
+                "{addr}"
+            );
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn other_paths_are_never_looked_up() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let admit = admit_with(true, asked.clone());
+        assert!(!admitted_by_tailnet(
+            "/remote/ws",
+            ip("100.101.102.103"),
+            &admit
+        ));
+        assert!(!admitted_by_tailnet(
+            "/remote/assets/index.js",
+            ip("100.101.102.103"),
+            &admit
+        ));
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[cfg(test)]

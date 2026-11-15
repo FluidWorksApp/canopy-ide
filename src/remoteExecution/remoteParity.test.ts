@@ -47,6 +47,8 @@ const REMOTE_BRANCHED = new Set([
   // are on this computer. nativeTerm.ts returns before it asks on a remote or
   // workspace host (the status reads nothing there).
   "native_term_hand_over", "native_term_take_back", "native_term_forget", "native_term_handover_status",
+  // fsReadPreview reads this computer's disk, so it rejects on a workspace host.
+  "fs_read_preview",
 ]);
 
 const SRC = join(__dirname, "..");
