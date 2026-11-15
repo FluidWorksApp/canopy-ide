@@ -95,6 +95,17 @@ interface Wire {
   send: (to: string | null, doc: string, body: CollabBody) => void;
 }
 
+/** Under the team link's 2 MB frame limit even after JSON escaping. */
+export const LIVE_SHARE_MAX_BYTES = 1.5 * 1024 * 1024;
+const TOO_BIG = "too-big";
+const TOO_BIG_NOTICE = "This file is too big to share live (over 1.5 MB).";
+
+export function tooBigToShare(text: string): boolean {
+  // Cheap bound first: UTF-8 is at most 3 bytes per UTF-16 unit.
+  if (text.length * 3 <= LIVE_SHARE_MAX_BYTES) return false;
+  return new TextEncoder().encode(text).length > LIVE_SHARE_MAX_BYTES;
+}
+
 /** Shared behaviour: own the model subscription, expose remote cursors, and
  *  make sure a remote application never re-enters as a local edit. */
 abstract class Session {
@@ -235,6 +246,18 @@ export class OwnerSession extends Session {
     }
   }
 
+  /** The whole document, or a close when it is too big for the team link. */
+  private sendSnapshot(to: string) {
+    const text = this.model.getValue();
+    if (tooBigToShare(text)) {
+      this.roster.delete(to);
+      this.wire.send(to, this.doc, { kind: "close", reason: TOO_BIG });
+      this.onNotice?.(TOO_BIG_NOTICE);
+      return;
+    }
+    this.wire.send(to, this.doc, { kind: "snapshot", rev: this.revision, text });
+  }
+
   private broadcast(ops: Op[], author: string) {
     // broadcast runs for BOTH a local edit and an applied remote edit (see
     // receive), so this catches every change to the owner's document from any
@@ -263,20 +286,12 @@ export class OwnerSession extends Session {
     if (b.kind === "open") {
       if (!this.allowed.has(msg.from)) return;
       this.roster.add(msg.from);
-      this.wire.send(msg.from, this.doc, {
-        kind: "snapshot",
-        rev: this.revision,
-        text: this.model.getValue(),
-      });
+      this.sendSnapshot(msg.from);
       return;
     }
     if (b.kind === "resync") {
       if (!this.roster.has(msg.from)) return;
-      this.wire.send(msg.from, this.doc, {
-        kind: "snapshot",
-        rev: this.revision,
-        text: this.model.getValue(),
-      });
+      this.sendSnapshot(msg.from);
       return;
     }
     if (b.kind === "cursor") {
@@ -732,6 +747,16 @@ export class CollabManager {
         this.autoAccept.delete(joined.from);
       }
       this.onChange?.();
+      return;
+    }
+    // The owner turned down a file we were offered (too big to share live).
+    if (msg.body.kind === "close") {
+      const offer = this.offers.get(msg.doc);
+      if (offer && offer.from === msg.from) {
+        this.offers.delete(msg.doc);
+        if (msg.body.reason === TOO_BIG) this.onNotice?.(`${offer.name} is too big to share live (over 1.5 MB).`);
+        this.onChange?.();
+      }
       return;
     }
     if (msg.body.kind === "open" && this.ownedProjects.has(msg.doc)) {

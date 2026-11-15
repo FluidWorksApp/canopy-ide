@@ -459,10 +459,14 @@ async fn tailnet_admission(
 
 /// The running portal's router, for serving connections that arrive some
 /// other way than its TCP listener (the Canopy link's tunnel streams).
-pub(crate) fn portal_router(app: &AppHandle) -> Option<Router> {
+/// Also returns its shutdown flag: a PIN change or Remote off restarts the
+/// portal, and streams served by the old router must end.
+pub(crate) fn portal_link(app: &AppHandle) -> Option<(Router, tokio::sync::watch::Receiver<bool>)> {
     let mgr = app.try_state::<RemoteManager>()?;
     let guard = mgr.inner.lock().unwrap();
-    guard.as_ref().map(|r| r.router.clone())
+    guard
+        .as_ref()
+        .map(|r| (r.router.clone(), r.shutdown.subscribe()))
 }
 
 /// What a PIN-minted token may do. Drive, not admin: it matches the surface
