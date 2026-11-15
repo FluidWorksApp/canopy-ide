@@ -418,6 +418,22 @@ fn set_shortcut_profile(app: tauri::AppHandle, profile: String) -> Result<(), St
     Ok(())
 }
 
+/// Where the person's request list (requestTasks.ts) stopped with one prompt or
+/// reply. Codes only: never a title, a prompt or a reply. Enough to tell a
+/// finished request that never closed apart by the step that dropped it.
+const REQUEST_STAGES: &[&str] = &[
+    "requests-stage:prompt-notification-skipped",
+    "requests-stage:reply-no-open",
+    "requests-stage:reply-s1-unavailable",
+    "requests-stage:reply-s1-timeout",
+    "requests-stage:reply-s1-http",
+    "requests-stage:reply-s1-invalid",
+    "requests-stage:reply-s1-none",
+    "requests-stage:reply-s2-failed",
+    "requests-stage:reply-s2-none",
+    "requests-stage:reply-marked",
+];
+
 /// Frontend error bridge: WebView console/errors surface in the dev terminal.
 #[tauri::command]
 fn js_log(level: String, message: String) {
@@ -451,6 +467,8 @@ fn js_log(level: String, message: String) {
                 | "reconnect-stage:tab-attached"
         ) {
             log::info!(target: "canopy::watchdog::reconnect", "{message}");
+        } else if REQUEST_STAGES.contains(&message.as_str()) {
+            log::info!(target: "canopy::watchdog::requests", "{message}");
         }
         return;
     }
