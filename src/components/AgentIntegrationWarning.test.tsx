@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AgentIntegrationWarning } from './AgentIntegrationWarning';
+import { AgentIntegrationWarning, FAILED_CHECKS_TO_WARN } from './AgentIntegrationWarning';
 import * as ipc from '../ipc';
 vi.mock('../ipc',()=>({agentIntegrationHealth:vi.fn(),agentHooksInstalled:vi.fn(),setupAgentHooks:vi.fn(),onAgentEvents:vi.fn()}));
 beforeEach(()=>{vi.clearAllMocks();vi.mocked(ipc.onAgentEvents).mockResolvedValue(()=>{});vi.mocked(ipc.agentIntegrationHealth).mockResolvedValue([]);vi.mocked(ipc.agentHooksInstalled).mockResolvedValue(false);});
@@ -25,10 +25,26 @@ describe('project integration warning',()=>{
  });
 });
 
-it('clears a transient health failure after a successful account-change recheck',async()=>{
- vi.mocked(ipc.agentIntegrationHealth).mockRejectedValueOnce(Error('Transient disconnect'));
- const view=render(<AgentIntegrationWarning agents={[]}/>);await screen.findByText(/Could not verify/);
- fireEvent(window,new Event('canopy:cli-profile-changed'));
+const recheck=async()=>{const calls=vi.mocked(ipc.agentIntegrationHealth).mock.calls.length;fireEvent(window,new Event('canopy:cli-profile-changed'));await waitFor(()=>expect(vi.mocked(ipc.agentIntegrationHealth).mock.calls.length).toBeGreaterThan(calls));await new Promise(resolve=>setTimeout(resolve,10));};
+
+it('stays quiet when one check fails on a busy machine',async()=>{
+ vi.mocked(ipc.agentIntegrationHealth).mockRejectedValueOnce(Error('process capture admission queue is full'));
+ const view=render(<AgentIntegrationWarning agents={[]}/>);
+ await waitFor(()=>expect(ipc.agentIntegrationHealth).toHaveBeenCalled());
+ await recheck();
+ expect(screen.queryByRole('alert')).toBeNull();view.unmount();
+});
+
+it('warns when checks keep failing, and clears after one succeeds',async()=>{
+ vi.mocked(ipc.agentIntegrationHealth).mockRejectedValue(Error('Transient disconnect'));
+ const view=render(<AgentIntegrationWarning agents={[]}/>);
+ await waitFor(()=>expect(ipc.agentIntegrationHealth).toHaveBeenCalled());
+ for(let i=1;i<FAILED_CHECKS_TO_WARN-1;i++)await recheck();
+ expect(screen.queryByRole('alert')).toBeNull();
+ await recheck();
+ await screen.findByText(/Could not verify/);
+ vi.mocked(ipc.agentIntegrationHealth).mockResolvedValue([]);
+ await recheck();
  await waitFor(()=>expect(screen.queryByRole('alert')).toBeNull());view.unmount();
 });
 
