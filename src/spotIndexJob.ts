@@ -14,20 +14,15 @@
 // exist". Maintenance that only happens when someone searches is maintenance
 // that is missing precisely when the index is stale.
 //
-// So: a pass a minute after launch, then every 15 s while a backlog is
-// shrinking (a pass that finds nothing new is now cheap), then a slow heartbeat
-// (half an hour) once there isn't. Opening the
-// palette brings the index up to date itself, so the heartbeat is only the
-// pruning and the "nobody searched today" case, and does not need to be
-// often. Every pass is incremental and budgeted by the backend — a warm index is a few thousand stats and no reads —
+// So: a pass a minute after launch, every 15 s while a backlog shrinks, then a
+// half-hour heartbeat (opening the palette updates the index itself).
+// Every pass is incremental and budgeted by the backend,
 // and the pacing below is the only decision this file makes.
 import { runIngest } from "./spotIndex";
 
 export interface JobPace {
   /** Between passes while transcript is still unread. Short, because the
-   *  backlog only shrinks by one budget per pass, so a machine with years of
-   *  history needs hundreds of them. Only used while the backlog is shrinking
-   *  (see `nextDelay`), so it cannot run forever. */
+   *  backlog shrinks one budget per pass. Used only while it shrinks. */
   catchUpMs: number;
   /** Between passes once everything on disk has been read. This is the pruning
    *  heartbeat as much as the reading one. */
@@ -63,15 +58,8 @@ export interface PassOutcome {
 }
 
 /** When the next pass should run. Pure, so the pacing is a thing that can be
- *  tested rather than a thing that is watched.
- *
- *  The catch-up pace is for a backlog that is shrinking. `previousPending` is
- *  what the pass before this one left; a backlog that is not smaller than that
- *  is not catching up, and re-running at catch-up speed only repeats the work
- *  (a file that cannot be finished, a store that keeps changing) every
- *  `catchUpMs` for as long as the app is open. Such a backlog gets the
- *  heartbeat instead. With no earlier pass to compare to, a backlog is
- *  presumed to be shrinking. */
+ *  tested. Catch-up pace only while the backlog is smaller than `previousPending`;
+ *  a stuck backlog gets the heartbeat. With no previous pass, assume shrinking. */
 export function nextDelay(
   outcome: PassOutcome,
   failures: number,

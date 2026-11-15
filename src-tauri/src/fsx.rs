@@ -179,18 +179,11 @@ fn link_grant_refusal(canonical: &Path, home: Option<&Path>) -> Option<&'static 
     None
 }
 
-/// The most a hover preview ever reads. A preview shows a picture or the top
-/// of a file; it is not a way to pull a large file through the renderer.
+/// Cap on a hover preview read.
 const PREVIEW_MAX_BYTES: u64 = 256 * 1024;
 
-/// Where an agent's own output lives, which is what the Assets list shows: the
-/// per-session scratch folders Canopy makes under `~/.canopy/sessions`, the
-/// screenshots and drops it stages under `~/.canopy/spot`, and the system
-/// temporary folders an agent writes drafts and screenshots to. A preview is
-/// refused for a file anywhere else, because this read needs no click and no
-/// setting, and any content the webview shows could ask for it: a path under
-/// the user's documents or dotfiles is not one an agent's scratch work needs
-/// to put on screen.
+/// Roots a preview may read: agent scratch (`~/.canopy/sessions`, `~/.canopy/spot`) and temp dirs.
+/// Kept narrow because the read needs no click and any webview content can request it.
 fn preview_allowed_roots(home: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = home {
@@ -201,19 +194,15 @@ fn preview_allowed_roots(home: Option<&Path>) -> Vec<PathBuf> {
     roots.push(PathBuf::from("/tmp"));
     roots.push(PathBuf::from("/private/tmp"));
     roots.push(PathBuf::from("/var/tmp"));
-    // The same places, resolved: a symlinked temp folder is judged by where it
-    // leads, as the file is.
+    // Canonicalized, so a symlinked temp dir matches resolved file paths.
     roots
         .into_iter()
         .filter_map(|r| r.canonicalize().ok())
         .collect()
 }
 
-/// Read the start of a regular file in one of those folders, for a hover
-/// preview. Read only and bounded. Credential locations and credential file
-/// names are refused even inside them. The file is opened first and its path
-/// checked again afterwards, so a path swapped for a symlink in between is
-/// caught. `home` is the canonical home directory; pure so it can be tested.
+/// Bounded read of a file under the preview roots; credentials refused. The path is re-checked
+/// after opening to catch a symlink swap. `home` must be canonical.
 fn read_preview_file(
     path: &str,
     home: Option<&Path>,
@@ -226,7 +215,6 @@ fn read_preview_file(
     }
     let roots = preview_allowed_roots(home);
     let authorize = || -> Result<PathBuf, String> {
-        // Symlinks are resolved first, so a link is judged by where it leads.
         let canonical = requested.canonicalize().map_err(|e| e.to_string())?;
         if !canonical.is_file() {
             return Err("That is not a file.".into());
@@ -259,10 +247,7 @@ fn read_preview_file(
     Ok(bytes)
 }
 
-/// Hover preview of a file in an agent's scratch folders. Local desktop only:
-/// it is not in the remote grant table (`remote::GRANTS`, where adding a line
-/// is the decision to expose a command to a remote token), so a phone or
-/// remote client cannot call it.
+/// Hover preview of an agent scratch file. Desktop only: deliberately not in `remote::GRANTS`.
 #[tauri::command]
 pub async fn fs_read_preview(
     path: String,
@@ -1875,7 +1860,7 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    /// A fake home with `.canopy/sessions` inside it; the temp folder holds it.
+    /// Fake home containing `.canopy/sessions`.
     fn preview_home(tag: &str) -> std::path::PathBuf {
         let base =
             std::env::temp_dir().join(format!("canopy-preview-{tag}-{}", std::process::id()));
@@ -1911,10 +1896,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// The point of narrowing: the read needs no click and no setting, so an
-    /// ordinary file that is in neither scratch folder is not readable by it,
-    /// however harmless it looks. This crate's own manifest is such a file: it
-    /// exists, is absolute, and is under none of the allowed roots.
+    /// An ordinary file outside the scratch roots (this crate's manifest) is refused.
     #[test]
     fn a_preview_does_not_read_files_outside_the_scratch_folders() {
         let home = preview_home("outside");
@@ -1938,8 +1920,7 @@ mod tests {
         assert!(refused(&dir.join("id_rsa")));
         assert!(refused(&dir.join("server.pem")));
         assert!(!refused(&dir.join("notes.txt")));
-        // A link from a scratch folder to a credential file is judged by where
-        // it leads.
+        // A symlink is judged by its target.
         #[cfg(unix)]
         {
             std::fs::create_dir_all(home.join(".ssh")).unwrap();

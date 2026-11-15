@@ -86,7 +86,7 @@ describe("startSpotIndexJob", () => {
     await vi.advanceTimersByTimeAsync(10); // pass 1: nothing to compare to
     await vi.advanceTimersByTimeAsync(pace.catchUpMs); // pass 2: same backlog
     expect(calls).toBe(2);
-    // From here the backlog is not shrinking: no more passes at catch-up speed.
+    // Backlog no longer shrinking: no more catch-up passes.
     await vi.advanceTimersByTimeAsync(pace.catchUpMs * 5);
     expect(calls).toBe(2);
     await vi.advanceTimersByTimeAsync(pace.idleMs);

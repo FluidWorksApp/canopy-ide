@@ -2604,7 +2604,6 @@ pub async fn session_digests(roots: Option<Vec<String>>) -> Result<Vec<serde_jso
                 }
             }
         }
-        // A file that is gone takes its entry with it.
         cache.retain_present(&present);
     }
     let roots = roots.unwrap_or_default();
@@ -2614,17 +2613,11 @@ pub async fn session_digests(roots: Option<Vec<String>>) -> Result<Vec<serde_jso
     Ok(out)
 }
 
-/// How long a digest's resume check is trusted. A file that changes is read
-/// again at once (its size or modified time moves); this only bounds how stale
-/// the check on disk can be: "is there a transcript to resume" turning true
-/// when one is written, or false when it is deleted.
+/// How long a digest's resume check is trusted; a changed file is re-read at once.
 const SESSION_DIGEST_TTL: Duration = Duration::from_secs(60);
 
-/// What `session_digests` made of each hook digest file, so a call re-reads
-/// only the files that changed. It used to parse every file and, for each
-/// Claude session, list every project folder looking for its transcript, on
-/// every request, and every request is triggered by any agent's hook event: on
-/// a machine with 1,800 session files that was two cores of directory walking.
+/// Per-file cache for `session_digests`: re-reading every file on every hook event
+/// cost two cores on machines with many sessions.
 type FileStamp = (u64, Option<std::time::SystemTime>);
 
 struct DigestFileEntry {
@@ -2639,9 +2632,7 @@ struct DigestFileCache {
 }
 
 impl DigestFileCache {
-    /// The cached digest while the file is unchanged and the check is fresh,
-    /// else whatever `load` makes of it (and that is kept). A file `load` cannot
-    /// read or parse is dropped from the cache, as it is from the output.
+    /// Cached digest while unchanged and fresh, else `load` (kept; failures are evicted).
     fn get_or_load(
         &mut self,
         path: &std::path::Path,
@@ -7969,9 +7960,6 @@ mod digest_cache_tests {
         )
     }
 
-    /// The bug: every request re-parsed every file and re-searched the
-    /// transcript folders for each one. An unchanged file must not be loaded
-    /// again.
     #[test]
     fn an_unchanged_file_is_loaded_once() {
         let mut cache = DigestFileCache::default();
@@ -7994,10 +7982,9 @@ mod digest_cache_tests {
         let path = Path::new("/s/a.json");
         let now = Instant::now();
         cache.get_or_load(path, stamp(10, 1), now, TTL, || Some(json!({"v": 1})));
-        // Same size, newer modified time: still a change.
+        // Same size, newer mtime: still a change.
         let v = cache.get_or_load(path, stamp(10, 2), now, TTL, || Some(json!({"v": 2})));
         assert_eq!(v, Some(json!({"v": 2})));
-        // Different size.
         let v = cache.get_or_load(path, stamp(11, 2), now, TTL, || Some(json!({"v": 3})));
         assert_eq!(v, Some(json!({"v": 3})));
     }

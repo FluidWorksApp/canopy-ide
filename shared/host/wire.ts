@@ -12,11 +12,8 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
-/** How this page is signed in without a PIN, if it is: `link` through the
- *  person's Canopy link (https://<handle>.remote.canopyide.dev), where Canopy's
- *  sign-in already proved who they are; `tailnet` from a machine the person
- *  allowed under Tailscale on the desktop. `null` on hosts that predate the
- *  route and for any other client, which asks for the PIN. */
+/** No-PIN sign-in: `link` (Canopy link) or `tailnet` (machine allowed under Tailscale);
+ *  `null` asks for the PIN. */
 export type NoPinSession = 'link' | 'tailnet' | null
 
 export async function noPinSession(): Promise<NoPinSession> {

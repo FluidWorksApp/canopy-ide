@@ -61,13 +61,10 @@ export function expandedStackScroll(scrollLeft: number, groupLeft: number): numb
 
 /** Attribute a run element carries so the strip can be measured by run. */
 export const GROUP_ATTR = "data-group-key";
-/** The run of pinned tabs. It has no chip: it is held at the strip's left edge
- *  itself, and the status chips stick just after it. */
+/** The pinned-tab run: held at the left edge itself (no chip); status chips stick after it. */
 export const PINNED_GROUP = "pinned";
 
-/** How far in from the strip's left edge a tab has to be to be seen: the pinned
- *  tabs held at the edge, plus the section chip that owns it. A tab that is
- *  itself pinned needs nothing, since it is never scrolled out of view. */
+/** Left inset a tab needs to be visible: pinned tabs plus the section chip (none if pinned). */
 export function revealClearance(
   chipWidth: number,
   pinnedWidth: number,
@@ -85,7 +82,6 @@ export function pinnedWidthOf(root: HTMLElement): number {
   return pinnedGroupOf(root)?.offsetWidth ?? 0;
 }
 
-/** Is this element one of the pinned tabs? */
 export function isInPinnedGroup(root: HTMLElement, el: HTMLElement): boolean {
   return pinnedGroupOf(root)?.contains(el) ?? false;
 }

@@ -307,8 +307,7 @@ describe("GhosttyTerminal", () => {
     expect(activate).toHaveBeenCalledTimes(1);
     expect(activate.mock.calls[0][1]).toBe("https://example.test/pull/596");
 
-    // An agent's screen tracks the mouse. The program still gets the click,
-    // and the link under it still opens.
+    // A mouse-tracking program still gets the click, and the link still opens.
     await parsed(term, "\x1b[?1000h\x1b[?1006h");
     move();
     down();
@@ -331,7 +330,6 @@ describe("GhosttyTerminal", () => {
       return { event, text: data.get("text/plain") };
     };
     await parsed(term, "hello");
-    // Nothing selected: the command is left alone.
     expect(copy().event.defaultPrevented).toBe(false);
     term.selectAll();
     const done = copy();

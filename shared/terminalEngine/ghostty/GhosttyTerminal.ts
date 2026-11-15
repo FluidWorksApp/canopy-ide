@@ -267,7 +267,7 @@ export class GhosttyTerminal {
   private composing = false;
   private wheelRemainder = 0;
   private reportingButton = -1;
-  /** Where a press the program was told about went down, to tell a click from a drag. */
+  /** Where a reported press went down, to tell a click from a drag. */
   private reportedPress: { col: number; row: number } | null = null;
   private lastReportedCell = -1;
   private dragging = false;
@@ -1032,8 +1032,7 @@ export class GhosttyTerminal {
       this.reportedPress = null;
       this.lastReportedCell = -1;
       this.report(1, button, ev);
-      // A program that tracks the mouse still gets the click, and a link under
-      // it still opens: an agent's screen is where most links are.
+      // Mouse-tracking programs still get the click, and links still open.
       const at = this.cellAt(ev);
       if (button === 0 && press && press.col === at.col && press.row === at.row && this.hoverLink) {
         this.hoverLink.activate(ev);

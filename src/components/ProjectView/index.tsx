@@ -11328,8 +11328,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (isInPinnedGroup(root, el)) return;
       const group = el.closest(".tab-group");
       const chip = group?.querySelector<HTMLElement>("[data-stack-chip]");
-      // One full section chip owns the edge after the pinned tabs, so
-      // revealing a tab has to clear both. A pinned tab is never scrolled out.
+      // Revealing a tab must clear both the pinned tabs and the section chip.
       const pinned = revealClearance(
         chip?.offsetWidth ?? 0,
         pinnedWidthOf(root),
