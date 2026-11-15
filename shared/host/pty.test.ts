@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fakeWire } from "../../src/test/fakeHostWire";
-import { INPUT_BACKLOG_CHARS, INPUT_BACKLOG_MS, socketTerminals } from "./pty";
+import { INPUT_BACKLOG_CHARS, INPUT_BACKLOG_MS, INPUT_PIECE_CHARS, inputPieces, socketTerminals } from "./pty";
 
 const viewer = () => ({ onData: vi.fn(), onReset: vi.fn(), onSize: vi.fn(), onGone: vi.fn(), onNotice: vi.fn() });
 
@@ -110,5 +110,20 @@ describe("remote input while the host socket is unavailable", () => {
     f.receive({ t: "input-error", pty: 3, error: "terminal 3 is not accepting input" });
     expect(view.onNotice).toHaveBeenLastCalledWith(expect.stringContaining("terminal 3 is not accepting input"));
     transport.dispose();
+  });
+});
+
+describe("large pastes", () => {
+  it("split under the host's message cap, in order, without breaking a surrogate pair", () => {
+    const paste = "a".repeat(INPUT_PIECE_CHARS - 1) + "😀" + "b".repeat(INPUT_PIECE_CHARS * 2);
+    const pieces = inputPieces(paste);
+    expect(pieces.join("")).toBe(paste);
+    expect(pieces.every((p) => p.length <= INPUT_PIECE_CHARS)).toBe(true);
+    expect(pieces[0].endsWith("a")).toBe(true);
+    expect(pieces[1].startsWith("😀")).toBe(true);
+  });
+
+  it("leaves normal typing as one message", () => {
+    expect(inputPieces("ls\r")).toEqual(["ls\r"]);
   });
 });

@@ -323,6 +323,8 @@ struct Portal {
     tailnet_tokens: TailnetTokens,
     /// Tailnet identity check (tailnet_serve.rs).
     admit: Admit,
+    /// Flips to true when remote access is turned off or the PIN rotates; open sockets close.
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 type TailnetTokens = Arc<Mutex<HashMap<String, std::net::IpAddr>>>;
@@ -561,7 +563,9 @@ pub async fn remote_enable(
             .try_state::<Arc<crate::tailnet_serve::TailnetServe>>()
             .is_some_and(|serve| serve.admits_peer(ip))
     });
+    let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     let portal = Portal {
+        closed: sd_rx.clone(),
         app: app.clone(),
         pin: Arc::new(pin.clone()),
         tokens,
@@ -617,7 +621,6 @@ pub async fn remote_enable(
         admit,
         tailnet_admission,
     ));
-    let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         let shutdown = async move {
             // Resolve when the flag flips to true.
@@ -964,10 +967,17 @@ async fn ws_conn(
         let out = out_tx.clone();
         let mut ev_rx = p.events.subscribe();
         tokio::spawn(async move {
-            while let Ok(msg) = ev_rx.recv().await {
-                // An oversized event is skipped; only a closed socket ends forwarding.
-                if out.send(msg).await == Err(SendError::Closed) {
-                    break;
+            loop {
+                match ev_rx.recv().await {
+                    // An oversized event is skipped; only a closed socket ends forwarding.
+                    Ok(msg) => {
+                        if out.send(msg).await == Err(SendError::Closed) {
+                            break;
+                        }
+                    }
+                    // A slow phone missed some events; keep forwarding the rest.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -982,9 +992,20 @@ async fn ws_conn(
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     recheck.tick().await;
 
+    // Graceful shutdown doesn't reach upgraded sockets; they watch for it themselves.
+    let mut closed = p.closed.clone();
+    if *closed.borrow() {
+        return;
+    }
+
     loop {
         tokio::select! {
             () = &mut idle => break,
+            changed = closed.changed() => {
+                if changed.is_err() || *closed.borrow() {
+                    break;
+                }
+            }
             _ = recheck.tick(), if p.tailnet_tokens.lock().unwrap().contains_key(&principal) => {
                 let (tokens, tailnet_tokens, admit, token) =
                     (p.tokens.clone(), p.tailnet_tokens.clone(), p.admit.clone(), principal.clone());
