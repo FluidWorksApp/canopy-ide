@@ -267,6 +267,8 @@ export class GhosttyTerminal {
   private composing = false;
   private wheelRemainder = 0;
   private reportingButton = -1;
+  /** Where a press the program was told about went down, to tell a click from a drag. */
+  private reportedPress: { col: number; row: number } | null = null;
   private lastReportedCell = -1;
   private dragging = false;
   private dragMoved = false;
@@ -947,6 +949,8 @@ export class GhosttyTerminal {
       if (button < 0) return;
       this.reportingButton = button;
       this.lastReportedCell = -1;
+      const { col, row } = this.cellAt(ev);
+      this.reportedPress = { col, row };
       this.report(0, button, ev);
       this.trackDocument();
       return;
@@ -1023,9 +1027,17 @@ export class GhosttyTerminal {
   private onMouseUp(ev: MouseEvent): void {
     if (this.reportingButton >= 0) {
       const button = this.reportingButton;
+      const press = this.reportedPress;
       this.reportingButton = -1;
+      this.reportedPress = null;
       this.lastReportedCell = -1;
       this.report(1, button, ev);
+      // A program that tracks the mouse still gets the click, and a link under
+      // it still opens: an agent's screen is where most links are.
+      const at = this.cellAt(ev);
+      if (button === 0 && press && press.col === at.col && press.row === at.row && this.hoverLink) {
+        this.hoverLink.activate(ev);
+      }
       return;
     }
     if (!this.dragging) return;
@@ -1399,6 +1411,12 @@ export class GhosttyTerminal {
     });
     on(area, "focus", () => this.setFocused(true));
     on(area, "blur", () => this.setFocused(false));
+    // Edit > Copy and its key equivalent arrive as a copy event, not a key.
+    on(root, "copy", (ev) => {
+      if (!this.hasSelection() || !ev.clipboardData) return;
+      ev.clipboardData.setData("text/plain", this.getSelection());
+      ev.preventDefault();
+    });
     on(root, "mousedown", (ev) => this.onMouseDown(ev));
     on(root, "mousemove", (ev) => this.onMouseMove(ev));
     on(root, "mouseleave", (ev) => {
