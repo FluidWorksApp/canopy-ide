@@ -453,6 +453,8 @@ export function AgentDetailsCard({
   const draftRef = useRef<{
     ctl: AbortController;
     seed: string;
+    /** The checkout and branch it was started for. */
+    key: string;
     draft: BrainPrDraft | null;
     /** Settles with the draft, or null; the submit waits on it briefly. */
     pending: Promise<BrainPrDraft | null>;
@@ -462,12 +464,25 @@ export function AgentDetailsCard({
     draftRef.current = null;
     setRaising(null);
   };
+  // A draft belongs to the checkout and branch it was started for. Compared by
+  // key rather than dropped from a cleanup: a cleanup left over from the
+  // previous branch can run after the form has just been opened on the new
+  // one, and it used to throw that new draft away (the submit then went ahead
+  // without waiting for it).
+  const draftKey = `${cwd ?? ""}\n${repo ?? ""}\n${branch ?? ""}`;
+  useEffect(() => {
+    const slot = draftRef.current;
+    if (slot && slot.key !== draftKey) {
+      slot.ctl.abort();
+      draftRef.current = null;
+    }
+  }, [draftKey]);
   useEffect(
     () => () => {
       draftRef.current?.ctl.abort();
       draftRef.current = null;
     },
-    [cwd, repo, branch],
+    [],
   );
   const [prEpoch, setPrEpoch] = useState(0);
   // The session raised a PR (or any edge changed): drop the minute cache so the
@@ -674,7 +689,12 @@ export function AgentDetailsCard({
           : undefined;
   const onOwnBranch =
     !!repo && !remoteMachine && !!branch && !DEFAULT_BRANCHES.has(branch);
-  const canRaise = !pr && onOwnBranch && ((changed ?? 0) > 0 || ahead > 0);
+  // A PR merged or closed from this card is finished: new uncommitted work on
+  // the branch starts the next one. (Only uncommitted work: after a squash
+  // merge the branch stays "ahead" forever, which is not a reason to raise.)
+  const prDone = !!pr && pr.state.toUpperCase() !== "OPEN";
+  const canRaise =
+    onOwnBranch && (!pr ? (changed ?? 0) > 0 || ahead > 0 : prDone && pr.branch === branch && (changed ?? 0) > 0);
   // Uncommitted work on a branch that already has its PR: commit and push
   // adds it to that PR. Only when the PR is this branch's own — a PR shown
   // because the session raised it from elsewhere is not where a push here goes.
@@ -1231,6 +1251,7 @@ export function AgentDetailsCard({
                 const slot = {
                   ctl,
                   seed,
+                  key: draftKey,
                   draft: null as BrainPrDraft | null,
                   pending: undefined as unknown as Promise<BrainPrDraft | null>,
                 };
