@@ -3527,17 +3527,22 @@ pub async fn agent_integration_health() -> Result<Vec<IntegrationHealth>, String
     let bins: Vec<String> = crate::agent_cli::integrated_clis()
         .map(|cli| cli.bin.into())
         .collect();
-    let installed = match cached_installed(&bins, std::time::Instant::now()) {
+    let now = std::time::Instant::now();
+    let installed = match cached_installed(&bins, now, Some(INSTALLED_TTL)) {
         Some(installed) => installed,
         None => {
-            let probed = tokio::task::spawn_blocking(move || {
-                let installed = which_installed(&bins)?;
-                remember_installed(bins, installed.clone(), std::time::Instant::now());
-                Ok::<_, String>(installed)
-            })
-            .await
-            .map_err(|error| format!("install probe task failed: {error}"))??;
-            probed
+            let key = bins.clone();
+            let probed = tokio::task::spawn_blocking(move || which_installed(&bins))
+                .await
+                .map_err(|error| format!("install probe task failed: {error}"))?;
+            match probed {
+                Ok(installed) => {
+                    remember_installed(key, installed.clone(), std::time::Instant::now());
+                    installed
+                }
+                // A busy machine can fail the probe; the last good answer stands.
+                Err(error) => cached_installed(&key, now, None).ok_or(error)?,
+            }
         }
     };
     Ok(integration_health(&home, &home, &installed))
@@ -3549,11 +3554,16 @@ const INSTALLED_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 type InstalledCache = Option<(std::time::Instant, Vec<String>, HashMap<String, bool>)>;
 static INSTALLED_CACHE: std::sync::Mutex<InstalledCache> = std::sync::Mutex::new(None);
 
-fn cached_installed(bins: &[String], now: std::time::Instant) -> Option<HashMap<String, bool>> {
+/// The last good probe for `bins`, if younger than `max_age` (None: any age).
+fn cached_installed(
+    bins: &[String],
+    now: std::time::Instant,
+    max_age: Option<std::time::Duration>,
+) -> Option<HashMap<String, bool>> {
     let slot = INSTALLED_CACHE.lock().ok()?;
     let (at, cached_bins, installed) = slot.as_ref()?;
-    (cached_bins.as_slice() == bins && now.saturating_duration_since(*at) < INSTALLED_TTL)
-        .then(|| installed.clone())
+    let fresh = max_age.is_none_or(|max| now.saturating_duration_since(*at) < max);
+    (cached_bins.as_slice() == bins && fresh).then(|| installed.clone())
 }
 
 fn remember_installed(
@@ -5511,12 +5521,18 @@ mod integration_tests {
         let installed = HashMap::from([("claude".to_string(), true)]);
         let t0 = std::time::Instant::now();
         remember_installed(bins.clone(), installed.clone(), t0);
+        let ttl = Some(INSTALLED_TTL);
         assert_eq!(
-            cached_installed(&bins, t0 + INSTALLED_TTL / 2),
+            cached_installed(&bins, t0 + INSTALLED_TTL / 2, ttl),
+            Some(installed.clone())
+        );
+        assert_eq!(cached_installed(&bins, t0 + INSTALLED_TTL, ttl), None);
+        // A failed probe falls back to the last good answer, however old.
+        assert_eq!(
+            cached_installed(&bins, t0 + INSTALLED_TTL * 10, None),
             Some(installed)
         );
-        assert_eq!(cached_installed(&bins, t0 + INSTALLED_TTL), None);
-        assert_eq!(cached_installed(&["codex".to_string()], t0), None);
+        assert_eq!(cached_installed(&["codex".to_string()], t0, None), None);
     }
 
     /// A scratch home with the hook helper in place — every installer refuses

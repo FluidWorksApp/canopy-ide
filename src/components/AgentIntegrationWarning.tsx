@@ -4,8 +4,8 @@ import { agentCliFor } from "../projects";
 import * as ipc from "../ipc";
 
 /** Project-level warning: never depends on opening the agents sidebar. */
-/** About a minute of failed checks at one per 15s. */
-export const FAILED_CHECKS_TO_WARN = 4;
+/** How long checks must keep failing before the warning shows. */
+export const FAILING_WARN_MS = 60_000;
 type IntegrationTarget={agent:string;ptyId:number;profile?:string};
 export function AgentIntegrationWarning({ agents,targets }: { agents: string[];targets?:IntegrationTarget[] }) {
   const targetsRef=useRef(targets);targetsRef.current=targets;
@@ -65,12 +65,13 @@ export function AgentIntegrationWarning({ agents,targets }: { agents: string[];t
     return pending;
   }, [key,targetsKey,profileEpoch]);
   // A busy machine can fail one check; warn only when checks keep failing.
-  const failedChecks = useRef(0);
+  const failingSince = useRef<number | null>(null);
   useEffect(() => {
     let alive = true;
-    const refresh = () => {const epoch=checkEpoch.current+1;void check().then(() => { failedChecks.current = 0; }, () => {
+    const refresh = () => {const epoch=checkEpoch.current+1;void check().then(() => { failingSince.current = null; }, () => {
       if (!alive || epoch !== checkEpoch.current) return;
-      if (++failedChecks.current >= FAILED_CHECKS_TO_WARN) setError("Could not verify agent integration. Retry to check this workspace.");
+      failingSince.current ??= Date.now();
+      if (Date.now() - failingSince.current >= FAILING_WARN_MS) setError("Could not verify agent integration. Retry to check this workspace.");
     });};
     refresh();
     const timer = window.setInterval(refresh, 15000);

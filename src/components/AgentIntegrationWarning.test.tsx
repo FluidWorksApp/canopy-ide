@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AgentIntegrationWarning, FAILED_CHECKS_TO_WARN } from './AgentIntegrationWarning';
+import { AgentIntegrationWarning, FAILING_WARN_MS } from './AgentIntegrationWarning';
 import * as ipc from '../ipc';
 vi.mock('../ipc',()=>({agentIntegrationHealth:vi.fn(),agentHooksInstalled:vi.fn(),setupAgentHooks:vi.fn(),onAgentEvents:vi.fn()}));
 beforeEach(()=>{vi.clearAllMocks();vi.mocked(ipc.onAgentEvents).mockResolvedValue(()=>{});vi.mocked(ipc.agentIntegrationHealth).mockResolvedValue([]);vi.mocked(ipc.agentHooksInstalled).mockResolvedValue(false);});
@@ -35,17 +35,20 @@ it('stays quiet when one check fails on a busy machine',async()=>{
  expect(screen.queryByRole('alert')).toBeNull();view.unmount();
 });
 
-it('warns when checks keep failing, and clears after one succeeds',async()=>{
+it('warns when checks keep failing for a minute, and clears after one succeeds',async()=>{
+ let now=1_000_000;const clock=vi.spyOn(Date,'now').mockImplementation(()=>now);
  vi.mocked(ipc.agentIntegrationHealth).mockRejectedValue(Error('Transient disconnect'));
  const view=render(<AgentIntegrationWarning agents={[]}/>);
  await waitFor(()=>expect(ipc.agentIntegrationHealth).toHaveBeenCalled());
- for(let i=1;i<FAILED_CHECKS_TO_WARN-1;i++)await recheck();
+ // Many quick failures within the minute stay quiet.
+ for(let i=0;i<5;i++)await recheck();
  expect(screen.queryByRole('alert')).toBeNull();
+ now+=FAILING_WARN_MS;
  await recheck();
  await screen.findByText(/Could not verify/);
  vi.mocked(ipc.agentIntegrationHealth).mockResolvedValue([]);
  await recheck();
- await waitFor(()=>expect(screen.queryByRole('alert')).toBeNull());view.unmount();
+ await waitFor(()=>expect(screen.queryByRole('alert')).toBeNull());view.unmount();clock.mockRestore();
 });
 
 it('never shows a restart warning on its own when the integration is installed',async()=>{

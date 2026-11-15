@@ -36,7 +36,7 @@ export function inputPieces(data: string): string[] {
   return pieces;
 }
 
-type Backlog = { chunks: string[]; chars: number; since: number; dropped: boolean };
+type Backlog = { chunks: string[]; chars: number; since: number; dropped: boolean; sent: boolean };
 
 /** One subscription per host PTY, shared by all views in this client. A socket
  * reconnect reattaches to the existing process and receives a fresh snapshot;
@@ -61,12 +61,15 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     if (!backlog) return true;
     if (Date.now() - backlog.since > INPUT_BACKLOG_MS) {
       backlogs.delete(pty);
-      notify(pty, EXPIRED);
+      notify(pty, backlog.sent ? PARTIAL : EXPIRED);
       return true;
     }
     while (backlog.chunks.length) {
       if (!wire.send({ t: "input", pty, data: backlog.chunks[0] })) return false;
       backlog.chars -= backlog.chunks.shift()!.length;
+      // Age counts from the last piece sent, so a slow paste that keeps moving never expires.
+      backlog.since = Date.now();
+      backlog.sent = true;
     }
     backlogs.delete(pty);
     notify(pty, backlog.dropped ? PARTIAL : null);
@@ -90,9 +93,9 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     }, RETRY_MS);
   };
 
-  const enqueue = (pty: number, data: string) => {
+  const enqueue = (pty: number, data: string, sentPart: boolean) => {
     let backlog = backlogs.get(pty);
-    if (!backlog) backlogs.set(pty, backlog = { chunks: [], chars: 0, since: Date.now(), dropped: false });
+    if (!backlog) backlogs.set(pty, backlog = { chunks: [], chars: 0, since: Date.now(), dropped: false, sent: sentPart });
     const cap = wire.connected ? INPUT_BACKPRESSURE_CHARS : INPUT_BACKLOG_CHARS;
     if (backlog.chars + data.length > cap) {
       backlog.dropped = true;
@@ -153,9 +156,11 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     writePty(pty, data) {
       if (disposed || !data) return;
       // The host drops a socket on any message over 1 MiB, so a big paste goes in pieces.
+      let sentPart = false;
       for (const piece of inputPieces(data)) {
         // Behind a backlog, new input queues too: it must not overtake it.
-        if (backlogs.has(pty) || !wire.send({ t: "input", pty, data: piece })) enqueue(pty, piece);
+        if (backlogs.has(pty) || !wire.send({ t: "input", pty, data: piece })) enqueue(pty, piece, sentPart);
+        else sentPart = true;
       }
     },
     killPty(pty) { if (!disposed) wire.send({ t: "kill", pty }); },
