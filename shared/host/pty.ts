@@ -8,6 +8,8 @@ export const INPUT_BACKLOG_CHARS = 16384;
  * prompt that was not on screen when they were typed, so older input is
  * discarded — and the view is told so. */
 export const INPUT_BACKLOG_MS = 30_000;
+/** While the socket is up a refusal is backpressure, so a big paste may queue this much. */
+export const INPUT_BACKPRESSURE_CHARS = 8 * 1024 * 1024;
 /** How soon input the socket refused for backpressure is retried. */
 const RETRY_MS = 250;
 
@@ -91,7 +93,8 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
   const enqueue = (pty: number, data: string) => {
     let backlog = backlogs.get(pty);
     if (!backlog) backlogs.set(pty, backlog = { chunks: [], chars: 0, since: Date.now(), dropped: false });
-    if (backlog.chars + data.length > INPUT_BACKLOG_CHARS) {
+    const cap = wire.connected ? INPUT_BACKPRESSURE_CHARS : INPUT_BACKLOG_CHARS;
+    if (backlog.chars + data.length > cap) {
       backlog.dropped = true;
       notify(pty, OVERFLOW);
       scheduleRetry();
@@ -99,7 +102,7 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     }
     backlog.chunks.push(data);
     backlog.chars += data.length;
-    notify(pty, WAITING);
+    if (!wire.connected) notify(pty, WAITING);
     scheduleRetry();
   };
 

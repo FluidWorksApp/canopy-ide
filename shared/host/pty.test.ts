@@ -123,6 +123,28 @@ describe("large pastes", () => {
     expect(pieces[1].startsWith("😀")).toBe(true);
   });
 
+  it("queues a paste the open socket refuses for backpressure and sends all of it", () => {
+    vi.useFakeTimers();
+    const f = fakeWire(), transport = socketTerminals(f.wire), view = viewer();
+    transport.attachPty(4, view);
+    let room = 2;
+    f.send.mockImplementation(() => room-- > 0);
+    const paste = "x".repeat(INPUT_PIECE_CHARS * 5);
+    transport.writePty(4, paste);
+    expect(view.onNotice).not.toHaveBeenCalled();
+    f.send.mockImplementation(() => true);
+    vi.advanceTimersByTime(1000);
+    const delivered = f.send.mock.results
+      .map((r, i) => (r.value ? f.send.mock.calls[i][0] : null))
+      .filter((m) => m && m.t === "input")
+      .map((m) => m!.data)
+      .join("");
+    expect(delivered).toBe(paste);
+    expect(view.onNotice).not.toHaveBeenCalledWith(expect.stringMatching(/not sent|couldn't/i));
+    transport.dispose();
+    vi.useRealTimers();
+  });
+
   it("leaves normal typing as one message", () => {
     expect(inputPieces("ls\r")).toEqual(["ls\r"]);
   });
