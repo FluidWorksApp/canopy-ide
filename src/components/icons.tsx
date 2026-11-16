@@ -342,6 +342,15 @@ export function DesktopIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** A cloud: a machine Canopy runs for you. */
+export function CloudIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.1 9.2 4.5 4.5 0 0 0 7 18z" />
+    </svg>
+  );
+}
+
 /** A single low bar: put a window away without closing it. */
 export function MinimizeIcon({ size = 14, className }: IconProps) {
   return (

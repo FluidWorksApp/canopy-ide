@@ -1,3 +1,4 @@
+import {WORKSPACE_ROOT,AGENT_HOME,AGENT_USER,CANOPY_CODE,RUNNER_PORT,RUNNER_BIND} from './paths.mjs';
 import {initializeScratch,scratchSessionEnv} from './scratch-environment.mjs';
 import {decodeTerminalInput,BINARY_TERMINAL_INPUT_PROTOCOL} from './terminal-input.mjs';
 import {prepareSharedAgentLaunch} from './shared-agent-launch.mjs';
@@ -23,7 +24,7 @@ import {browserStreamServer, handleBrowserStream} from './browser-stream.mjs';
 import {claudeIde as defaultClaudeIde, lockDir as claudeIdeLockDir} from './claude-ide.mjs';
 import {CLIPBOARD_BIN, installClipboardShims} from './clipboard-shims.mjs';
 const exec = promisify(execFile);
-const ROOT = '/workspace';
+const ROOT = WORKSPACE_ROOT;
 const OUTPUT_CAP = 512 * 1024;
 
 /** The self-updating CLIs' "no background update" switches, which the image
@@ -125,9 +126,9 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       sessions.set(id, pending);
       receipt.id = id;
       await persist();
-      let accountHome = '/home/agent';
+      let accountHome = AGENT_HOME;
       if (args.accountId) {
-        accountHome = `/home/agent/.canopy/accounts/${randomUUID()}`;
+        accountHome = `${AGENT_HOME}/.canopy/accounts/${randomUUID()}`;
         await mkdir(accountHome, { recursive: true, mode: 0o700 });
         // Account volumes are administrator-provisioned, read-only templates.
         // Each session gets writable refresh state; no shared credential writes.
@@ -152,9 +153,9 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       // OSC 52 on the terminal recorded here (clipboard-shims.mjs).
       let pty;
       try {
-      pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+CLIPBOARD_BIN+':/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; canopy_tty=$(tty 2>/dev/null) && export CANOPY_TTY="$canopy_tty"; unset canopy_tty; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
-        env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: 'agent', NPM_CONFIG_PREFIX:'/home/agent/.local', TERM: 'xterm-256color',
-          CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
+      pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+CLIPBOARD_BIN+':'+AGENT_HOME+'/.local/bin:$PATH" NPM_CONFIG_PREFIX='+AGENT_HOME+'/.local; canopy_tty=$(tty 2>/dev/null) && export CANOPY_TTY="$canopy_tty"; unset canopy_tty; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
+        env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: AGENT_USER, NPM_CONFIG_PREFIX:AGENT_HOME+'/.local', TERM: 'xterm-256color',
+          CANOPY_BROWSER_QUEUE:AGENT_HOME+'/.canopy/browser-requests',BROWSER:CANOPY_CODE+'/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:AGENT_HOME+'/.canopy/browser-requests', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
           CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...pinnedCliEnv(environment),...scratchEnv,...gitEnvironment,...harnessEnv,...ide?.env } });
       } catch (error) { claudeIde.close(id); throw error; }
       const session = { id, pty, kind: args.kind ?? 'terminal', title: args.command.slice(0, 80), cols, rows, accountId: args.accountId ?? null, output: Buffer.alloc(0), exitCode: null };
@@ -173,9 +174,9 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
   async function startDesktop() {
     if (!desktop) desktop = (async () => {
       // Workspace execution is already alive; the desktop is created only on demand.
-      await mkdir('/home/agent/.cache/runtime', {recursive:true,mode:0o700});
+      await mkdir(AGENT_HOME+'/.cache/runtime', {recursive:true,mode:0o700});
       const launch = (command, args) => {
-        const child = childSpawn(command, args, { cwd: ROOT, stdio: 'ignore', env: { ...process.env, HOME: '/home/agent', DISPLAY: ':99', XDG_RUNTIME_DIR:'/home/agent/.cache/runtime' } });
+        const child = childSpawn(command, args, { cwd: ROOT, stdio: 'ignore', env: { ...process.env, HOME: AGENT_HOME, DISPLAY: ':99', XDG_RUNTIME_DIR:AGENT_HOME+'/.cache/runtime' } });
         return new Promise((resolve, reject) => { child.once('spawn', () => resolve(child)); child.once('error', reject); });
       };
       const children = [];
@@ -295,7 +296,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         tcp.on('error', () => ws.close()); tcp.on('close', () => ws.close()); ws.on('close', () => tcp.destroy());
       });
     } else if (route === '/desktop/audio' && desktop) {
-      wss.handleUpgrade(request, socket, head, ws => streamDesktopAudio(ws, { spawn: childSpawn, env: { ...process.env, HOME: '/home/agent', XDG_RUNTIME_DIR: '/home/agent/.cache/runtime' } }));
+      wss.handleUpgrade(request, socket, head, ws => streamDesktopAudio(ws, { spawn: childSpawn, env: { ...process.env, HOME: AGENT_HOME, XDG_RUNTIME_DIR: AGENT_HOME+'/.cache/runtime' } }));
     } else if (route === '/browser/stream' && browser) {
       void handleBrowserStream(browser, browserStreams, request, socket, head).catch(() => socket.destroy());
     } else socket.destroy();
@@ -321,6 +322,6 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   await installClipboardShims().catch(error => console.warn(`Clipboard shims unavailable: ${error.message}`));
   startNativeServer();
   const { spawn } = await import('node-pty');
-  createRunner({ browser: new AgentBrowser({ home: '/home/agent' }), secret: process.env.CANOPY_RUNNER_TOKEN, spawnPty: spawn, accounts: (process.env.CANOPY_ACCOUNTS ?? '').split(',').filter(Boolean), workspaceId: process.env.CANOPY_WORKSPACE_ID, historyFile: '/home/agent/.canopy/session-history.json' })
-    .listen(8080, '0.0.0.0');
+  createRunner({ browser: new AgentBrowser({ home: AGENT_HOME }), secret: process.env.CANOPY_RUNNER_TOKEN, spawnPty: spawn, accounts: (process.env.CANOPY_ACCOUNTS ?? '').split(',').filter(Boolean), workspaceId: process.env.CANOPY_WORKSPACE_ID, historyFile: AGENT_HOME+'/.canopy/session-history.json' })
+    .listen(RUNNER_PORT, RUNNER_BIND);
 }

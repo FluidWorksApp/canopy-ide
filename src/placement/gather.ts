@@ -1,13 +1,10 @@
 // Reads the real world into the pure placement types. Everything goes through
 // the app's existing seams; the host is a global singleton (src/host), so
 // only the ACTIVE host's projects and terminals are readable. Other remotes
-// contribute their lifecycle state and size from the workspace list, and T3
-// machines are read through their own short-lived RPC clients.
+// contribute their lifecycle state and size from the workspace list.
 import * as ipc from "../ipc";
 import { isRemoteHost } from "../host";
 import { loadWorkspace } from "../projects";
-import { listT3Machines, connectT3Machine } from "../t3connect/api";
-import { listShell } from "../t3connect/methods";
 import { activeWorkspace } from "../remoteExecution/workspace";
 import { probeSessions, runningSessions } from "../remoteExecution/workspaceProbe";
 import { peekWorkspaceList, refreshWorkspaceList } from "../remoteExecution/workspaceListCache";
@@ -34,24 +31,9 @@ async function discoverWorkspaces() {
   }
 }
 
-async function discoverMachines() {
-  try {
-    return { t3Machines: await listT3Machines(), failure: null };
-  } catch (error) {
-    return { t3Machines: [], failure: failureMessage("connected machines", error) };
-  }
-}
-
 async function discoverInventory() {
-  const [workspacesResult, machinesResult] = await Promise.all([
-    discoverWorkspaces(),
-    discoverMachines(),
-  ]);
-  return {
-    remoteWorkspaces: workspacesResult.remoteWorkspaces,
-    t3Machines: machinesResult.t3Machines,
-    failures: [workspacesResult.failure, machinesResult.failure].filter((failure): failure is string => Boolean(failure)),
-  };
+  const result = await discoverWorkspaces();
+  return { remoteWorkspaces: result.remoteWorkspaces, failures: result.failure ? [result.failure] : [] };
 }
 
 async function workspaces() {
@@ -83,16 +65,6 @@ export function realSources(): ResourceSources {
         return "unknown";
       }
     },
-    t3Machines: listT3Machines,
-    t3ActiveAgents: async (id) => {
-      const rpc = await connectT3Machine(id);
-      try {
-        const shell = await listShell(rpc);
-        return shell.threads.filter((thread) => thread.status === "running").length;
-      } finally {
-        rpc.close();
-      }
-    },
   };
 }
 
@@ -117,7 +89,6 @@ export interface TargetInventory {
 export function displayTargets(
   resources: ResourceSnapshot[],
   remoteWorkspaces: { id: string; name: string }[],
-  t3Machines: { id: string; label: string }[],
 ): DisplayTarget[] {
   const online = (target: Target) =>
     resources.find((resource) => sameTarget(resource.target, target))?.online ?? false;
@@ -128,15 +99,11 @@ export function displayTargets(
       const target: Target = { kind: "remote", workspaceId: id };
       return { target, name, online: online(target) };
     }),
-    ...t3Machines.map(({ id, label }) => {
-      const target: Target = { kind: "t3", machineId: id };
-      return { target, name: label, online: online(target) };
-    }),
   ];
 }
 
 export async function gatherTargetInventory(): Promise<TargetInventory> {
-  const { remoteWorkspaces, t3Machines, failures } = await discoverInventory();
+  const { remoteWorkspaces, failures } = await discoverInventory();
   return {
     targets: [
       { target: { kind: "local" }, name: "This Mac", online: true },
@@ -144,11 +111,6 @@ export async function gatherTargetInventory(): Promise<TargetInventory> {
         target: { kind: "remote" as const, workspaceId: workspace.id },
         name: workspace.name,
         online: workspace.state === "ready",
-      })),
-      ...t3Machines.map((machine) => ({
-        target: { kind: "t3" as const, machineId: machine.id },
-        name: machine.label,
-        online: true,
       })),
     ],
     discoveryFailures: failures,
@@ -172,28 +134,8 @@ export async function gatherUnified(): Promise<Gathered> {
   const inventory = await discoverInventory();
   const notes: string[] = [...inventory.failures];
   const list = inventory.remoteWorkspaces;
-  const machines = inventory.t3Machines;
-  const shells = new Map<string, Awaited<ReturnType<typeof listShell>>>();
-  await Promise.all(machines.map(async (machine) => {
-    try {
-      const rpc = await connectT3Machine(machine.id);
-      try {
-        shells.set(machine.id, await listShell(rpc));
-      } finally {
-        rpc.close();
-      }
-    } catch {
-      notes.push(`Could not read ${machine.label}.`);
-    }
-  }));
   const sources = realSources();
   sources.remoteWorkspaces = async () => list;
-  sources.t3Machines = async () => machines;
-  sources.t3ActiveAgents = async (id) => {
-    const shell = shells.get(id);
-    if (!shell) throw new Error("Machine shell is unavailable");
-    return shell.threads.filter((thread) => thread.status === "running").length;
-  };
   const [resources, ws, stats] = await Promise.all([
     collectResources(sources),
     loadWorkspace().catch(() => null),
@@ -235,7 +177,6 @@ export async function gatherUnified(): Promise<Gathered> {
       ...(w.id === onRemote ? { projects, agents } : {}),
       ...(sessionsByWorkspace.has(w.id) ? { sessions: sessionsByWorkspace.get(w.id) } : {}),
     })),
-    t3: [],
     jobs: localRemoteJobs()
       .load()
       .map((j) => ({ jobId: j.jobId, title: j.title, workspace: j.workspace, target: j.target, workspaceId: list.find((w) => w.name === j.workspace)?.id })),
@@ -243,20 +184,10 @@ export async function gatherUnified(): Promise<Gathered> {
   if (list.some((w) => w.id !== onRemote)) notes.push("Projects on workspaces other than the active one are not listed until you switch to them.");
   if (onRemote) notes.push("This Mac's projects are not readable while a remote workspace is active.");
 
-  for (const machine of machines) {
-    const shell = shells.get(machine.id);
-    if (!shell) continue;
-    input.t3.push({
-      machineId: machine.id,
-      label: machine.label,
-      projects: shell.projects.map((p) => ({ id: p.id, title: p.title })),
-      threads: shell.threads.map((t) => ({ id: t.id, name: t.title ?? t.id, project: t.projectId, status: t.status, branch: t.branch ?? undefined })),
-    });
-  }
   return {
     rows: buildUnifiedRows(input),
     resources,
-    targets: displayTargets(resources, list, machines),
+    targets: displayTargets(resources, list),
     discoveryFailures: inventory.failures,
     notes,
   };

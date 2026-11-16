@@ -6,7 +6,7 @@ import { PlacementPicker } from "./PlacementPicker";
 const targets: DisplayTarget[] = [
   { target: { kind: "local" }, name: "This Mac", online: true },
   { target: { kind: "remote", workspaceId: "workspace-1" }, name: "Design Studio", online: true },
-  { target: { kind: "t3", machineId: "machine-1" }, name: "Build Mini", online: true },
+  { target: { kind: "remote", workspaceId: "workspace-2" }, name: "Build Mini", online: true },
 ];
 
 describe("PlacementPicker", () => {
@@ -30,16 +30,16 @@ describe("PlacementPicker", () => {
     expect(onChange).toHaveBeenCalledWith(automaticPreference());
   });
 
-  it("keeps same-named concrete machines distinct by target kind and ID", () => {
+  it("keeps same-named concrete machines distinct by ID", () => {
     const onChange = vi.fn();
     const sameNames: DisplayTarget[] = [
       ...targets.slice(0, 1),
-      { target: { kind: "remote", workspaceId: "same" }, name: "Studio", online: true },
-      { target: { kind: "t3", machineId: "same" }, name: "Studio", online: true },
+      { target: { kind: "remote", workspaceId: "one" }, name: "Studio", online: true },
+      { target: { kind: "remote", workspaceId: "two" }, name: "Studio", online: true },
     ];
     render(<PlacementPicker value={automaticPreference()} onChange={onChange} targets={sameNames} />);
-    fireEvent.change(screen.getByLabelText("Run on"), { target: { value: "t3:same" } });
-    expect(onChange).toHaveBeenCalledWith(targetPreference({ kind: "t3", machineId: "same" }));
+    fireEvent.change(screen.getByLabelText("Run on"), { target: { value: "remote:two" } });
+    expect(onChange).toHaveBeenCalledWith(targetPreference({ kind: "remote", workspaceId: "two" }));
   });
 
   it("keeps a missing concrete default selected instead of changing it to Automatic", () => {

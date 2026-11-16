@@ -9,6 +9,7 @@
 // (packages/remote-host/mirror-apply.mjs). Nothing here reads local files.
 import type {Project,WorkspaceState} from '../projects';
 import {newComponentId,newProjectId} from '../projects';
+import {remoteRoot} from './remoteRoot';
 
 export type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
 export interface MirrorDeps{local:Invoke;remote:Invoke;sleep?:(ms:number)=>Promise<void>;newId?:()=>string;now?:()=>number;
@@ -141,7 +142,7 @@ export async function runMirror(deps:MirrorDeps,options:MirrorOptions,onProgress
   if(already.has(projectId)){result.state='skipped';result.detail='Already set up in this workspace';emit();continue;}
   const ready=components.filter(c=>!c.error);
   if(!ready.length){result.state='skipped';result.detail=components.map(c=>`${c.label}: ${c.error}`).join('; ');emit();continue;}
-  const id=newProjectId(),parent=`/workspace/${id}`;
+  const id=newProjectId(),parent=`${remoteRoot()}/${id}`;
   const mirrored:{local:LocalComponent;path:string}[]=[];
   try{
    await deps.remote('fs_create_dir',{path:parent});
@@ -276,7 +277,7 @@ export async function ensureProjectOnRemote(deps:MirrorDeps,options:EnsureOption
   let applies=true;
   try{await deps.remote('mirror_apply_status',{id:'00000000-0000-0000-0000-000000000000'});}
   catch(error){if(unsupported(error,'mirror_apply_status'))applies=false;}
-  const id=newProjectId(),parent=`/workspace/${id}`;
+  const id=newProjectId(),parent=`${remoteRoot()}/${id}`;
   const mirrored:{local:LocalComponent;path:string}[]=[];
   await deps.remote('fs_create_dir',{path:parent});
   let index=0;

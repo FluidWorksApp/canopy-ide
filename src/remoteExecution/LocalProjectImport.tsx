@@ -4,6 +4,7 @@ import {invoke as localInvoke} from '@tauri-apps/api/core';
 import {invoke} from '../host';
 import type {Project,WorkspaceState} from '../projects';
 import {newProjectId,newComponentId} from '../projects';
+import {remoteRoot} from './remoteRoot';
 type ComponentSource={key:string;index:number;label:string;path:string;url:string;repository:string;relative:string;error?:string};
 type Source={project:Project;components:ComponentSource[]};
 export function LocalProjectImport(){
@@ -31,7 +32,7 @@ export function LocalProjectImport(){
  async function copy(){setBusy(true);setNotice('');try{
   const store=JSON.parse(await invoke<string>('store_load')) as WorkspaceState;
   for(const source of sources.filter(s=>s.components.some(c=>selected.includes(c.key)))){
-   const id=newProjectId(),parent='/workspace/'+id;await invoke('fs_create_dir',{path:parent});const cloned=new Map<string,string>();const components=[];
+   const id=newProjectId(),parent=remoteRoot()+'/'+id;await invoke('fs_create_dir',{path:parent});const cloned=new Map<string,string>();const components=[];
    for(let i=0;i<source.components.length;i++){const component=source.components[i];if(!selected.includes(component.key)||component.error)continue;let repo=cloned.get(component.repository);if(!repo){setNotice(`Cloning ${source.project.name} · ${component.label}…`);const cloneParent=parent+'/repo-'+(cloned.size+1);await invoke('fs_create_dir',{path:cloneParent});const result=await invoke<{path:string}>('git_clone',{parent:cloneParent,url:component.url});repo=result.path;cloned.set(component.repository,repo);}
     const path=repo+(component.relative?'/'+component.relative:'');await invoke('fs_stat',{path});components.push({id:newComponentId(),label:component.label,path,...(commands?{commands:source.project.components[component.index].commands}: {})});
    }

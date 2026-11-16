@@ -4,6 +4,7 @@ import {activeWorkspace} from '../remoteExecution/workspace';
 import {copyReadableLink} from '../readableLinks';
 import {SHARE_TERMINAL_EVENT,SHARED_SESSIONS_CHANGED,shareAvailability,shareableTerminals,terminalLabel,type Publication,type ShareableTerminal} from './shareTerminal';
 import './sharedSessions.css';
+import {remoteRoot} from '../remoteExecution/remoteRoot';
 /** `canPair` (from the host's /projects): false for a project a clean shell
  * can't mount, such as the owner's own projects. Older hosts leave it out. */
 type Project={id:string;name:string;canPair?:boolean};
@@ -24,7 +25,7 @@ const shareError=(e:unknown)=>{const text=message(e);return PLAIN[text]??text;};
  * project mount its cwd is in. None means its project isn't shared. */
 function projectOf(catalog:Project[],t:ShareableTerminal){
  return catalog.find(p=>p.id===t.projectId)
-  ??catalog.find(p=>!!t.cwd&&(t.cwd===`/workspace/projects/${p.id}`||t.cwd.startsWith(`/workspace/projects/${p.id}/`)))
+  ??catalog.find(p=>!!t.cwd&&(t.cwd===`${remoteRoot()}/projects/${p.id}`||t.cwd.startsWith(`${remoteRoot()}/projects/${p.id}/`)))
   ??catalog.find(p=>!!t.projectName&&p.name===t.projectName);
 }
 const NOT_SHARED='Not shared with your team';

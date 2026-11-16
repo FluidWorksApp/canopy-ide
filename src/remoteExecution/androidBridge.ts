@@ -11,10 +11,11 @@
 //    modules settings.gradle includes, which are apps, their application ids,
 //    and the APKs their builds have already produced — what a run needs.
 import { basename } from "../paths";
+import { insideRemoteRoot } from "./remoteRoot";
 type Call = <T>(command: string, args: Record<string, unknown>) => Promise<T>;
 
 export const isWorkspacePath = (path: unknown): path is string =>
-  typeof path === "string" && (path === "/workspace" || path.startsWith("/workspace/"));
+  typeof path === "string" && insideRemoteRoot(path);
 
 /** Does this android_* call name something in the VM? */
 export function wantsWorkspaceAndroid(command: string, args: Record<string, unknown>): boolean {

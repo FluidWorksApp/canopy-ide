@@ -8,15 +8,13 @@ const input: UnifiedInput = {
     { workspaceId: "w2", name: "Other", state: "ready" },
     { workspaceId: "w3", name: "Asleep", state: "stopped", projects: [] },
   ],
-  t3: [{ machineId: "m1", label: "Studio", projects: [{ id: "tp", title: "Canopy" }], threads: [{ id: "t1", name: "t", project: "tp", status: "running", branch: "main" }] }],
   jobs: [{ jobId: "j1", title: "Fix tests", workspace: "Cloud", target: "w1", workspaceId: "w1" }],
 };
 
 describe("buildUnifiedRows", () => {
   const rows = buildUnifiedRows(input);
-  it("lists local, remote, t3 and jobs together with target badges", () => {
-    expect(rows.map((r) => r.targetLabel)).toEqual(expect.arrayContaining(["This Mac", "Cloud", "Studio"]));
-    expect(rows.filter((r) => r.kind === "thread")).toMatchObject([{ name: "Canopy", status: "running", branch: "main", target: { kind: "t3", machineId: "m1" } }]);
+  it("lists local, remote and jobs together with target badges", () => {
+    expect(rows.map((r) => r.targetLabel)).toEqual(expect.arrayContaining(["This Mac", "Cloud"]));
     expect(rows.find((r) => r.kind === "job")).toMatchObject({ name: "Fix tests", target: { kind: "remote", workspaceId: "w1" } });
   });
   it("adds setup placeholders by project identity even when names collide", () => {
@@ -33,17 +31,14 @@ describe("groupByProject and filterRows", () => {
   const rows = buildUnifiedRows(input);
   it("groups the same project across targets case-insensitively", () => {
     const g = groupByProject(rows).find((x) => x.key === "canopy")!;
-    expect(new Set(g.rows.map((r) => r.target.kind))).toEqual(new Set(["local", "remote", "t3"]));
+    expect(new Set(g.rows.map((r) => r.target.kind))).toEqual(new Set(["local", "remote"]));
   });
   it("filters by stable named-machine ID, kind and text", () => {
-    const t3Rows = filterRows(rows, { target: "t3:m1" });
-    expect(t3Rows.length).toBeGreaterThan(0);
-    expect(t3Rows.every((r) => r.target.kind === "t3" && r.target.machineId === "m1")).toBe(true);
     const remoteRows = filterRows(rows, { target: "remote:w1" });
     expect(remoteRows.length).toBeGreaterThan(0);
     expect(remoteRows.every((r) => r.target.kind === "remote" && r.target.workspaceId === "w1")).toBe(true);
     expect(filterRows(rows, { kind: "agent" }).every((r) => r.kind === "agent")).toBe(true);
-    expect(filterRows(rows, { text: "studio" }).every((r) => r.targetLabel === "Studio")).toBe(true);
+    expect(filterRows(rows, { text: "cloud" }).every((r) => r.targetLabel === "Cloud")).toBe(true);
     expect(filterRows(rows, { text: "fix" })).toHaveLength(1);
     expect(filterRows(rows, {})).toHaveLength(rows.length);
   });
@@ -54,7 +49,6 @@ describe("sessions read from outside", () => {
     const rows = buildUnifiedRows({
       local: { projects: [], agents: [] },
       remotes: [{ workspaceId: "w9", name: "Coraa Workstation", state: "ready", sessions: [{ id: "4", title: "claude · api" }] }],
-      t3: [],
       jobs: [],
     });
     expect(rows).toEqual([
@@ -73,7 +67,6 @@ describe("sessions read from outside", () => {
     const rows = buildUnifiedRows({
       local: { projects: [{ id: "p", name: "P" }], agents: [] },
       remotes: [{ workspaceId: "w9", name: "W", state: "ready", sessions: [{ id: "1", title: "x" }] }],
-      t3: [],
       jobs: [],
     });
     expect(filterRows(rows, { kind: "session" }).map((r) => r.kind)).toEqual(["session"]);

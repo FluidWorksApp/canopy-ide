@@ -128,7 +128,7 @@ describe("choosePlacement", () => {
   });
 
   it("is deterministic regardless of input order", () => {
-    const resources = [snap(L), snap(R), snap({ kind: "t3", machineId: "m" })];
+    const resources = [snap(L), snap(R), snap({ kind: "remote", workspaceId: "m" })];
     expect(choosePlacement({ preference: automaticPreference(), resources })).toEqual(
       choosePlacement({ preference: automaticPreference(), resources: [...resources].reverse() }),
     );

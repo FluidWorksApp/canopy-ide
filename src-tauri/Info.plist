@@ -24,6 +24,14 @@
         <key>NSExceptionAllowsInsecureHTTPLoads</key>
         <true/>
       </dict>
+      <!-- canopy-host over Tailscale: http://<box>.<tailnet>.ts.net, which Tailscale encrypts. -->
+      <key>ts.net</key>
+      <dict>
+        <key>NSIncludesSubdomains</key>
+        <true/>
+        <key>NSExceptionAllowsInsecureHTTPLoads</key>
+        <true/>
+      </dict>
     </dict>
   </dict>
 </dict>

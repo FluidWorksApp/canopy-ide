@@ -14,10 +14,10 @@ describe("placement preferences", () => {
   it("round-trips concrete targets without collapsing their stable IDs", () => {
     preferences.setGlobalPreference(targetPreference({ kind: "local" }));
     preferences.setProjectPreference("a", targetPreference({ kind: "remote", workspaceId: "workspace-a" }));
-    preferences.setAgentPreference("claude", targetPreference({ kind: "t3", machineId: "machine-a" }));
+    preferences.setAgentPreference("claude", targetPreference({ kind: "remote", workspaceId: "machine-a" }));
     expect(preferences.getGlobalPreference()).toEqual(targetPreference({ kind: "local" }));
     expect(preferences.getProjectPreference("a")).toEqual(targetPreference({ kind: "remote", workspaceId: "workspace-a" }));
-    expect(preferences.getAgentPreference("claude")).toEqual(targetPreference({ kind: "t3", machineId: "machine-a" }));
+    expect(preferences.getAgentPreference("claude")).toEqual(targetPreference({ kind: "remote", workspaceId: "machine-a" }));
 
     preferences.setProjectPreference("b", targetPreference({ kind: "remote", workspaceId: "workspace-b" }));
     expect(preferences.getProjectPreference("a")).not.toEqual(preferences.getProjectPreference("b"));
@@ -42,6 +42,15 @@ describe("placement preferences", () => {
     expect(preferences.getProjectPreference("local")).toEqual(targetPreference({ kind: "local" }));
     expect(preferences.getProjectPreference("remote")).toEqual(inheritPreference());
     expect(preferences.getAgentPreference("remote")).toEqual(inheritPreference());
+  });
+
+  it("drops a saved T3 machine choice, which no longer exists", () => {
+    localStorage.setItem("canopy:placement:v1", JSON.stringify({
+      global: { mode: "target", target: { kind: "t3", machineId: "m1" } },
+      projects: { a: { mode: "target", target: { kind: "t3", machineId: "m1" } } },
+    }));
+    expect(preferences.getGlobalPreference()).toEqual(automaticPreference());
+    expect(preferences.getProjectPreference("a")).toEqual(inheritPreference());
   });
 
   it("maps legacy global auto to Automatic and ignores corrupt values", () => {

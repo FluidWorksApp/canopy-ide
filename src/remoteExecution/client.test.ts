@@ -7,6 +7,9 @@ it("requires TLS off loopback and rejects credentials in endpoints", () => {
   expect(remoteEndpoint("https://vm.example")).toBe("https://vm.example");
   expect(() => remoteEndpoint("http://vm.example")).toThrow();
   expect(() => remoteEndpoint("https://user:secret@vm.example")).toThrow();
+  expect(remoteEndpoint("http://box.tail1234.ts.net:8787")).toBe("http://box.tail1234.ts.net:8787");
+  expect(() => remoteEndpoint("http://ts.net")).toThrow();
+  expect(() => remoteEndpoint("http://box.ts.net.example")).toThrow();
 });
 it("keeps tokens out of stream URLs and sends a one-use ticket", async () => {
   const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ticket: "one-use" }) });
@@ -23,6 +26,7 @@ it("native connection policy permits TLS hosts and forwarded loopback streams", 
     const connect = policy.split(";").find((part: string) => part.trim().startsWith("connect-src"));
     expect(connect).toContain("https:"); expect(connect).toContain("wss:");
     expect(connect).toContain("http://127.0.0.1:*"); expect(connect).toContain("ws://127.0.0.1:*");
+    expect(connect).toContain("http://*.ts.net:*"); expect(connect).toContain("ws://*.ts.net:*");
     expect(connect).not.toMatch(/(?:^| )http:(?: |$)/);
   }
 });

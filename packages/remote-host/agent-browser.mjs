@@ -1,3 +1,4 @@
+import {AGENT_HOME} from './paths.mjs';
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {isAbsolute,join} from 'node:path';
@@ -179,7 +180,7 @@ export class AgentBrowser{
   * do: such a browser never closes the context, adopts a popup's page through
   * `adopt`, and reports its end through `onClosed`.
   */
- constructor({home='/home/agent',timeoutMs=30_000,launch,picker=new URL('./browser-assets/preview_picker.js',import.meta.url),executablePath=process.env.CANOPY_CHROMIUM_EXECUTABLE??'/usr/bin/chromium',contexts,profile=AGENT_PROFILE,adopt,onPopup,onClosed,prepareTab,label='workspace browser',autoControl=false,autoReleaseMs=AUTO_RELEASE_MS,fileChooser=false}={}){
+ constructor({home=AGENT_HOME,timeoutMs=30_000,launch,picker=new URL('./browser-assets/preview_picker.js',import.meta.url),executablePath=process.env.CANOPY_CHROMIUM_EXECUTABLE??'/usr/bin/chromium',contexts,profile=AGENT_PROFILE,adopt,onPopup,onClosed,prepareTab,label='workspace browser',autoControl=false,autoReleaseMs=AUTO_RELEASE_MS,fileChooser=false}={}){
   Object.assign(this,{home,timeoutMs,picker,executablePath,profile,adopt,onPopup,onClosed,prepareTab,label,autoControl,autoReleaseMs,fileChooser});
   this.launch=launch??(async profileDirectory=>{const {chromium}=createRequire(import.meta.url)('playwright-core');return chromium.launchPersistentContext(profileDirectory,{executablePath:this.executablePath,headless:true,args:['--no-sandbox','--disable-dev-shm-usage'],viewport:DEFAULT_VIEWPORT});});
   this.ownsContexts=!contexts;

@@ -1,3 +1,4 @@
+import {AGENT_HOME} from './paths.mjs';
 import {spawn} from 'node:child_process';
 import {lstat,mkdir} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
@@ -5,7 +6,7 @@ import path from 'node:path';
 import {repositorySource} from './git-source.mjs';
 
 export class CloneJobs {
- constructor({scoped,home='/home/agent',launch=spawn,now=Date.now}){this.scoped=scoped;this.home=home;this.launch=launch;this.now=now;this.jobs=new Map();this.pending=0;}
+ constructor({scoped,home=AGENT_HOME,launch=spawn,now=Date.now}){this.scoped=scoped;this.home=home;this.launch=launch;this.now=now;this.jobs=new Map();this.pending=0;}
  async start(parent,raw){
   for(const [id,job] of this.jobs)if(job.finishedAt&&this.now()-job.finishedAt>900000)this.jobs.delete(id);
   if([...this.jobs.values()].filter(job=>job.state==='cloning').length+this.pending>=2||this.jobs.size+this.pending>=32)throw Error('Another clone is already running. Try again after it completes.');

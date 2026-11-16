@@ -754,6 +754,7 @@ import { nativeHost } from "../../host/native";
 import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
 import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
 import { armPlanTracking, expectRun } from "../../plans/planStore";
+import {remoteRoot} from '../../remoteExecution/remoteRoot';
 import {
   documentResourceActive,
   shouldReuseInactiveDocumentPane,
@@ -15809,7 +15810,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <div className="side-panel-head">
             <span>Components & files</span>
             <span className="side-head-actions">
-              {upload.startUpload&&<Button size="sm" variant="ghost" disabled={upload.busy} onClick={e=>compMenu.open(e,uploadItems(components[0]?.path??'/workspace',true))}>Upload…</Button>}
+              {upload.startUpload&&<Button size="sm" variant="ghost" disabled={upload.busy} onClick={e=>compMenu.open(e,uploadItems(components[0]?.path??remoteRoot(),true))}>Upload…</Button>}
               <Button icon size="sm" variant="ghost" title="Refresh files" onClick={() => setTreeRefreshRevision(v => v + 1)}><RestartIcon size={14}/></Button>
               <Button icon size="sm" variant="ghost" title="Edit project" onClick={onEdit}><SettingsIcon size={14}/></Button>
             </span>
@@ -16563,11 +16564,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {machineTransition && visible && (
         <Dialog
           title={`Run on ${machineTransition.name}`}
-          body={
-            machineTransition.target.kind === "t3"
-              ? `${machineTransition.name} opens in its machine view. Continue there after it opens; this agent was not started on the active workspace.`
-              : `Switch to ${machineTransition.name}, then start the agent there. Nothing was started yet.`
-          }
+          body={`Switch to ${machineTransition.name}, then start the agent there. Nothing was started yet.`}
           dismissLabel="Cancel"
           onDismiss={() => setMachineTransition(null)}
           actions={[{
@@ -16577,7 +16574,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const target = machineTransition.target;
               // Carry the start across the switch: it happens by itself once
               // this project is open on that machine.
-              if (machineTransition.resumeAgent && target.kind !== "t3") {
+              if (machineTransition.resumeAgent) {
                 setPendingLaunch({
                   agentId: machineTransition.resumeAgent,
                   projectId: canonicalProjectId(project),
@@ -16587,7 +16584,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 });
               }
               setMachineTransition(null);
-              void requestTargetTransition(target, machineTransition.name);
+              void requestTargetTransition(target);
             },
           }]}
         />
