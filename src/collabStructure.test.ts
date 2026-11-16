@@ -78,3 +78,35 @@ describe("what a collab frame changes", () => {
     expect(mgr.structure()).toBe(mgr.structure());
   });
 });
+
+describe("a file too big to share live", () => {
+  it("is measured as it is sent: escaped JSON, in UTF-8 bytes", async () => {
+    const { tooBigToShare, LIVE_SHARE_MAX_BYTES } = await import("./collab");
+    // Two bytes go to the quotes around it.
+    expect(tooBigToShare("a".repeat(LIVE_SHARE_MAX_BYTES - 2))).toBe(false);
+    expect(tooBigToShare("a".repeat(LIVE_SHARE_MAX_BYTES - 1))).toBe(true);
+    expect(tooBigToShare("é".repeat(LIVE_SHARE_MAX_BYTES / 2))).toBe(true);
+    // Escaping doubles quotes and backslashes.
+    expect(tooBigToShare('"'.repeat(LIVE_SHARE_MAX_BYTES / 2))).toBe(true);
+    expect(tooBigToShare('"'.repeat(LIVE_SHARE_MAX_BYTES / 4))).toBe(false);
+  });
+
+  it("the owner's refusal clears the pending offer and says why", () => {
+    const mgr = new CollabManager();
+    const notices: string[] = [];
+    mgr.onNotice = (t) => notices.push(t);
+    mgr.receive(msg({ body: { kind: "offer", name: "big.log", lang: null } as CollabMsg["body"] }));
+    mgr.receive(msg({ body: { kind: "close", reason: "too-big" } }));
+    mgr.receive(msg({ body: { kind: "snapshot", rev: 0, text: "late" } }));
+    expect(notices).toEqual(["big.log is too big to share live (over 1.5 MB)."]);
+  });
+
+  it("ignores a close for an offer from someone else", () => {
+    const mgr = new CollabManager();
+    const notices: string[] = [];
+    mgr.onNotice = (t) => notices.push(t);
+    mgr.receive(msg({ body: { kind: "offer", name: "a.ts", lang: null } as CollabMsg["body"] }));
+    mgr.receive(msg({ from: "peer-2", body: { kind: "close", reason: "too-big" } }));
+    expect(notices).toEqual([]);
+  });
+});

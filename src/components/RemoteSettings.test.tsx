@@ -51,20 +51,20 @@ describe("Remote access, signed in to Canopy", () => {
     await userEvent.click(toggle);
     await waitFor(() => expect(calls).toEqual(["remote_enable", "tunnel_start canopy 6680"]));
     expect(await screen.findByText("https://vj.remote.canopyide.dev/remote")).toBeInTheDocument();
-    expect(await screen.findByText("http://mac.example.ts.net:6680/remote")).toBeInTheDocument();
+    expect(await screen.findByText("http://100.64.0.1:6680/remote")).toBeInTheDocument();
     expect(screen.getByText("123456")).toBeInTheDocument();
     expect(screen.queryByText("On this network")).toBeNull();
     expect(screen.queryByRole("button", { name: "Show address and PIN" })).toBeNull();
     setTeamIdentityFetchForTests(null);
   });
 
-  it("uses the tailnet address when Tailscale gives no name", async () => {
+  it("uses the name when Tailscale gives no address", async () => {
     setTeamIdentityFetchForTests(async () => ({ user: { id: "u1", name: "VJ" } }));
-    tailscale = { ...running_ts, thisMachine: { ...machine, dnsName: "" } };
+    tailscale = { ...running_ts, thisMachine: { ...machine, ip: "" } };
     commands([], null, "not-on-server-yet");
     render(<RemoteSettings runInTerminal={() => {}} />);
     await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
-    expect(await screen.findByText("http://100.64.0.1:6680/remote")).toBeInTheDocument();
+    expect(await screen.findByText("http://mac.example.ts.net:6680/remote")).toBeInTheDocument();
     setTeamIdentityFetchForTests(null);
   });
 

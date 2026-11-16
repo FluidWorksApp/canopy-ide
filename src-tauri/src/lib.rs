@@ -43,6 +43,7 @@ mod canopy_link;
 #[cfg(not(feature = "dictation"))]
 #[path = "dictation_stub.rs"]
 mod dictation;
+mod freeze_sample;
 mod fsx;
 mod gates;
 mod gates_commands;
@@ -427,6 +428,7 @@ const REQUEST_STAGES: &[&str] = &[
     "requests-stage:reply-s1-none",
     "requests-stage:reply-s2-failed",
     "requests-stage:reply-s2-none",
+    "requests-stage:reply-s2-unmatched",
     "requests-stage:reply-marked",
 ];
 

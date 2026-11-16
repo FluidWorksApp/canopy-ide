@@ -7163,18 +7163,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!visible) return;
     const onFile = (event: Event) => {
-      const { path, line, cwd } =
-        (event as CustomEvent<OpenFileDetail>).detail ?? {};
-      if (!path) return;
+      const detail = (event as CustomEvent<OpenFileDetail & { projectId?: string }>).detail;
+      // App's own open (OS, command line) shares this event name; it has its own handler.
+      if (!detail?.path || detail.projectId) return;
+      const { path, line, cwd } = detail;
       event.preventDefault();
       const inside = digestRootsRef.current.some(
         (root) => path === root || path.startsWith(`${root}/`),
       );
+      // A staging failure (cwd outside the project) still opens the file itself.
       const ready =
         !inside && cwd && !isRemoteHost()
           ? ipc
               .spotStageDropImages(cwd, [path])
-              .then(([staged]) => staged ?? path)
+              .then(([staged]) => staged ?? path, () => path)
           : Promise.resolve(path);
       void ready.then(async (target) => {
         await openFileRef.current(target);
@@ -8353,7 +8355,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       let blocked: OpenBlock | null = null;
       let bytes: Uint8Array | null = null;
       try {
-        const stat = await ipc.fsStat(path);
+        const stat = await ipc.fsStat(path).catch(async (err) => {
+          // Outside every project folder: every open path asks for that one
+          // file here, so no click site can forget to. Native code decides.
+          if (!String(err).includes("outside")) throw err;
+          await ipc.fsGrantLinkFile(path);
+          return ipc.fsStat(path);
+        });
         blocked = opts?.force ? null : blockForOpen(path, kind, stat.size);
         if (!blocked) {
           bytes = await ipc.fsReadFile(
@@ -8378,11 +8386,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // Say which of the two it was, because they need different things of
         // the user.
         console.warn("open failed", path, err);
+        // The grant's own refusal (setting off, credentials) says why; pass it on.
+        const why = String(err).replace(/^Error:\s*/, "");
+        const refusal = /Settings → Privacy|credentials|private data/.test(why);
         onNotice(
           `Can't open ${basename(path)} — ${
-            String(err).includes("outside")
-              ? "it's outside this project's folders."
-              : "it may have been moved or deleted."
+            refusal ? why : "it may have been moved or deleted."
           }`,
           "error",
         );

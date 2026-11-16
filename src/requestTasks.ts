@@ -213,15 +213,16 @@ export async function handleReply(sessionId: string, reply: string): Promise<voi
     prompt:
       "A coding agent just wrote the reply below. For each candidate task, say whether the reply shows it is " +
       "actually finished (done and working, not merely started, planned or partly done).\n\n" +
-      `Candidates:\n${candidates.map((i) => `${i}. ${open[i].title}`).join("\n")}\n\nReply:\n${state}\n\n` +
+      `Candidates:\n${candidates.map((i, k) => `${k + 1}. ${open[i].title}`).join("\n")}\n\nReply:\n${state}\n\n` +
       'Reply as JSON: {"done": [numbers of the candidates that are finished]}.',
     json: true,
     validate: validateDone,
     timeoutMs: 60_000,
   });
   if (!ask.ok || !ask.value) return deps.trace("reply-s2-failed");
-  const ids = ask.value.done.filter((i) => candidates.includes(i)).map((i) => open[i].id);
-  if (!ids.length) return deps.trace("reply-s2-none");
+  // Candidates are numbered from 1 in the prompt.
+  const ids = ask.value.done.filter((k) => k >= 1 && k <= candidates.length).map((k) => open[candidates[k - 1]].id);
+  if (!ids.length) return deps.trace(ask.value.done.length ? "reply-s2-unmatched" : "reply-s2-none");
   markDone(sessionId, ids);
   deps.trace("reply-marked");
 }

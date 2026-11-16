@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import '@xterm/xterm/css/xterm.css'
 import { createTerminal, preferredTerminalEngine } from './terminalEngine'
+import { defaultFitMode, terminalFontPx, type FitMode } from './terminalFit'
 import type { Transport } from './transport'
 
 // A live view of one agent's PTY, over any Transport. Attaches on mount (the
@@ -10,12 +11,10 @@ import type { Transport } from './transport'
 // the shell's composer and control-key row are the substitute for one on touch
 // devices, and both paths write to the same PTY.
 //
-// Sizing is authoritative to the PTY, not the device: we render at the PTY's
-// exact cols/rows and scale the font so those columns fit the viewport width, so
-// a desktop-width TUI (e.g. Claude Code) renders faithfully instead of wrapping.
-// A full-screen TUI paints with absolute cursor positioning tied to the PTY's
-// width, so a narrower local grid does NOT soft-wrap — it shreds the layout.
-// The PTY is shared with the desktop shell and must not be resized to the phone.
+// We render at the PTY's exact cols/rows: a TUI paints with absolute cursor
+// moves tied to that grid, so a narrower local grid shreds the layout, and the
+// PTY is the desktop's and is never resized from here. "Fit width" shrinks the
+// text so every column shows; "Readable" keeps it legible and pans sideways.
 export function AgentTerminal({
   transport,
   pty,
@@ -44,6 +43,13 @@ export function AgentTerminal({
   // null. Input is queued or refused by the transport, never silently lost, and
   // this is where the person typing finds out.
   const [notice, setNotice] = useState<string | null>(null)
+  // The person's choice on this device, or null for the default per grid.
+  const [chosen, setChosen] = useState<FitMode | null>(readFitChoice)
+  const chosenRef = useRef(chosen)
+  chosenRef.current = chosen
+  const [mode, setMode] = useState<FitMode>('readable')
+  const [moreRight, setMoreRight] = useState(false)
+  const rescaleRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     // Our Ghostty engine, as in the desktop tabs; xterm when it cannot run
@@ -77,11 +83,9 @@ export function AgentTerminal({
       if (!box) return
       const avail = box.clientWidth - 8
       if (avail <= 0) return
-      // Scale the font so the PTY's columns fit the viewport width — but never
-      // below a legible floor. A wide desktop grid used to shrink to an
-      // unreadable 5px to fit; now it holds a readable size and the terminal
-      // scrolls horizontally instead (see .term overflow-x in styles.css).
-      const px = Math.max(9, Math.min(16, Math.floor(avail / grid.cols / 0.6)))
+      const next = chosenRef.current ?? defaultFitMode(avail, grid.cols)
+      setMode(next)
+      const px = terminalFontPx(avail, grid.cols, next)
       if (term.options.fontSize !== px) term.options.fontSize = px
       try {
         term.resize(grid.cols, grid.rows)
@@ -93,9 +97,21 @@ export function AgentTerminal({
       // steals half the screen. Keep the box scrolled to the newest rows: the
       // prompt is what you need in view while typing, not the first screenful.
       requestAnimationFrame(() => {
-        if (box.isConnected) box.scrollTop = box.scrollHeight
+        if (!box.isConnected) return
+        // A grid shorter than the pane sits at the bottom, by the keys.
+        const gridH = Math.max(0, ...[...box.querySelectorAll('.xterm-screen, .xterm-screen > canvas')].map((e) => e.getBoundingClientRect().height))
+        box.style.paddingTop = `${Math.max(PAD, box.clientHeight - PAD - gridH)}px`
+        box.scrollTop = box.scrollHeight
+        if (next === 'fit') box.scrollLeft = 0
+        updateMore()
       })
     }
+    const updateMore = () => {
+      const box = ref.current
+      if (box) setMoreRight(box.scrollLeft + box.clientWidth < box.scrollWidth - 4)
+    }
+    rescaleRef.current = rescale
+    ref.current?.addEventListener('scroll', updateMore, { passive: true })
 
     const detach = transport.attachPty(pty, {
       onReset: () => term.reset(),
@@ -110,7 +126,8 @@ export function AgentTerminal({
     const onData = term.onData((d) => transport.writePty(pty, d))
 
     const ro = new ResizeObserver(() => rescale())
-    if (ref.current) ro.observe(ref.current)
+    const box0 = ref.current
+    if (box0) ro.observe(box0)
 
     return () => {
       ta?.removeEventListener('focus', onFocusIn)
@@ -120,9 +137,19 @@ export function AgentTerminal({
       detach()
       onData.dispose()
       ro.disconnect()
+      box0?.removeEventListener('scroll', updateMore)
+      rescaleRef.current = () => {}
       term.dispose()
     }
   }, [transport, pty])
+
+  useEffect(() => rescaleRef.current(), [chosen])
+
+  const toggle = () => {
+    const next: FitMode = mode === 'fit' ? 'readable' : 'fit'
+    writeFitChoice(next)
+    setChosen(next)
+  }
 
   return (
     <div className="term-host">
@@ -131,7 +158,44 @@ export function AgentTerminal({
           {notice}
         </div>
       )}
-      <div className={focused ? 'term term-focused' : 'term'} ref={ref} />
+      <div className="term-frame">
+        <div className={focused ? 'term term-focused' : 'term'} ref={ref} />
+        <button
+          type="button"
+          className="term-fit"
+          onClick={toggle}
+          aria-pressed={mode === 'fit'}
+          title={mode === 'fit' ? 'Show text at a readable size' : 'Fit every column on screen'}
+        >
+          {mode === 'fit' ? 'Readable' : 'Fit width'}
+        </button>
+        {moreRight && mode === 'readable' && (
+          <div className="term-more" aria-hidden="true">
+            more →
+          </div>
+        )}
+      </div>
     </div>
   )
+}
+
+/** .term's padding in styles.css. */
+const PAD = 10
+const FIT_KEY = 'canopy-remote-term-fit'
+
+function readFitChoice(): FitMode | null {
+  try {
+    const v = localStorage.getItem(FIT_KEY)
+    return v === 'fit' || v === 'readable' ? v : null
+  } catch {
+    return null
+  }
+}
+
+function writeFitChoice(mode: FitMode) {
+  try {
+    localStorage.setItem(FIT_KEY, mode)
+  } catch {
+    /* private window: the choice lasts this visit */
+  }
 }

@@ -3056,8 +3056,8 @@ function PhoneOverTailscale({ status }: { status: ipc.RemoteStatus }) {
   }, []);
 
   const me = view?.kind === "running" ? view.thisMachine : null;
-  // MagicDNS name (survives address changes), else the tailnet address.
-  const host = me ? me.dnsName.replace(/\.$/, "") || me.ip : null;
+  // The tailnet address: phone browsers try https first for a name, and this port is http.
+  const host = me ? me.ip || me.dnsName.replace(/\.$/, "") : null;
   const url = host ? `http://${host}:${status.port}/remote` : null;
 
   useEffect(() => {
