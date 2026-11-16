@@ -29,9 +29,11 @@ export async function initHost({ home = os.homedir(), projects = path.join(home,
   await mkdir(paths.dir, { recursive: true, mode: 0o700 });
   try { await access(paths.config); return { ...paths, created: false }; } catch {}
   const token = randomBytes(32).toString('base64url');
+  // Unique per machine: the app keys saved machines by address + workspace id, and every tunnel is 127.0.0.1:8787.
+  const id = `work-${randomBytes(4).toString('hex')}`;
   const config = {
-    workspaces: [{ id: 'work', name: path.basename(projects) || 'work', root: projects, memoryMiB: 512, cpus: 1, accounts: [] }],
-    principals: [{ id: 'owner', tokenSha256: digest(token), scope: 'drive', workspaces: ['work'] }],
+    workspaces: [{ id, name: path.basename(projects) || 'work', root: projects, memoryMiB: 512, cpus: 1, accounts: [] }],
+    principals: [{ id: 'owner', tokenSha256: digest(token), scope: 'drive', workspaces: [id] }],
   };
   validateConfig(config);
   await writeFile(paths.token, token + '\n', { mode: 0o600, flag: 'wx' });
