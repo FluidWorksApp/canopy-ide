@@ -1,7 +1,8 @@
+import {insideRemoteRoot} from './remoteRoot';
 type Invoke = <T>(command:string,args:Record<string,unknown>)=>Promise<T>;
 
 export async function saveRemoteContextImage(invoke:Invoke,dir:unknown,png:unknown):Promise<string>{
- if(typeof dir!=='string'||(dir!=='/workspace'&&!dir.startsWith('/workspace/'))||dir.split('/').includes('..')||dir.includes('\0'))throw Error('Choose a directory in the remote workspace');
+ if(typeof dir!=='string'||!insideRemoteRoot(dir)||dir.split('/').includes('..')||dir.includes('\0'))throw Error('Choose a directory in the remote workspace');
  if(typeof png!=='string'||png.length>24*1024*1024||png.length%4!==0||!/^[A-Za-z0-9+/]+={0,2}$/.test(png))throw Error('Invalid screenshot PNG');
  const raw=atob(png);
  if(btoa(raw)!==png||!raw.startsWith('\x89PNG\r\n\x1a\n'))throw Error('Invalid screenshot PNG');

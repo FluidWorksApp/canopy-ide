@@ -1,6 +1,20 @@
 # A lightweight Canopy host for any machine
 
-Status: step 0 is built (Canopy as a T3 Code client: `src/t3connect/`, `src-tauri/src/t3_client.rs`); steps 1 to 4 are proposals.
+Status: `canopy-host up` is built (`packages/remote-host/canopy-host.mjs`). The T3 client is removed from the app (the `src/t3connect/` client, `t3_client.rs`, `t3_socket.rs` and the `t3` placement target), so a canopy-host link is the only way to add your own machine. The sections below the "What is built" list are history.
+
+## What is built
+
+- `canopy-host up` runs as the current user, with no root, Docker or image. It runs `runner.mjs` as a plain process (`process-workspaces.mjs`), with one owner and one workspace in `~/work`.
+- It prints one link, `http://<host>:8787/connect#token=…`. The token stays in the fragment.
+  - On a tailnet the host is the machine's MagicDNS name (`box.<tailnet>.ts.net`), and the gateway also listens on the tailnet IP. It only reads `tailscale ip` and `tailscale status`; it never runs `tailscale up` or `serve`.
+  - Without Tailscale the link uses `127.0.0.1` with an `ssh -L` forward.
+- The app's "Add a workspace" dialog has two tabs, Canopy cloud and Your own machine. Your own machine shows the command to run and one link field. A machine with one workspace opens directly, named after the machine.
+- The app accepts plain http to `*.ts.net` (the CSP, `remoteEndpoint()` and `execution_remote_set`), since Tailscale encrypts that traffic.
+- `/open` reports the workspace folder, and the app uses it instead of assuming `/workspace`.
+- Not yet: the Canopy service (agent tools) needs root to install, so process hosts run without it.
+- It is published to npm as `canopy-host` (built by `packages/remote-host/pack-canopy-host.mjs`; `node-pty` is the prebuilt `@lydell/node-pty`, so installing needs no compiler). When run through `npx`, `up` installs the same version in `~/.canopy-host/app` and the service runs from there.
+
+The sections below are the original proposal.
 
 The goal: one small `canopy-host` program that runs on any Linux VM (or a Mac or
 Linux box) and can be reached from the Canopy app in whichever way suits the

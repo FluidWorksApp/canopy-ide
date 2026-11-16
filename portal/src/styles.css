@@ -241,6 +241,43 @@ select {
   gap: 6px;
   min-width: 0;
 }
+/* The grid keeps the desktop's size: a short one sits at the bottom, by the
+ * keys and composer, and a wide one says there is more to the right. */
+.term-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.term-fit {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 13px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  color: var(--text-dim, var(--text));
+  font-size: 12px;
+  backdrop-filter: blur(6px);
+}
+.term-more {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  width: 64px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 0 8px 10px 0;
+  border-radius: 0 12px 12px 0;
+  background: linear-gradient(to right, transparent, var(--bg-alt) 75%);
+  color: var(--text-dim, var(--text));
+  font-size: 11px;
+  pointer-events: none;
+}
 /* Input that is waiting on the connection, or was refused, says so here
  * instead of vanishing. */
 .term-notice {

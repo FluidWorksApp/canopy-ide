@@ -26,6 +26,7 @@
 //     "accept as proposed", so it is never sent for one.
 //   - Port and token live as long as the PTY: the CLI reconnects only with the
 //     token it cached.
+import {AGENT_HOME,WORKSPACE_ROOT} from './paths.mjs';
 import http from 'node:http';
 import path from 'node:path';
 import {randomBytes, timingSafeEqual} from 'node:crypto';
@@ -425,7 +426,7 @@ export async function writeLock(dir, port, lock) {
 export function lockDir(configDir, home) {
   const allowed = typeof configDir === 'string' && path.isAbsolute(configDir) && !configDir.includes('\0') &&
     !configDir.split('/').some(segment => segment === '..' || segment === '.') &&
-    ['/home/agent/', '/workspace/'].some(prefix => configDir.startsWith(prefix));
+    [AGENT_HOME+'/', WORKSPACE_ROOT+'/'].some(prefix => configDir.startsWith(prefix));
   return path.join(allowed ? configDir : path.join(home, '.claude'), 'ide');
 }
 

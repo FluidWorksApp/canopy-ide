@@ -1,3 +1,4 @@
+import {WORKSPACE_ROOT,AGENT_HOME} from './paths.mjs';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { readFile, stat } from 'node:fs/promises';
@@ -17,8 +18,8 @@ export async function analyze(args, scopedPath) {
   active++;
   try {
     return await new Promise((resolve, reject) => {
-      const child = spawn('typescript-language-server', ['--stdio'], { cwd: '/workspace', stdio: ['pipe', 'pipe', 'ignore'],
-        env: { PATH: process.env.PATH, HOME: '/home/agent', LANG: 'C.UTF-8' } });
+      const child = spawn('typescript-language-server', ['--stdio'], { cwd: WORKSPACE_ROOT, stdio: ['pipe', 'pipe', 'ignore'],
+        env: { PATH: process.env.PATH, HOME: AGENT_HOME, LANG: 'C.UTF-8' } });
       let buffer = Buffer.alloc(0), done = false, id = 0, opened = false;
       const uri = pathToFileURL(file).href;
       const pending = new Map();

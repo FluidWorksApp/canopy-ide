@@ -8,6 +8,8 @@ export const INPUT_BACKLOG_CHARS = 16384;
  * prompt that was not on screen when they were typed, so older input is
  * discarded — and the view is told so. */
 export const INPUT_BACKLOG_MS = 30_000;
+/** While the socket is up a refusal is backpressure, so a big paste may queue this much. */
+export const INPUT_BACKPRESSURE_CHARS = 8 * 1024 * 1024;
 /** How soon input the socket refused for backpressure is retried. */
 const RETRY_MS = 250;
 
@@ -16,7 +18,25 @@ const OVERFLOW = "Couldn't send input — reconnecting. Type it again once conne
 const EXPIRED = "Input typed while disconnected was not sent. Type it again.";
 const PARTIAL = "Some input typed while disconnected was not sent. Check the prompt before continuing.";
 
-type Backlog = { chunks: string[]; chars: number; since: number; dropped: boolean };
+/** Characters per input message; JSON-escaped it stays well under the host's 1 MiB cap. */
+export const INPUT_PIECE_CHARS = 64 * 1024;
+
+/** `data` in pieces of at most INPUT_PIECE_CHARS, never splitting a surrogate pair. */
+export function inputPieces(data: string): string[] {
+  if (data.length <= INPUT_PIECE_CHARS) return [data];
+  const pieces: string[] = [];
+  let at = 0;
+  while (at < data.length) {
+    let end = Math.min(at + INPUT_PIECE_CHARS, data.length);
+    const last = data.charCodeAt(end - 1);
+    if (end < data.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    pieces.push(data.slice(at, end));
+    at = end;
+  }
+  return pieces;
+}
+
+type Backlog = { chunks: string[]; chars: number; since: number; dropped: boolean; sent: boolean };
 
 /** One subscription per host PTY, shared by all views in this client. A socket
  * reconnect reattaches to the existing process and receives a fresh snapshot;
@@ -41,12 +61,15 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     if (!backlog) return true;
     if (Date.now() - backlog.since > INPUT_BACKLOG_MS) {
       backlogs.delete(pty);
-      notify(pty, EXPIRED);
+      notify(pty, backlog.sent ? PARTIAL : EXPIRED);
       return true;
     }
     while (backlog.chunks.length) {
       if (!wire.send({ t: "input", pty, data: backlog.chunks[0] })) return false;
       backlog.chars -= backlog.chunks.shift()!.length;
+      // Age counts from the last piece sent, so a slow paste that keeps moving never expires.
+      backlog.since = Date.now();
+      backlog.sent = true;
     }
     backlogs.delete(pty);
     notify(pty, backlog.dropped ? PARTIAL : null);
@@ -70,10 +93,11 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     }, RETRY_MS);
   };
 
-  const enqueue = (pty: number, data: string) => {
+  const enqueue = (pty: number, data: string, sentPart: boolean) => {
     let backlog = backlogs.get(pty);
-    if (!backlog) backlogs.set(pty, backlog = { chunks: [], chars: 0, since: Date.now(), dropped: false });
-    if (backlog.chars + data.length > INPUT_BACKLOG_CHARS) {
+    if (!backlog) backlogs.set(pty, backlog = { chunks: [], chars: 0, since: Date.now(), dropped: false, sent: sentPart });
+    const cap = wire.connected ? INPUT_BACKPRESSURE_CHARS : INPUT_BACKLOG_CHARS;
+    if (backlog.chars + data.length > cap) {
       backlog.dropped = true;
       notify(pty, OVERFLOW);
       scheduleRetry();
@@ -81,7 +105,7 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     }
     backlog.chunks.push(data);
     backlog.chars += data.length;
-    notify(pty, WAITING);
+    if (!wire.connected) notify(pty, WAITING);
     scheduleRetry();
   };
 
@@ -131,8 +155,13 @@ export function socketTerminals(wire: Wire): Transport & { dispose(): void } {
     },
     writePty(pty, data) {
       if (disposed || !data) return;
-      // Behind a backlog, new input queues too: it must not overtake it.
-      if (backlogs.has(pty) || !wire.send({ t: "input", pty, data })) enqueue(pty, data);
+      // The host drops a socket on any message over 1 MiB, so a big paste goes in pieces.
+      let sentPart = false;
+      for (const piece of inputPieces(data)) {
+        // Behind a backlog, new input queues too: it must not overtake it.
+        if (backlogs.has(pty) || !wire.send({ t: "input", pty, data: piece })) enqueue(pty, piece, sentPart);
+        else sentPart = true;
+      }
     },
     killPty(pty) { if (!disposed) wire.send({ t: "kill", pty }); },
     dispose() {

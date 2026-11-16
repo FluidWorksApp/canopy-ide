@@ -1,9 +1,9 @@
 // One list for everything Canopy can see: local projects and agents, remote
-// workspaces' projects and agents, T3 Code projects and threads, and mesh
+// workspaces' projects and agents, and mesh
 // jobs sent to cloud workspaces. Pure: the caller gathers the inputs.
 import { targetKey, type Target } from "./types";
 
-export type UnifiedKind = "project" | "agent" | "thread" | "job" | "session";
+export type UnifiedKind = "project" | "agent" | "job" | "session";
 
 export interface UnifiedRow {
   id: string;
@@ -50,7 +50,6 @@ export interface UnifiedInput {
      *  host. Agents and shells together: the list cannot tell them apart. */
     sessions?: { id: string; title: string }[];
   }[];
-  t3: { machineId: string; label: string; projects: { id: string; title: string }[]; threads: Item[] }[];
   jobs: { jobId: string; title: string; workspace: string; target: string; workspaceId?: string }[];
 }
 
@@ -83,15 +82,6 @@ export function buildUnifiedRows(input: UnifiedInput): UnifiedRow[] {
       push({ id: `${targetKey(target)}:session:${x.id}`, name: x.title, kind: "session", target, targetLabel: w.name, status: "running" });
     for (const a of w.agents ?? [])
       push({ id: `${targetKey(target)}:agent:${a.id}`, name: a.project ?? a.name, kind: "agent", target, targetLabel: w.name, status: a.status ?? "running", branch: a.branch });
-  }
-
-  for (const m of input.t3) {
-    const target: Target = { kind: "t3", machineId: m.machineId };
-    for (const p of m.projects)
-      push({ id: `${targetKey(target)}:project:${p.id}`, projectId: p.id, name: p.title, kind: "project", target, targetLabel: m.label, status: "ready" });
-    const byId = new Map(m.projects.map((p) => [p.id, p.title]));
-    for (const t of m.threads)
-      push({ id: `${targetKey(target)}:thread:${t.id}`, name: (t.project && byId.get(t.project)) ?? t.project ?? "T3 Code", kind: "thread", target, targetLabel: m.label, status: t.status ?? "idle", branch: t.branch });
   }
 
   for (const j of input.jobs) {

@@ -1,3 +1,4 @@
+import {RUNNER_URL} from './paths.mjs';
 import {accountHomes} from './account-homes.mjs';
 import {readFile,writeFile,appendFile,rename,mkdir,readdir,stat,lstat,rm,open,readlink,truncate} from 'node:fs/promises';
 import path from 'node:path';
@@ -19,7 +20,7 @@ export const SPOT_INDEX_READ_ONLY=['spot_search','spot_index_stats'];
 
 export const STORE_AGENTS=['claude','codex','omp','gemini','agy','opencode','aider'];
 const INGEST_BUDGET=4*1024*1024, MAX_SCROLLBACK=256*1024, MAX_WHOLE_BODIES=4000, MAX_BODY=4000, MAX_BRIEF=16*1024*1024;
-const RUNNER='http://127.0.0.1:8080';
+const RUNNER=RUNNER_URL;
 
 // ---------- text helpers (stores.rs / spot.rs) ----------
 const takeChars=(s,n)=>{if(s.length<=n)return s;let out='',i=0;for(const c of s){if(i++>=n)break;out+=c;}return out;};

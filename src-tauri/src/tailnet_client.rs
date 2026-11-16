@@ -693,16 +693,29 @@ impl Drop for FinishOnDrop {
     }
 }
 
+/// An attachment shorter than this counts as a quick drop.
+const STABLE_ATTACH: Duration = Duration::from_secs(10);
+
+/// The wait before re-attaching after `quick` drops in a row: the first is
+/// immediate, then the link backoff applies, so a host that keeps detaching
+/// is not sent a full snapshot back to back.
+fn quick_drop_wait(quick: u32, backoff: &[Duration]) -> Option<Duration> {
+    let n = quick.checked_sub(2)? as usize;
+    backoff.get(n.min(backoff.len().saturating_sub(1))).copied()
+}
+
 /// Carries one attached connection after another into the session's output.
 fn pump(link: Arc<Link>, first: AttachedStream, tx: mpsc::SyncSender<Vec<u8>>) {
     let _finish = FinishOnDrop(link.clone());
     let mut stream = first;
     let mut reattached = false;
+    let mut quick: u32 = 0;
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let AttachedStream {
             mut reader, writer, ..
         } = stream;
+        let attached_at = Instant::now();
         link.install(writer);
         if reattached {
             // The snapshot that follows replaces the screen, it is not added
@@ -729,6 +742,19 @@ fn pump(link: Arc<Link>, first: AttachedStream, tx: mpsc::SyncSender<Vec<u8>>) {
         link.clear_writer();
         if link.is_finished() {
             return;
+        }
+        quick = if attached_at.elapsed() < STABLE_ATTACH {
+            quick + 1
+        } else {
+            0
+        };
+        if let Some(wait) = quick_drop_wait(quick, &link.timing.backoff) {
+            // Say so while waiting; the tab must not read Connected with no writer.
+            link.set_phase(Phase::Reconnecting);
+            link.emit(State::Reconnecting, Some(1), None);
+            if link.sleep(wait) {
+                return;
+            }
         }
         match link.recover() {
             Recovery::Attached(next) => {
@@ -1440,6 +1466,21 @@ mod tests {
     }
 
     /// The real dialler, with the route cut on demand and attempts counted.
+    #[test]
+    fn quick_drops_back_off_after_the_first() {
+        let backoff = [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        ];
+        assert_eq!(quick_drop_wait(0, &backoff), None);
+        assert_eq!(quick_drop_wait(1, &backoff), None);
+        assert_eq!(quick_drop_wait(2, &backoff), Some(Duration::from_secs(1)));
+        assert_eq!(quick_drop_wait(3, &backoff), Some(Duration::from_secs(2)));
+        assert_eq!(quick_drop_wait(40, &backoff), Some(Duration::from_secs(4)));
+        assert_eq!(quick_drop_wait(5, &[]), None);
+    }
+
     struct Route {
         inner: TailnetDial,
         down: AtomicBool,

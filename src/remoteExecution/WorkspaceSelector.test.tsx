@@ -1,9 +1,7 @@
 import {isAllWorkspaces,setAllWorkspaces,resetAllWorkspacesForTest} from './allMode';
-import {act,fireEvent,render,screen} from '@testing-library/react';import {beforeEach,it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
-import {OPEN_T3_MACHINE_EVENT} from '../placement/transitions';
-const mocks=vi.hoisted(()=>({workspace:vi.fn(),openLink:vi.fn(),listMachines:vi.fn()}));
-vi.mock('./workspace',()=>({activeWorkspace:()=>({connection:{workspaceId:'test',workspaceName:'Test',endpoint:'http://127.0.0.1:8787'},client:{workspace:mocks.workspace}})}));vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>[])}));vi.mock('../links',()=>({openLink:mocks.openLink}));vi.mock('../t3connect/api',()=>({listT3Machines:mocks.listMachines}));vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=> <div>Remote desktop surface</div>}));vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));vi.mock('../components/UnifiedWorkspace',()=>({UnifiedWorkspace:()=> <div className="unified-workspace">Machine dashboard</div>}));
-beforeEach(()=>{mocks.listMachines.mockReset();mocks.listMachines.mockResolvedValue([]);});
+import {act,fireEvent,render,screen} from '@testing-library/react';import {it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
+const mocks=vi.hoisted(()=>({workspace:vi.fn(),openLink:vi.fn()}));
+vi.mock('./workspace',()=>({activeWorkspace:()=>({connection:{workspaceId:'test',workspaceName:'Test',endpoint:'http://127.0.0.1:8787'},client:{workspace:mocks.workspace}})}));vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>[])}));vi.mock('../links',()=>({openLink:mocks.openLink}));vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=> <div>Remote desktop surface</div>}));vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));vi.mock('../components/UnifiedWorkspace',()=>({UnifiedWorkspace:()=> <div className="unified-workspace">Machine dashboard</div>}));
 it('offers a visible desktop control',async()=>{mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Open remote desktop'}));expect(screen.getByText('Remote desktop surface')).toBeInTheDocument();});
 it('retains pending browser requests without polling header metrics',async()=>{
  vi.useFakeTimers();let requests=0;mocks.workspace.mockImplementation(async(_id:string,_route:string,args:{command:string})=>{if(args.command==='workspace_metrics')throw Error('unavailable');requests++;return {result:`https://github.com/login/device?request=${requests}`};});
@@ -22,10 +20,12 @@ it('separates new workspace setup and scopes controls to the selected workspace 
  fireEvent.click(screen.getByRole('tab',{name:'Local workspace'}));
  expect(screen.queryByRole('button',{name:'Copy accounts'})).toBeNull();
  expect(screen.getByRole('button',{name:'Use this workspace'})).toBeInTheDocument();
- fireEvent.click(screen.getByRole('button',{name:'＋ New workspace'}));
- expect(screen.getByText('Cloud workspaces')).toBeInTheDocument();
- expect(screen.getByText('Create a cloud workspace')).toBeInTheDocument();expect(screen.getByText(/Connect to T3 Connect protocol supported machine/)).toBeInTheDocument();
- expect(screen.getByLabelText('Access token')).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'＋ Add a workspace'}));
+ expect(screen.getByRole('dialog',{name:'Add a workspace'})).toBeInTheDocument();
+ expect(screen.getByRole('radio',{name:'Canopy cloud'})).toHaveAttribute('aria-checked','true');
+ expect(screen.getByLabelText('Name')).toBeInTheDocument();expect(screen.queryByText(/T3/)).toBeNull();
+ fireEvent.click(screen.getByRole('radio',{name:'Your own machine'}));
+ expect(screen.getByText('npx canopy-host up')).toBeInTheDocument();expect(screen.getByLabelText('Paste the link it prints')).toBeInTheDocument();
  expect(screen.queryByRole('tablist',{name:'Workspaces'})).toBeNull();
 });
 it('selects All workspaces like any workspace: no dialog, header says so, check mark',async()=>{
@@ -39,11 +39,6 @@ it('selects All workspaces like any workspace: no dialog, header says so, check 
  fireEvent.click(screen.getByRole('button',{name:/All workspaces/}));
  expect(screen.getByRole('menuitemradio',{name:/^All workspaces/})).toHaveAttribute('aria-checked','true');
  setAllWorkspaces(false);
-});
-it('reports a named T3 target that disappears during transition',async()=>{
- mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});
- window.dispatchEvent(new CustomEvent(OPEN_T3_MACHINE_EVENT,{detail:{machineId:'m1',machineName:'Build Mini'}}));
- expect(await screen.findByText('Could not open Build Mini: this machine is no longer connected.')).toBeInTheDocument();
 });
 it('offers workspace hibernation with a confirmation and runs the project snapshot workflow',async()=>{
  mocks.workspace.mockResolvedValue({result:null});const hibernate=vi.fn().mockResolvedValue(undefined);

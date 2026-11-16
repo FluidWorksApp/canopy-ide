@@ -83,7 +83,7 @@ export function ComponentPicker({
         ...(machine.mode === "target" && !machineTargets.some((item) => targetKey(item.target) === targetKey(machine.target))
           ? [{
               key: targetKey(machine.target),
-              label: `Unavailable machine (${machine.target.kind === "remote" ? machine.target.workspaceId : machine.target.kind === "t3" ? machine.target.machineId : "This Mac"})`,
+              label: `Unavailable machine (${machine.target.kind === "remote" ? machine.target.workspaceId : "This Mac"})`,
               preference: targetPreference(machine.target),
             }]
           : []),
