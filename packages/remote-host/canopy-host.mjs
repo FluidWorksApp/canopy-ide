@@ -8,6 +8,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -171,7 +172,13 @@ async function serve() {
   server.listen(port, '127.0.0.1', () => { console.log('Canopy host listening on loopback'); stopTailnet = tailnetForwarder(port); });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** True when this file is the program being run, also through npx's node_modules/.bin symlink. */
+export function isMain(argv1 = process.argv[1], self = fileURLToPath(import.meta.url)) {
+  if (!argv1) return false;
+  try { return realpathSync(argv1) === realpathSync(self); } catch { return path.resolve(argv1) === self; }
+}
+
+if (isMain()) {
   const [command = 'up', ...argv] = process.argv.slice(2);
   if (command === 'up') await up(argv);
   else if (command === 'serve') await serve();

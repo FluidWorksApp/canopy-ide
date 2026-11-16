@@ -2,7 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { manifest, packageFiles } from './pack-canopy-host.mjs';
-import { installPlan } from './canopy-host.mjs';
+import { mkdtemp, symlink } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { installPlan, isMain } from './canopy-host.mjs';
+
+test('the CLI runs when started through the npx bin symlink', async () => {
+  const self = fileURLToPath(new URL('./canopy-host.mjs', import.meta.url));
+  const link = path.join(await mkdtemp(path.join(os.tmpdir(), 'bin-')), 'canopy-host');
+  await symlink(self, link);
+  assert.equal(isMain(link, self), true);
+  assert.equal(isMain(self, self), true);
+  assert.equal(isMain(fileURLToPath(new URL('./gateway.mjs', import.meta.url)), self), false);
+  assert.equal(isMain(undefined, self), false);
+});
 
 test('the package holds every module the host loads, and no tests', async () => {
   const files = await packageFiles();
