@@ -56,6 +56,13 @@ WantedBy=default.target
 `;
 }
 
+/** Where the service runs from. An npx copy sits in a cache npm may clear, so `up` installs the same version under ~/.canopy-host/app. */
+export function installPlan({ codeDir = CODE_DIR, home = os.homedir(), name, version } = {}) {
+  const prefix = path.join(hostPaths(home).dir, 'app');
+  if (name !== 'canopy-host' || !version || !/[\\/]_npx[\\/]/.test(codeDir)) return { install: null, script: path.join(codeDir, 'canopy-host.mjs') };
+  return { install: `canopy-host@${version}`, prefix, script: path.join(prefix, 'node_modules', 'canopy-host', 'canopy-host.mjs') };
+}
+
 export async function listening(port, { host = '127.0.0.1', timeoutMs = 15000 } = {}) {
   for (const deadline = Date.now() + timeoutMs; Date.now() < deadline; await new Promise(r => setTimeout(r, 300))) {
     const ok = await new Promise(resolve => { const s = net.connect(port, host); s.once('connect', () => { s.destroy(); resolve(true); }); s.once('error', () => resolve(false)); });
@@ -99,7 +106,7 @@ function printLink(token) {
   const name = tailnetAddress() && tailnetName();
   if (name) console.log(`\nPaste this into Canopy (Add a workspace › Your own machine), from any device on your tailnet:\n\n  ${connectLink(name, token)}\n`);
   else console.log(`\nNo Tailscale here, so connect over SSH. On your computer run:\n  ssh -N -L ${DEFAULT_PORT}:127.0.0.1:${DEFAULT_PORT} ${os.userInfo().username}@<this machine>\n\nthen paste this into Canopy (Add a workspace › Your own machine):\n\n  ${connectLink('127.0.0.1', token)}\n`);
-  console.log(`Show it again: ${process.execPath} ${path.join(CODE_DIR, 'canopy-host.mjs')} link`);
+  console.log('Show it again: npx canopy-host link');
 }
 
 async function up(argv) {
@@ -114,7 +121,15 @@ async function up(argv) {
   console.log(`\nProjects folder: ${root}${setup.created ? '' : ' (existing setup kept)'}`);
   const unitDir = path.join(os.homedir(), '.config/systemd/user');
   await mkdir(unitDir, { recursive: true });
-  await writeFile(path.join(unitDir, 'canopy-host.service'), serviceUnit());
+  let own = {};
+  try { own = JSON.parse(await readFile(path.join(CODE_DIR, 'package.json'), 'utf8')); } catch {}
+  const plan = installPlan({ name: own.name, version: own.version });
+  if (plan.install) {
+    console.log(`Installing ${plan.install} in ${plan.prefix}`);
+    try { execFileSync('npm', ['install', '--prefix', plan.prefix, '--no-audit', '--no-fund', '--omit=dev', plan.install], { stdio: 'inherit' }); }
+    catch { console.log('✗ Could not install canopy-host for the service. Check npm can reach the registry, then run up again.'); process.exit(1); }
+  }
+  await writeFile(path.join(unitDir, 'canopy-host.service'), serviceUnit({ script: plan.script }));
   run('systemctl', ['--user', 'daemon-reload']);
   run('systemctl', ['--user', 'enable', 'canopy-host']);
   run('systemctl', ['--user', 'restart', 'canopy-host']);

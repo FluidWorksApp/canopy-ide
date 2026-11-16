@@ -12,7 +12,7 @@ Status: `canopy-host up` is built (`packages/remote-host/canopy-host.mjs`). The 
 - The app accepts plain http to `*.ts.net` (the CSP, `remoteEndpoint()` and `execution_remote_set`), since Tailscale encrypts that traffic.
 - `/open` reports the workspace folder, and the app uses it instead of assuming `/workspace`.
 - Not yet: the Canopy service (agent tools) needs root to install, so process hosts run without it.
-- Not yet: `npx canopy-host up`, which the app shows, needs the package published to npm. `@canopy/remote-host` is private today, with no `bin`.
+- It is published to npm as `canopy-host` (built by `packages/remote-host/pack-canopy-host.mjs`; `node-pty` is the prebuilt `@lydell/node-pty`, so installing needs no compiler). When run through `npx`, `up` installs the same version in `~/.canopy-host/app` and the service runs from there.
 
 The sections below are the original proposal.
 

@@ -35,7 +35,7 @@ export const routeLabel = (endpoint: string) => `${hostOf(endpoint)} · ${routeN
 export function connectError(error: unknown, endpoint: string): string {
   const text = error instanceof Error ? error.message : String(error);
   if (/unauthori[sz]ed|forbidden|\b40[13]\b|invalid token|access token/i.test(text))
-    return "The machine didn't accept this link. Run `canopy-host link` there and paste the new one.";
+    return "The machine didn't accept this link. Run `npx canopy-host link` there and paste the new one.";
   if (/fetch|network|load failed|refused|timed? ?out|unreachable|ECONN|ENOTFOUND|abort/i.test(text)) {
     const host = hostOf(endpoint);
     return isTunnel(endpoint)
