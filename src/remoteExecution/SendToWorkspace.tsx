@@ -101,6 +101,8 @@ export function SendToWorkspace({
         workspaceName={open.workspaceName}
         components={components}
         remoteInvoke={open.invoke}
+        target={open.connection}
+        root={open.root}
       />
     );
   }

@@ -16,7 +16,7 @@ import { isHarnessCommand } from "./harnessCommands";
  *  host): the account, workspace switcher and sign-in plumbing of the desktop. */
 const DESKTOP_DIRECT = new Set([
   "execution_remote_account_candidates", "execution_remote_activate", "execution_remote_forget",
-  "execution_remote_import_accounts", "execution_remote_list", "execution_remote_login_prepare",
+  "execution_remote_import_accounts", "execution_remote_list", "execution_remote_login_prepare", "execution_remote_saved_connection",
   // "Set up from this Mac" reads this Mac's repositories; the workspace half goes through the host (mirror_apply_*).
   "execution_mirror_inspect", "execution_mirror_send",
   "canopy_account_cache_key",

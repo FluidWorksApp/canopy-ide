@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { guardedDesktop, openTemporaryWorkspace, type TemporaryDeps } from "./temporaryWorkspace";
+import { guardedDesktop, openSavedMachine, openTemporaryWorkspace, type SavedMachineDeps, type TemporaryDeps } from "./temporaryWorkspace";
 import type { Host } from "../host/contract";
 
 const connection = { endpoint: "https://w9.workspaces.canopyide.dev", token: "t", workspaceId: "w9", workspaceName: "Coraa Workstation" };
@@ -55,5 +55,30 @@ describe("openTemporaryWorkspace", () => {
     const { d } = deps({ connect: vi.fn(async () => { throw new Error("stopped"); }) });
     await expect(openTemporaryWorkspace("w9", d)).rejects.toThrow("stopped");
     expect(d.makeHost).not.toHaveBeenCalled();
+  });
+});
+
+describe("openSavedMachine", () => {
+  const box = { endpoint: "http://box.tail1234.ts.net:8787", token: "synthetic-token-0123456789abcdef", workspaceId: "work-0a1b2c3d", workspaceName: "box" };
+  const make = (over: Partial<SavedMachineDeps> = {}): SavedMachineDeps => ({
+    saved: vi.fn(async () => box),
+    open: vi.fn(async () => ({ root: "/home/me/work" })),
+    makeHost: vi.fn(() => ({ invoke: vi.fn(async () => "ok") as never, dispose: vi.fn() })),
+    ...over,
+  });
+
+  it("opens a saved machine with its own credential and folder, leaving the window where it is", async () => {
+    const d = make();
+    const ws = await openSavedMachine("http://box.tail1234.ts.net:8787/work-0a1b2c3d", d);
+    expect(d.saved).toHaveBeenCalledWith("http://box.tail1234.ts.net:8787/work-0a1b2c3d");
+    expect(d.open).toHaveBeenCalledWith(box);
+    expect(ws.root).toBe("/home/me/work");
+    expect(ws.connection?.()).toEqual(box);
+    expect(ws.workspaceName).toBe("box");
+  });
+
+  it("falls back to the default folder when the host reports none, and says when the machine is gone", async () => {
+    expect((await openSavedMachine("id", make({ open: vi.fn(async () => ({})) }))).root).toBe("/workspace");
+    await expect(openSavedMachine("id", make({ saved: vi.fn(async () => null) }))).rejects.toThrow("no longer saved");
   });
 });

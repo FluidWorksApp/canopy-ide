@@ -65,6 +65,9 @@ test('initHost writes a valid single-user setup once and never overwrites it', a
   const token = (await readFile(first.token, 'utf8')).trim();
   assert.equal(config.principals[0].tokenSha256, digest(token));
   assert.equal(config.workspaces[0].root, path.join(home, 'work'));
+  assert.match(config.workspaces[0].id, /^work-[0-9a-f]{8}$/);
+  assert.deepEqual(config.principals[0].workspaces, [config.workspaces[0].id]);
+  assert.notEqual(config.workspaces[0].id, validateConfig(JSON.parse(await readFile((await initHost({ home: await mkdtemp(path.join(os.tmpdir(), 'ch-')) })).config, 'utf8'))).workspaces[0].id);
   assert.equal((await stat(first.token)).mode & 0o777, 0o600);
   assert.equal((await initHost({ home })).created, false);
   assert.equal((await readFile(hostPaths(home).token, 'utf8')).trim(), token);
