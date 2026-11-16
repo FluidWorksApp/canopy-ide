@@ -14,6 +14,9 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { nativeHost } from "../host/native";
 import type { Host } from "../host/contract";
 import { NativeWorkspaceHost, type WorkspaceConnection } from "./NativeWorkspaceHost";
+import { RemoteExecutionClient } from "./client";
+import type { MirrorTarget } from "./mirror";
+import { normalizeRemoteRoot } from "./remoteRoot";
 
 export type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -26,6 +29,10 @@ export interface TemporaryWorkspace {
   host?: Host;
   /** Whether the credential is view-only. */
   readOnly: boolean;
+  /** The current credential, for the copy step's upload; read it when sending, since it is renewed in place. */
+  connection?: () => MirrorTarget;
+  /** Its workspace folder when the host reports one (canopy-host); else the default. */
+  root?: string;
   dispose: () => void;
 }
 
@@ -76,10 +83,37 @@ const defaultDeps: TemporaryDeps = {
 
 export async function openTemporaryWorkspace(workspaceId: string, deps: TemporaryDeps = defaultDeps): Promise<TemporaryWorkspace> {
   const connection = await deps.connect(workspaceId, deps.clientId(workspaceId));
-  const host = deps.makeHost(connection, guardedDesktop());
+  return wrap(connection, deps.makeHost(connection, guardedDesktop()));
+}
+
+export interface SavedMachineDeps {
+  saved: (id: string) => Promise<WorkspaceConnection | null>;
+  open: (connection: WorkspaceConnection) => Promise<{ root?: unknown }>;
+  makeHost: TemporaryDeps["makeHost"];
+}
+
+const savedDeps: SavedMachineDeps = {
+  saved: (id) => tauriInvoke<WorkspaceConnection | null>("execution_remote_saved_connection", { id }),
+  open: (c) => new RemoteExecutionClient(c.endpoint, c.token).workspace<{ root?: unknown }>(c.workspaceId, "/open", { resume: true }),
+  makeHost: defaultDeps.makeHost,
+};
+
+/** A machine saved from a canopy-host link, without switching the window to it. Its
+ *  credential comes from this Mac's store; /open starts its runner and reports its folder. */
+export async function openSavedMachine(savedId: string, deps: SavedMachineDeps = savedDeps): Promise<TemporaryWorkspace> {
+  const connection = await deps.saved(savedId);
+  if (!connection) throw new Error("This machine is no longer saved on this Mac.");
+  const opened = await deps.open(connection);
+  return wrap(connection, deps.makeHost(connection, guardedDesktop()), normalizeRemoteRoot(opened?.root));
+}
+
+function wrap(connection: WorkspaceConnection, host: ReturnType<TemporaryDeps["makeHost"]>, root?: string): TemporaryWorkspace {
+  const workspaceId = connection.workspaceId;
   let closed = false;
   return {
     workspaceId,
+    connection: () => ({ endpoint: connection.endpoint, token: connection.token, workspaceId, workspaceName: connection.workspaceName, ...(connection.scope ? { scope: connection.scope } : {}) }),
+    ...(root ? { root } : {}),
     workspaceName: connection.workspaceName || workspaceId,
     ...(typeof host.listen === "function" && typeof host.channel === "function" ? { host: host as unknown as Host } : {}),
     readOnly: host.readOnly === true,

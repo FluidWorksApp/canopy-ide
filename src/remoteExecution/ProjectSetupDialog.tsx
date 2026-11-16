@@ -3,7 +3,7 @@ import {invoke as tauriInvoke} from '@tauri-apps/api/core';
 import {invoke as hostInvoke} from '../host';
 import {mirrorCandidates,type MirrorCandidate,type MirrorCandidateCategory} from '../ipc';
 import {Button,Checkbox} from '../components/ui';
-import {ensureProjectOnRemote,type MirrorProgress} from './mirror';
+import {ensureProjectOnRemote,type MirrorProgress,type MirrorTarget} from './mirror';
 import {MirrorProgressView} from './MirrorSetup';
 
 const local=<T,>(command:string,args?:Record<string,unknown>)=>tauriInvoke<T>(command,args);
@@ -16,7 +16,7 @@ const size=(bytes:number)=>bytes<1024?`${bytes} B`:bytes<1048576?`${Math.round(b
  * git-ignored files on this Mac (names and sizes only) so the person picks
  * which to copy; credential-shaped ones start unchecked. Nothing is sent until
  * the button is pressed. */
-export function ProjectSetupDialog({projectId,projectName,workspaceName,components,disabled=false,onComplete,remoteInvoke,autoStart=false}:{projectId:string;projectName:string;workspaceName:string;components:{componentId:string;label:string}[];disabled?:boolean;onComplete?:(ok:boolean)=>void;
+export function ProjectSetupDialog({projectId,projectName,workspaceName,components,disabled=false,onComplete,remoteInvoke,target,root,autoStart=false}:{target?:()=>MirrorTarget|undefined;root?:string;projectId:string;projectName:string;workspaceName:string;components:{componentId:string;label:string}[];disabled?:boolean;onComplete?:(ok:boolean)=>void;
  /** Run workspace commands here instead of on the window's live host: a temporary connection to another workspace (temporaryWorkspace.ts). */
  remoteInvoke?:<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
  /** Start the setup as soon as the files are listed, with everything pre-selected: a launch that needs the project there should not wait for a click. */
@@ -57,7 +57,7 @@ export function ProjectSetupDialog({projectId,projectName,workspaceName,componen
   setRunning(true);setError('');setProgress(null);
   onComplete?.(false);
   try{
-   const final=await ensureProjectOnRemote({local,remote:remoteInvoke??remote,signal:controller.signal},{projectId,componentIds:usable.map(c=>c.componentId),selectedFiles:chosen,install},setProgress);
+   const final=await ensureProjectOnRemote({local,remote:remoteInvoke??remote,...(target?{target}:{}),...(root?{root}:{}),signal:controller.signal},{projectId,componentIds:usable.map(c=>c.componentId),selectedFiles:chosen,install},setProgress);
    onComplete?.(final.projects.length>0&&!final.projects.some(p=>p.state==='failed'));
   }
   catch(e){setError(String((e as {message?:string})?.message??e));}

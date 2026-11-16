@@ -852,6 +852,7 @@ pub fn run() {
             client_mode::canopy_account_cache_key,
             client_mode::execution_remote_set,
             client_mode::execution_remote_list,
+            client_mode::execution_remote_saved_connection,
             client_mode::execution_remote_forget,
             client_mode::execution_remote_activate,
             client_mode::execution_remote_import_accounts,
