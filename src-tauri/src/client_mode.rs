@@ -61,7 +61,6 @@ fn forget_account_token() -> Result<(), String> {
 
 /// The credential store can block: a D-Bus round trip, or a keyring unlock
 /// prompt the person has to answer. Keep that off the async workers.
-/// t3_client.rs stores its saved machines through this too.
 pub(crate) async fn blocking_store<T: Send + 'static>(
     call: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
@@ -224,6 +223,19 @@ pub fn execution_remote_get(
     Ok(current.clone())
 }
 
+/// A Tailscale MagicDNS name such as `box.tail1234.ts.net`.
+fn is_tailnet_name(host: &str) -> bool {
+    host.strip_suffix(".ts.net").is_some_and(|name| {
+        !name.is_empty()
+            && name.split('.').all(|label| {
+                !label.is_empty()
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+    })
+}
+
 #[tauri::command(async)]
 pub fn execution_remote_set(
     app: tauri::AppHandle,
@@ -236,7 +248,9 @@ pub fn execution_remote_set(
         endpoint.host_str(),
         Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
     );
-    if !(endpoint.scheme() == "https" || (endpoint.scheme() == "http" && loopback))
+    // Tailscale encrypts tailnet traffic, so its MagicDNS names may use plain http.
+    let tailnet = endpoint.host_str().is_some_and(is_tailnet_name);
+    if !(endpoint.scheme() == "https" || (endpoint.scheme() == "http" && (loopback || tailnet)))
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || connection
@@ -1338,5 +1352,20 @@ mod credential_thread_tests {
             checked >= 6,
             "expected the credential-store commands, found {checked}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tailnet_endpoint_tests {
+    use super::is_tailnet_name;
+
+    #[test]
+    fn only_magicdns_names_count_as_tailnet() {
+        assert!(is_tailnet_name("box.tail1234.ts.net"));
+        assert!(!is_tailnet_name("ts.net"));
+        assert!(!is_tailnet_name(".ts.net"));
+        assert!(!is_tailnet_name("box.ts.net.example"));
+        assert!(!is_tailnet_name("box..ts.net"));
+        assert!(!is_tailnet_name("100.64.0.1"));
     }
 }

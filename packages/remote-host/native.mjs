@@ -1,3 +1,4 @@
+import {WORKSPACE_ROOT,AGENT_HOME,RUNNER_URL,NATIVE_PORT,RUNNER_BIND} from './paths.mjs';
 import {resolveWorkspacePath} from './workspace-file-paths.mjs';
 import {servePortForward} from './port-forward.mjs';
 import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
@@ -65,7 +66,7 @@ const workspaceMetrics=metricsReader();
 // started it: workspace_metrics attributes usage to people from it.
 let lastSessionPass=null;
 const execute=promisify(execFile);
-const ROOT='/workspace', HOME='/home/agent', STORE=HOME+'/.canopy/ide-projects.json';
+const ROOT=WORKSPACE_ROOT, HOME=AGENT_HOME, STORE=HOME+'/.canopy/ide-projects.json';
 const profiles=new WorkspaceProfiles(HOME);
 const teleport=teleportTranscript(HOME);
 const teleportGitOps=teleportGit();
@@ -124,7 +125,7 @@ familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list())
 // sessions, each measured as its process tree's resident set by a reader of
 // its own (session_process_stats keeps its CPU deltas apart).
 {
- const runnerFetch=(route,init={})=>fetch(`http://127.0.0.1:8080${route}`,{...init,headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},signal:AbortSignal.timeout(5000)});
+ const runnerFetch=(route,init={})=>fetch(`${RUNNER_URL}${route}`,{...init,headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},signal:AbortSignal.timeout(5000)});
  const measure=sessionProcessReader();
  familyContext.terminalGovernor=new TerminalGovernor({defaultsFile:HOME+'/.canopy/terminal-governor-defaults.json'});
  familyContext.governorSampler=governorSampler({governor:familyContext.terminalGovernor,sample:async()=>{
@@ -190,7 +191,7 @@ export async function nativeInvoke(command,args={}){
   if(command==='task_mark_launch_failed'){await taskStore.markLaunchFailed(args.binding);return;}
   if(command==='pty_output'){
    const id=Number(args.id);if(!Number.isInteger(id)||id<0)return null;
-   try{const response=await fetch(`http://127.0.0.1:8080/sessions/${id}/output`,{method:'POST',headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},body:JSON.stringify({max:args.max??null}),signal:AbortSignal.timeout(5000)});if(!response.ok)return null;return (await response.json()).text??null;}catch{return null;}
+   try{const response=await fetch(`${RUNNER_URL}/sessions/${id}/output`,{method:'POST',headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},body:JSON.stringify({max:args.max??null}),signal:AbortSignal.timeout(5000)});if(!response.ok)return null;return (await response.json()).text??null;}catch{return null;}
   }
   if(command==='channel_poll')return channels.poll(args.ids,args.wait);
   if(command==='channel_drop'){channels.drop(args.ids);return;}
@@ -408,7 +409,7 @@ export function startNativeServer(){
   const wss=new WebSocketServer({noServer:true,maxPayload:256000,perMessageDeflate:false});
   server.on('upgrade',(request,socket,head)=>{const match=request.url.match(/^\/sessions\/(\d+)\/stream$/),forward=request.url==='/forward';if(!authorized(request)||(!match&&!forward))return socket.destroy();wss.handleUpgrade(request,socket,head,client=>{client.on('error',()=>{});if(forward)return servePortForward(client);void screens.attach(Number(match[1]),client).catch(()=>client.close(1011,'Terminal unavailable'));});});
   server.on('close',()=>screens.dispose());
-  server.maxConnections=32;server.requestTimeout=30000;server.headersTimeout=10000;server.listen(8081,'0.0.0.0');
+  server.maxConnections=32;server.requestTimeout=30000;server.headersTimeout=10000;server.listen(NATIVE_PORT,RUNNER_BIND);
 }
 
 if(process.argv[1]===new URL(import.meta.url).pathname)startNativeServer();

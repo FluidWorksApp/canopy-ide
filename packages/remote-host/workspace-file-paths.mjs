@@ -1,9 +1,10 @@
+import {WORKSPACE_ROOT} from './paths.mjs';
 import path from 'node:path';
 import {realpath} from 'node:fs/promises';
 
 // File-editor access can include private runtime scratch; project execution,
 // repository operations and configured component roots remain workspace-only.
-export async function resolveWorkspacePath(value,{workspace='/workspace',scratch,create=false}={}){
+export async function resolveWorkspacePath(value,{workspace=WORKSPACE_ROOT,scratch,create=false}={}){
  if(typeof value!=='string'||value.includes('\0'))throw Error('Invalid workspace path');
  const roots=[workspace,...(scratch?[scratch]:[])];
  const inside=target=>roots.some(root=>target===root||target.startsWith(root+'/'));

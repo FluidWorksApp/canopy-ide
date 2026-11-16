@@ -52,7 +52,7 @@ const LOCAL_TARGET: DisplayTarget = {
 };
 
 async function defaultDecide(project: { id: string; name: string }, agentId: string, requested: Preference): Promise<PlacementDecision> {
-  // Loaded on demand: gathering pulls in the T3 and workspace clients.
+  // Loaded on demand: gathering pulls in the workspace clients.
   const { gatherUnified, projectAvailability } = await import("../placement/gather");
   const g = await gatherUnified();
   if (g.discoveryFailures.length) throw new Error(g.discoveryFailures.join(" "));
@@ -283,11 +283,7 @@ export function AgentLaunchButton({
       {transition && placement && (
         <Dialog
           title={`Run on ${transition.name}`}
-          body={
-            transition.target.kind === "t3"
-              ? `${transition.name} opens in its machine view. Open it there to continue; Canopy will not start this agent on the active workspace.`
-              : `Switch to ${transition.name}, then launch the agent there. Canopy will not start it on the active workspace.`
-          }
+          body={`Switch to ${transition.name}, then launch the agent there. Canopy will not start it on the active workspace.`}
           dismissLabel="Cancel"
           onDismiss={() => setTransition(null)}
           actions={[{
@@ -297,7 +293,7 @@ export function AgentLaunchButton({
               const target = transition.target;
               setTransition(null);
               if (placement.onTransition) void placement.onTransition(target);
-              else void requestTargetTransition(target, transition.name);
+              else void requestTargetTransition(target);
             },
           }]}
         />

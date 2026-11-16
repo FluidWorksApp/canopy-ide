@@ -1,3 +1,4 @@
+import {WORKSPACE_ROOT,CANOPY_CODE} from './paths.mjs';
 import {readdir,readFile,readlink} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -73,7 +74,7 @@ export function sessionProcessReader(){
   const processes=[];let runnerPid;
   for(const id of (await readdir('/proc')).filter(id=>/^\d+$/.test(id)).slice(0,4096)){
    try{const proc=parseProcessStat(await readFile('/proc/'+id+'/stat','utf8'));const argv=(await readFile('/proc/'+id+'/cmdline','utf8')).split('\0').slice(0,2);proc.argv=argv;proc.exe=await readlink('/proc/'+id+'/exe').catch(()=>null);
-    if(path.basename(argv[0]??'')==='node'&&['runner.mjs','/opt/canopy/runner.mjs'].includes(argv[1]))runnerPid=proc.pid;
+    if(path.basename(argv[0]??'')==='node'&&['runner.mjs',CANOPY_CODE+'/runner.mjs'].includes(argv[1]))runnerPid=proc.pid;
     if(sessions.some(session=>session.requestId)){const env=await readFile('/proc/'+id+'/environ','utf8').catch(()=> '');proc.requestId=env.split('\0').find(value=>value.startsWith('CANOPY_SESSION_REQUEST_ID='))?.slice('CANOPY_SESSION_REQUEST_ID='.length);}
     processes.push(proc);
    }catch{/* Processes may exit between reads. */}
@@ -93,7 +94,7 @@ export function sessionProcessReader(){
    const root=bindings.get(session.id),owned=root?processes.filter(proc=>belongs(proc,root)):[],procs=owned.map(proc=>measured.get(proc.pid));
    const foreground=root&&owned.filter(proc=>proc.tty===root.tty&&proc.group===root.foreground);
    const hint=foreground?.map(proc=>processAgentHint(proc.argv,proc.exe,proc.name)).find(Boolean)??null;
-   return {id:session.id,title:session.title,cwd:'/workspace',total_cpu:procs.reduce((sum,proc)=>sum+proc.cpu,0),total_mem_bytes:procs.reduce((sum,proc)=>sum+proc.mem_bytes,0),procs,ports:await processListeningPorts(owned.map(proc=>proc.pid),sockets),agent_hint:hint,quiet_ms:null,since_input_ms:null,output_bytes:0};
+   return {id:session.id,title:session.title,cwd:WORKSPACE_ROOT,total_cpu:procs.reduce((sum,proc)=>sum+proc.cpu,0),total_mem_bytes:procs.reduce((sum,proc)=>sum+proc.mem_bytes,0),procs,ports:await processListeningPorts(owned.map(proc=>proc.pid),sockets),agent_hint:hint,quiet_ms:null,since_input_ms:null,output_bytes:0};
   }));
  };
 }

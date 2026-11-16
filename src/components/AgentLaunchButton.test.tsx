@@ -234,17 +234,7 @@ describe("AgentLaunchButton", () => {
       const open = await screen.findByRole("button", { name: "Open Design Studio" });
       expect(p.onStart).not.toHaveBeenCalled();
       fireEvent.click(open);
-      expect(transitionMocks.request).toHaveBeenCalledWith({ kind: "remote", workspaceId: "w1" }, "Design Studio");
-    });
-
-    it("opens an unsupported T3 target by name without launching locally", async () => {
-      transitionMocks.active = false;
-      const p = props();
-      const d = decision({ target: { kind: "t3", machineId: "m1" }, targetName: "Build Mini" });
-      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => d }} />);
-      click();
-      expect(await screen.findByText(/Build Mini opens in its machine view/)).toBeInTheDocument();
-      expect(p.onStart).not.toHaveBeenCalled();
+      expect(transitionMocks.request).toHaveBeenCalledWith({ kind: "remote", workspaceId: "w1" });
     });
   });
 });

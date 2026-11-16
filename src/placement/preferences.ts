@@ -23,8 +23,6 @@ function target(raw: unknown): Target | null {
   if (value.kind === "local") return { kind: "local" };
   if (value.kind === "remote" && typeof value.workspaceId === "string" && value.workspaceId)
     return { kind: "remote", workspaceId: value.workspaceId };
-  if (value.kind === "t3" && typeof value.machineId === "string" && value.machineId)
-    return { kind: "t3", machineId: value.machineId };
   return null;
 }
 

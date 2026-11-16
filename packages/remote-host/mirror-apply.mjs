@@ -12,6 +12,7 @@
 // Every step is a spawned process with its own deadline: installs routinely
 // outlast run()'s budget and output cap. An artifact that cannot be applied is
 // kept under ~/.canopy/mirror/<id>/ so the person's work is never discarded.
+import {WORKSPACE_ROOT,AGENT_HOME} from './paths.mjs';
 import {spawn} from 'node:child_process';
 import {createWriteStream} from 'node:fs';
 import {access,lstat,mkdir,readdir,readFile,rename,rm} from 'node:fs/promises';
@@ -86,7 +87,7 @@ export async function toolchainNotes(repo,read=file=>readFile(file,'utf8'),nodeM
 }
 
 export class MirrorJobs {
- constructor({scoped,root='/workspace',home='/home/agent',launch=spawn,now=Date.now,killGrace=KILL_GRACE_MS}){
+ constructor({scoped,root=WORKSPACE_ROOT,home=AGENT_HOME,launch=spawn,now=Date.now,killGrace=KILL_GRACE_MS}){
   this.killGrace=killGrace;this.scoped=scoped;this.root=root;this.home=home;this.launch=launch;this.now=now;this.jobs=new Map();
  }
  /** Remove staged artifacts for a setup that will not run (upload failed or
