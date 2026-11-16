@@ -67,6 +67,7 @@ import { registerTerminalPressureShedder } from "../rendererPressureRelief";
 import { registerTerminalWindowEvents } from "../terminalWindowEvents";
 import { terminalKeyBlocked } from "../useEscape";
 import { claudeIdeLaunchEnv } from "../claudeIde";
+import { remoteRoot } from '../remoteExecution/remoteRoot';
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -714,7 +715,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           void ipc.clipboardImagePng().then(async image => {
             if (disposed) return;
             if (!image) { term.input("\x16"); return; }
-            const path = await ipc.spotSaveContextImage(cwd || "/workspace", image);
+            const path = await ipc.spotSaveContextImage(cwd || remoteRoot(), image);
             if (!disposed) term.paste(shellQuote(path) + " ");
           }).catch(error => void ipc.notifyNative("Image paste failed", String(error)))
             .finally(() => { imagePastePending = false; });
@@ -1253,7 +1254,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         for (const image of images) {
           const base64 = await readFileBase64(image, { scope: cwd || "terminal", maxBytes: MAX_CONTEXT_IMAGE_BYTES });
           if (!base64 || disposed) continue;
-          const uploaded = await ipc.spotSaveContextImage(cwd || '/workspace', base64);
+          const uploaded = await ipc.spotSaveContextImage(cwd || remoteRoot(), base64);
           if (disposed) return;
           term.paste(shellQuote(uploaded) + ' ');
         }
@@ -1319,7 +1320,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
               else unlisten = off;
             });
         }
-        void ipc.spotStageDropImages(cwd || '/workspace', paths, remote ? id : undefined).then((ready) => {
+        void ipc.spotStageDropImages(cwd || remoteRoot(), paths, remote ? id : undefined).then((ready) => {
           stopped = true;
           stopListening();
           if (remote) dispatchDrop({ type: "done", id });

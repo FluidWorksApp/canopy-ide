@@ -1,3 +1,4 @@
+import {RUNNER_URL} from './paths.mjs';
 import {trackMouseEncoding} from './terminal-mouse-modes.mjs';
 // One bounded server-side terminal per live PTY. Reattachments restore cells,
 // never replay an arbitrary tail of cursor-motion escape sequences.
@@ -37,7 +38,7 @@ export function terminalScreens(secret,{replay=()=>[]}={}){
     let entry=screens.get(id);if(entry)return entry;
     if(screens.size>=16){const idle=[...screens].find(([,e])=>!e.clients.size);if(!idle)throw Error('Terminal screen capacity reached');idle[1].close();}
     const screen=new TerminalScreen();const clients=new Set();let initialized=false;
-    const upstream=new WebSocket(`ws://127.0.0.1:8080/sessions/${id}/stream`,{headers:{authorization:`Bearer ${secret}`},maxPayload:1024*1024,perMessageDeflate:false});
+    const upstream=new WebSocket(`${RUNNER_URL.replace('http:','ws:')}/sessions/${id}/stream`,{headers:{authorization:`Bearer ${secret}`},maxPayload:1024*1024,perMessageDeflate:false});
     let readyResolve,readyReject;const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});ready.catch(()=>{});
     entry={screen,clients,ready,summary:{},close(){if(screens.get(id)!==entry)return;screens.delete(id);upstream.close();for(const client of clients)client.close(1013,'Terminal reconnect required');clients.clear();screen.dispose();readyReject(Error('Terminal disconnected'));}};
     screens.set(id,entry);
@@ -74,7 +75,7 @@ export function terminalScreens(secret,{replay=()=>[]}={}){
       return entry.screen.enqueue(0,async()=>{
         // Adopt geometry before SIGWINCH can produce new-grid escape sequences.
         const previous={cols:entry.screen.term.cols,rows:entry.screen.term.rows};entry.screen.term.resize(cols,rows);
-        try{const response=await fetch(`http://127.0.0.1:8080/sessions/${id}/resize`,{method:'POST',headers:{authorization:`Bearer ${secret}`,'content-type':'application/json'},body:JSON.stringify({cols,rows}),signal:AbortSignal.timeout(10000)});if(!response.ok)throw Error('Terminal resize failed');
+        try{const response=await fetch(`${RUNNER_URL}/sessions/${id}/resize`,{method:'POST',headers:{authorization:`Bearer ${secret}`,'content-type':'application/json'},body:JSON.stringify({cols,rows}),signal:AbortSignal.timeout(10000)});if(!response.ok)throw Error('Terminal resize failed');
           const frame={t:'data',b64:'AA==',start:entry.screen.end,end:entry.screen.end,cols,rows};
           for(const client of entry.clients)if(client.readyState===1){if(client.bufferedAmount>1024*1024)client.close(1013);else client.send(JSON.stringify(frame));}
           return await response.json();}

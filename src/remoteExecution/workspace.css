@@ -486,3 +486,44 @@
 /* A workspace host update: a dot on the workspace chip (WorkspaceUpdateNotice). */
 .workspace-update-dot {display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;background:var(--accent);flex:none;}
 .workspace-update-dot.required {background:var(--warn,var(--accent));}
+
+/* Add a workspace: Canopy cloud or your own machine (AddWorkspace.tsx). */
+.add-workspace {gap:18px;}
+.add-workspace > .ctl-seg {align-self:flex-start;}
+.add-workspace-tab {display:inline-flex;align-items:center;gap:7px;}
+.add-workspace .workspace-create {border-top:0;padding-top:0;gap:14px;}
+.add-workspace .workspace-create-row {display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:12px;}
+.add-workspace .workspace-create-row label {margin:0;color:var(--text-dim);}
+.add-workspace .workspace-create-row select {width:100%;}
+.add-workspace .workspace-create-storage {border-top:0;padding-top:0;display:flex;flex-direction:column;gap:8px;}
+.add-workspace .workspace-create-storage summary {display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px;color:var(--text);}
+.add-workspace .workspace-create-storage summary span {color:var(--text-dim);}
+.add-workspace .workspace-create-storage > select,.add-workspace .workspace-create-storage > .workspace-plan-note {margin-left:108px;}
+.add-workspace-footer {display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--border);padding-top:14px;margin-top:4px;}
+.add-workspace-footer .workspace-plan-note {margin:0;}
+.add-workspace-machine {display:flex;flex-direction:column;gap:16px;}
+.add-workspace-steps {margin:0;padding:0;list-style:none;counter-reset:step;display:flex;flex-direction:column;gap:20px;}
+.add-workspace-steps > li {counter-increment:step;display:grid;grid-template-columns:24px minmax(0,1fr);column-gap:12px;row-gap:8px;}
+.add-workspace-steps > li::before {content:counter(step);grid-row:1;width:24px;height:24px;border-radius:50%;background:var(--bg-raised);color:var(--text);font-size:var(--fs-xs);display:flex;align-items:center;justify-content:center;}
+.add-workspace-steps > li > * {grid-column:2;}
+.add-workspace-steps label {margin:0;}
+.add-workspace-steps small {color:var(--text-dim);font-size:var(--fs-xs);}
+.add-workspace-command {display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-deep);padding:4px 4px 4px 12px;}
+.add-workspace-command code {font-family:var(--font-mono);}
+.add-workspace-ok {margin:0;color:var(--ok);font-size:var(--fs-sm);}
+.add-workspace-busy {margin:0;color:var(--text-dim);font-size:var(--fs-sm);}
+.add-workspace-steps .workspace-feedback {margin:0;}
+.add-workspace-choices {border:1px solid var(--border);border-radius:var(--r-sm);padding:0;margin:0;overflow:hidden;}
+.add-workspace-choices legend {padding:0 0 10px;font-weight:600;}
+.add-workspace-choices label {display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;gap:12px;margin:0;padding:12px 14px;border-top:1px solid var(--border);cursor:pointer;}
+.add-workspace-choices label.is-selected {background:var(--bg-raised);}
+.add-workspace-choices code {color:var(--text-dim);font-family:var(--font-mono);font-size:var(--fs-xs);}
+.add-workspace-choice-name {font-weight:550;}
+
+/* Your own machine, in the Workspaces panel. */
+.workspace-machine-facts {display:grid;grid-template-columns:110px minmax(0,1fr);gap:8px 14px;margin:16px 0 0;font-size:var(--fs-sm);}
+.workspace-machine-facts dt {color:var(--text-dim);}
+.workspace-machine-facts dd {margin:0;}
+.workspace-machine-facts code {font-family:var(--font-mono);font-size:var(--fs-xs);}
+.workspace-machine-route::first-letter {text-transform:uppercase;}
+.workspace-remove-danger {color:var(--danger);}

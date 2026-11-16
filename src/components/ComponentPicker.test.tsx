@@ -12,7 +12,7 @@ const COMPONENTS=[C('a','api','/w/shop/services/api'),C('w','web','/w/shop/apps/
 const MACHINES:DisplayTarget[]=[
   {target:{kind:'local'},name:'This Mac',online:true},
   {target:{kind:'remote',workspaceId:'design'},name:'Design Studio',online:true},
-  {target:{kind:'t3',machineId:'mini'},name:'Build Mini',online:true},
+  {target:{kind:'remote',workspaceId:'mini'},name:'Build Mini',online:true},
 ];
 const mount=(over:Partial<Parameters<typeof ComponentPicker>[0]>={})=>{
   const onPick=vi.fn(),onCancel=vi.fn();

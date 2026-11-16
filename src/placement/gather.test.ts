@@ -12,20 +12,19 @@ const snapshot = (target: ResourceSnapshot["target"], online = true): ResourceSn
 });
 
 describe("displayTargets", () => {
-  it("combines This Mac and named connected machines without collapsing stable IDs", () => {
+  it("combines This Mac and named workspaces, with each one's online state", () => {
     const resources = [
       snapshot({ kind: "local" }),
-      snapshot({ kind: "remote", workspaceId: "same-id" }),
-      snapshot({ kind: "t3", machineId: "same-id" }, false),
+      snapshot({ kind: "remote", workspaceId: "w1" }),
+      snapshot({ kind: "remote", workspaceId: "w2" }, false),
     ];
     expect(displayTargets(
       resources,
-      [{ id: "same-id", name: "Design Studio" }],
-      [{ id: "same-id", label: "Build Mini" }],
+      [{ id: "w1", name: "Design Studio" }, { id: "w2", name: "Build Mini" }],
     )).toEqual([
       { target: { kind: "local" }, name: "This Mac", online: true },
-      { target: { kind: "remote", workspaceId: "same-id" }, name: "Design Studio", online: true },
-      { target: { kind: "t3", machineId: "same-id" }, name: "Build Mini", online: false },
+      { target: { kind: "remote", workspaceId: "w1" }, name: "Design Studio", online: true },
+      { target: { kind: "remote", workspaceId: "w2" }, name: "Build Mini", online: false },
     ]);
   });
 });

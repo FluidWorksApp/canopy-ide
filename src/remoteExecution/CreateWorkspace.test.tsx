@@ -9,7 +9,8 @@ it('shows the disk size and monthly estimate the plans API reports, not a fixed 
  mocks.plans={plans:[plan('standard',{storage_gib:100,storageMonthlyUsd:'11.77'}),plan('power',{storage_gib:100})],regions:[{id:'ap-southeast-1',name:'Singapore'}]};
  render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
  expect(screen.getByText(/\(100 GB ≈ \$11\.77\/month\)/)).toBeInTheDocument();
- expect(screen.getByRole('option',{name:/standard · 2 CPUs · 8 GB · 100 GB storage/})).toBeInTheDocument();
+ expect(screen.getByRole('option',{name:'standard · 2 CPUs · 8 GB'})).toBeInTheDocument();expect(screen.getByText('100 GB',{selector:'summary'})).toBeInTheDocument();
+ expect(screen.getByText('$0.10/hour while running. Files are kept when stopped.')).toBeInTheDocument();
  fireEvent.change(screen.getByRole('combobox',{name:/Size/}),{target:{value:'power'}});
  expect(screen.getByText(/\(100 GB ≈ \$11\.77\/month\)/)).toBeInTheDocument();
  expect(screen.queryByText(/50 GB/)).toBeNull();
@@ -17,7 +18,7 @@ it('shows the disk size and monthly estimate the plans API reports, not a fixed 
 it('omits the estimate when the API reports no disk size',async()=>{
  mocks.plans={plans:[plan('standard',{})],regions:[]};
  render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
- expect(screen.getByText(/Storage: \$0\.1177 per GB-month while the workspace exists, including when it’s stopped\.$/)).toBeInTheDocument();
+ expect(screen.getByText(/^\$0\.1177 per GB-month while the workspace exists, including when it’s stopped\.$/)).toBeInTheDocument();
 });
 it('offers the API storage selector, shows each size per hour, and sends the chosen size',async()=>{
  const {invoke}=await import('@tauri-apps/api/core');
@@ -29,16 +30,16 @@ it('offers the API storage selector, shows each size per hour, and sends the cho
  expect(screen.getByText(/You can grow storage later, but not shrink it\./)).toBeInTheDocument();
  expect(screen.queryByRole('option',{name:/50 GB storage/})).toBeNull();
  fireEvent.change(screen.getByRole('combobox',{name:/Storage/}),{target:{value:'1000'}});
- fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Big'}});
- await act(async()=>{fireEvent.click(screen.getByRole('button',{name:/Create workspace/}));});
+ fireEvent.change(screen.getByRole('textbox',{name:'Name'}),{target:{value:'Big'}});
+ await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Create'}));});
  expect(vi.mocked(invoke)).toHaveBeenCalledWith('canopy_account_request',{route:'/api/workspaces',body:{name:'Big',planId:'standard',regionId:'ap-southeast-1',storageGib:1000}});
 });
-const create=()=>screen.getByRole('button',{name:'Create workspace'});
+const create=()=>screen.getByRole('button',{name:'Create'});
 it('blocks creating below the credit floor and points at adding credit',async()=>{
  const {invoke}=await import('@tauri-apps/api/core');vi.mocked(invoke).mockClear();
  mocks.plans={plans:[plan('standard',{})],regions:[]};mocks.credits={balanceUsd:'4.99'};
  render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
- fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Main'}});
+ fireEvent.change(screen.getByRole('textbox',{name:'Name'}),{target:{value:'Main'}});
  expect(screen.getByRole('alert')).toHaveTextContent('You need at least $5.00 to create or start a workspace.');
  expect(screen.getByRole('button',{name:'Add credit'})).toBeTruthy();expect(create()).toBeDisabled();
  fireEvent.submit(create().closest('form')!);await act(async()=>{});
@@ -47,12 +48,12 @@ it('blocks creating below the credit floor and points at adding credit',async()=
 it('allows creating at the floor',async()=>{
  mocks.plans={plans:[plan('standard',{})],regions:[]};mocks.credits={balanceUsd:'5'};
  render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
- fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Main'}});
+ fireEvent.change(screen.getByRole('textbox',{name:'Name'}),{target:{value:'Main'}});
  expect(create()).toBeEnabled();expect(screen.queryByRole('alert')).toBeNull();
 });
 it('stays blocked when the balance can\u2019t be read',async()=>{
  mocks.plans={plans:[plan('standard',{})],regions:[]};mocks.credits=new Error('offline');
  render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
- fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Main'}});
- expect(create()).toBeDisabled();expect(screen.getByRole('alert')).toHaveTextContent('couldn’t be checked');
+ fireEvent.change(screen.getByRole('textbox',{name:'Name'}),{target:{value:'Main'}});
+ expect(create()).toBeDisabled();expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t check your balance');
 });

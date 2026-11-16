@@ -8,6 +8,8 @@ const QUICK_ADMISSION_WAIT_MS=1000;
 export interface RemoteWorkspace {
   id: string;
   name: string;
+  /** Where its files are, when the host says (canopy-host does). */
+  root?: string;
   accounts: string[];
   memoryMiB: number;
   memoryMaxMiB?: number;
@@ -28,7 +30,9 @@ export function remoteEndpoint(value: string): string {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Enter a host URL without credentials or a path");
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("Remote hosts require HTTPS; an SSH-forwarded loopback endpoint may use HTTP");
+  // Tailscale already encrypts tailnet traffic; the CSP allows http to *.ts.net for this.
+  const tailnet = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/i.test(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && (loopback || tailnet))) throw new Error("Remote hosts require HTTPS, except over SSH (127.0.0.1) or Tailscale (*.ts.net)");
   return url.origin;
 }
 
@@ -69,7 +73,8 @@ export class RemoteExecutionClient {
     if (!response.ok) throw new Error(result.error ?? `Host request failed (${response.status})`);
     return result as T;
   }
-  list() { return this.request<{ principal: string; scope: "view" | "drive" | "admin"; workspaces: RemoteWorkspace[] }>("/workspaces"); }
+  /** `host` is the machine's name, sent by canopy-host. */
+  list() { return this.request<{ principal: string; scope: "view" | "drive" | "admin"; host?: string; workspaces: RemoteWorkspace[] }>("/workspaces"); }
   workspace<T>(id: string, route: string, args?: unknown, priority?: number) {
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(id)) return Promise.reject(new Error("Invalid workspace"));
     return this.request<T>(`/workspaces/${id}${route}`, args, priority);

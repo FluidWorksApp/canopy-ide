@@ -20,6 +20,7 @@ import {hostUpdateState,type HostCapabilities} from './hostUpdate';
 import {peekWorkspaceList} from './workspaceListCache';
 import {HARNESS_READS,harnessCommand,isHarnessCommand,isOutdatedHarnessError} from './harnessCommands';
 import {HOST_OUTDATED_EVENT,hostOutdatedMessage,isRemoteUnsupported,outdatedHostCommand,outdatedNoticeCommand,remoteUnsupportedMessage} from './remoteSupport';
+import {DEFAULT_REMOTE_ROOT,insideRemoteRoot} from './remoteRoot';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
@@ -70,9 +71,6 @@ for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issue
 for(const command of ['tailscale_status','tailscale_allow_set','tailscale_allowed_list','tailscale_open_app','tailnet_remote_list','tailnet_remote_open','tailnet_remote_close','tailnet_remote_reconnect'])LOCAL_UI.add(command);
 // This app's own diagnostics, self-test harness, `canopy` launcher, and
 // workspace files chosen in this computer's save/open dialogs.
-// Saved T3 Code machines are this computer's: their access tokens sit in its
-// credential store (t3_client.rs) and their RPC sockets are this computer's (t3_socket.rs).
-for(const command of ['t3_list','t3_describe','t3_pair','t3_remove','t3_socket_open','t3_socket_send','t3_socket_close'])LOCAL_UI.add(command);
 for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','cli_take_pending_targets','cli_take_pending_open','cli_take_pending_link','workspace_export','workspace_import'])LOCAL_UI.add(command);
 // Quitting is this computer's app; "Quit and Stop All" stops its terminals.
 for(const command of ['app_quit','pty_host_enabled','pty_host_setting','pty_host_set_setting'])LOCAL_UI.add(command);
@@ -169,6 +167,8 @@ export class NativeWorkspaceHost implements Host {
   private known = new Map<number, RemoteSession>();
   readonly connection: WorkspaceConnection;
   private desktop: Host;
+  /** Set from the host's /open answer before the IDE mounts (workspace.tsx). */
+  root = DEFAULT_REMOTE_ROOT;
   constructor(connection: WorkspaceConnection, desktop: Host = nativeHost) {
     this.connection = connection; this.desktop = desktop;
     const managed = connection.endpoint === `https://${connection.workspaceId}.workspaces.canopyide.dev`;
@@ -228,7 +228,7 @@ export class NativeWorkspaceHost implements Host {
   private emit(event: string, payload: unknown) { this.listeners.get(event)?.forEach(handler => handler({event,id:0,payload})); }
   private summary(session: RemoteSession) {
     const meta=this.metadata[String(session.id)] ?? {};
-    return {id:session.id,session_generation:session.id,pid:null,cwd:meta.cwd??'/workspace',title:meta.title??session.title,name:meta.name,cols:session.cols,rows:session.rows,kind:'desktop',project_id:meta.projectId??`remote-${this.connection.workspaceId}`,run:meta.run??session.kind==='build',command:meta.command,run_command_id:meta.runCommandId,resumed_from:typeof meta.resumedFrom==='number'?meta.resumedFrom:null,generation:1,replay_start:0,replay_end:0};
+    return {id:session.id,session_generation:session.id,pid:null,cwd:meta.cwd??this.root,title:meta.title??session.title,name:meta.name,cols:session.cols,rows:session.rows,kind:'desktop',project_id:meta.projectId??`remote-${this.connection.workspaceId}`,run:meta.run??session.kind==='build',command:meta.command,run_command_id:meta.runCommandId,resumed_from:typeof meta.resumedFrom==='number'?meta.resumedFrom:null,generation:1,replay_start:0,replay_end:0};
   }
   private desktopArgs(args:Args){
     let out=args;
@@ -274,7 +274,7 @@ export class NativeWorkspaceHost implements Host {
   }
   private beginPoll() {
     if(this.poll || this.disposed)return;
-    const tick=async()=>{try{if(this.stopping)return;await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed){this.emit('pty:stats',stats);this.forwardDetected(stats);}}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(!this.readOnly&&this.listeners.get('terminal:governor')?.size){try{this.governorCursor=await pollGovernorEvents((name,body)=>this.native(name,body),this.governorCursor,event=>{if(!this.disposed)this.emit('terminal:governor',event);});}catch{/* Budgets resume on the next poll. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:'/workspace'});this.emit('fs:change',{root:'/workspace',paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
+    const tick=async()=>{try{if(this.stopping)return;await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed){this.emit('pty:stats',stats);this.forwardDetected(stats);}}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(!this.readOnly&&this.listeners.get('terminal:governor')?.size){try{this.governorCursor=await pollGovernorEvents((name,body)=>this.native(name,body),this.governorCursor,event=>{if(!this.disposed)this.emit('terminal:governor',event);});}catch{/* Budgets resume on the next poll. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:this.root});this.emit('fs:change',{root:this.root,paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
     this.poll=setTimeout(()=>void tick(),3000);
   }
   private async attach(id:number, channel?:HostChannel<ArrayBuffer>) {
@@ -418,7 +418,7 @@ export class NativeWorkspaceHost implements Host {
     }else if(command==='pty_renderer_sessions')value=(await this.sessions(INTERACTIVE)).filter(s=>s.exitCode==null).map(s=>this.summary(s));
     else if(command==='instance_id'||command==='launch_id')value=await this.instanceId();
     else if(['pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached'].includes(command)){
-      const cwd=String(args.cwd??'/workspace');if(cwd!=='/workspace'&&!cwd.startsWith('/workspace/'))throw Error('Choose a directory in the remote workspace');
+      const cwd=String(args.cwd??this.root);if(!insideRemoteRoot(cwd,this.root))throw Error('Choose a directory in the remote workspace');
       const env=(args.env??[]) as [string,string][];
       if(env.some(([key])=>!/^[_A-Za-z][_A-Za-z0-9]*$/.test(key)))throw Error('Invalid environment variable');
       const accountId=env.find(([key])=>key==='CANOPY_ACCOUNT_POOL')?.[1];

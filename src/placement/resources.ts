@@ -19,8 +19,6 @@ export interface ResourceSources {
   /** "unknown" when this client cannot observe that workspace's load. A
    *  `{sessions}` answer counts every running session, agents and shells. */
   remoteActiveAgents: (workspaceId: string) => Promise<number | "unknown" | { sessions: number }>;
-  t3Machines: () => Promise<{ id: string }[]>;
-  t3ActiveAgents: (machineId: string) => Promise<number | "unknown">;
 }
 
 /** One agent per ~1.5 GiB of memory, at least 2. */
@@ -70,18 +68,6 @@ export async function collectResources(src: ResourceSources, defaultRemoteCapaci
         const capacity = capacityFromMemory(w.memory_max_mib, defaultRemoteCapacity);
         if (typeof n === "object" && n !== null) return { target, online: true, activeAgents: n.sessions, loadBasis: "sessions", capacity, lastSeen: now };
         return { target, online: true, activeAgents: n === "unknown" ? 0 : n, ...(n === "unknown" ? { loadUnknown: true } : {}), capacity, lastSeen: now };
-      }),
-    )),
-  );
-
-  const machines = (await safe(src.t3Machines)) ?? [];
-  out.push(
-    ...(await Promise.all(
-      machines.map(async (m): Promise<ResourceSnapshot> => {
-        const target: Target = { kind: "t3", machineId: m.id };
-        const n = await safe(() => src.t3ActiveAgents(m.id));
-        if (n === null) return offline(target, now);
-        return { target, online: true, activeAgents: n === "unknown" ? 0 : n, ...(n === "unknown" ? { loadUnknown: true } : {}), capacity: defaultRemoteCapacity, lastSeen: now };
       }),
     )),
   );

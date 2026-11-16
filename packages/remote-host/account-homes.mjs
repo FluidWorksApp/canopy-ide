@@ -7,6 +7,7 @@
 // itself reads. Those paths are linked back to the workspace's own, so a
 // shared-account agent is seen — and gated — like any other. What belongs to
 // the account (its plan usage, its CLI config) stays in its own home.
+import {AGENT_HOME} from './paths.mjs';
 import {mkdir,readdir,rm,symlink,lstat} from 'node:fs/promises';
 import path from 'node:path';
 
@@ -14,7 +15,7 @@ export const ACCOUNT_HOMES='accounts';
 const SHARED_DIRS=['sessions','policy','research','workflow-runs'];
 const SHARED_FILES=['agent-events.jsonl','context-scopes.json'];
 
-export async function linkSharedCanopyState(accountHome,home='/home/agent'){
+export async function linkSharedCanopyState(accountHome,home=AGENT_HOME){
  const own=path.join(home,'.canopy'),mine=path.join(accountHome,'.canopy');
  await mkdir(mine,{recursive:true,mode:0o700});
  for(const name of [...SHARED_DIRS,...SHARED_FILES]){
@@ -27,7 +28,7 @@ export async function linkSharedCanopyState(accountHome,home='/home/agent'){
 }
 
 /** Every shared-account session home on this workspace (for transcript search). */
-export async function accountHomes(home='/home/agent'){
+export async function accountHomes(home=AGENT_HOME){
  const dir=path.join(home,'.canopy',ACCOUNT_HOMES);
  try{return (await readdir(dir,{withFileTypes:true})).filter(e=>e.isDirectory()).map(e=>path.join(dir,e.name));}catch{return [];}
 }

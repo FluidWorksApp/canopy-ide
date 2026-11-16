@@ -60,7 +60,7 @@ import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,BINARY_TERMINAL_INPUT_PR
  * client is still waiting for; `total` also counts work whose client has gone. */
 export const admissionLimits=cpus=>({perPrincipal:Math.max(8,cpus*4),total:Math.max(32,cpus*8)});
 
-export function createGateway({ config, workspaces, origins = [], cpus = os.availableParallelism(), elasticMemory, elasticCpu, machineMetrics = typeof workspaces?.inspectRuntime === 'function' ? new MachineMetrics({ inspect: runtime => workspaces.inspectRuntime(runtime) }) : null, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness }) {
+export function createGateway({ config, workspaces, origins = [], cpus = os.availableParallelism(), elasticMemory, elasticCpu, machineMetrics = typeof workspaces?.inspectRuntime === 'function' ? new MachineMetrics({ inspect: runtime => workspaces.inspectRuntime(runtime) }) : null, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness, hostName }) {
   validateConfig(config);
   // Members' names as the control plane gives them (their Git identity), for
   // the per-person usage teammates in the same workspace see.
@@ -200,8 +200,9 @@ export function createGateway({ config, workspaces, origins = [], cpus = os.avai
     try {
       const route = new URL(request.url, 'http://gateway').pathname;
       if (route === '/v1/workspaces' && request.method === 'GET') {
-        return json(response, 200, { principal: principal.id, scope: principal.scope,
-          workspaces: config.workspaces.filter(w => principal.workspaces.includes(w.id)).map(w => ({ id: w.id, name: w.name ?? w.id, accounts: w.accounts, memoryMiB: w.memoryMiB, memoryMaxMiB: memoryRange(w).max, cpus: w.cpus, cpusMax: cpuRange(w).max })) });
+        // hostName and root come from canopy-host, so the app can name the machine and its folder.
+        return json(response, 200, { principal: principal.id, scope: principal.scope, ...(hostName ? { host: hostName } : {}),
+          workspaces: config.workspaces.filter(w => principal.workspaces.includes(w.id)).map(w => ({ id: w.id, name: w.name ?? w.id, ...(w.root ? { root: w.root } : {}), accounts: w.accounts, memoryMiB: w.memoryMiB, memoryMaxMiB: memoryRange(w).max, cpus: w.cpus, cpusMax: cpuRange(w).max })) });
       }
       const match = route.match(/^\/v1\/workspaces\/([a-z][a-z0-9-]{0,47})(\/.*)$/);
       if (!match) return json(response, 404, { error: 'Unknown operation' });
@@ -351,7 +352,8 @@ export function createGateway({ config, workspaces, origins = [], cpus = os.avai
       if(harness&&!principal.memberId)void harness.attach(workspace,runtime).catch(()=>{});
       if (operation === '/open') {
         if(!await runtimeReady(runtime))throw Error('Workspace services are not responding yet');
-        return json(response, 200, { id: workspace.id, connected: true });
+        // root: where this workspace's files are; a process host is not /workspace.
+        return json(response, 200, { id: workspace.id, connected: true, root: workspace.root ?? '/workspace' });
       }
       if (operation === '/resources') {
         if (request.method !== 'GET') throw Error('Resource configuration is administrator-managed');

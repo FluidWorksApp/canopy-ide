@@ -11,7 +11,7 @@ import { PlacementPicker, targetName } from "./PlacementPicker";
 import { Button } from "./ui";
 
 const load = async (): Promise<Gathered> => (await import("../placement/gather")).gatherUnified();
-const kindLabel: Record<UnifiedKind, string> = { project: "Project", agent: "Agent", thread: "Thread", job: "Job", session: "Session" };
+const kindLabel: Record<UnifiedKind, string> = { project: "Project", agent: "Agent", job: "Job", session: "Session" };
 
 function MachineSummary({ machine, resource, current, onSwitch }: { machine: DisplayTarget; resource?: ResourceSnapshot; current?: boolean; onSwitch?: () => void }) {
   const online = resource?.online ?? machine.online;
@@ -42,7 +42,6 @@ function MachineSummary({ machine, resource, current, onSwitch }: { machine: Dis
 
 export function UnifiedWorkspace({
   gather = load,
-  onOpen,
   onHandOff,
   onSwitch,
   activeTarget,
@@ -53,8 +52,6 @@ export function UnifiedWorkspace({
   /** The machine this window is on now. */
   activeTarget?: DisplayTarget["target"];
   gather?: () => Promise<Gathered>;
-  /** Open a thread or job in its own surface. */
-  onOpen?: (row: UnifiedRow) => void;
   /** Called with the exact target selected for a hand-off. */
   onHandOff?: (row: UnifiedRow, decision: PlacementDecision) => void;
 }) {
@@ -104,7 +101,7 @@ export function UnifiedWorkspace({
         </label>
         <label className="field"><span>Type</span>
           <select aria-label="Type filter" value={filter.kind} onChange={(event) => setFilter({ ...filter, kind: event.target.value as UnifiedFilter["kind"] })}>
-            <option value="all">Everything</option><option value="project">Projects</option><option value="agent">Agents</option><option value="thread">Threads</option><option value="job">Jobs</option><option value="session">Sessions</option>
+            <option value="all">Everything</option><option value="project">Projects</option><option value="agent">Agents</option><option value="job">Jobs</option><option value="session">Sessions</option>
           </select>
         </label>
         <label className="field unified-search"><span>Find work</span><input type="search" aria-label="Filter by name" placeholder="Project, branch, or machine" value={filter.text} onChange={(event) => setFilter({ ...filter, text: event.target.value })} /></label>
@@ -125,7 +122,6 @@ export function UnifiedWorkspace({
                 <thead><tr><th scope="col">Work</th><th scope="col">Machine</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Branch</th><th scope="col">Actions</th></tr></thead>
                 <tbody>
                   {visibleRows.map(row => {
-                    const canOpen = !!onOpen && row.target.kind === "t3" && (row.kind === "thread" || row.kind === "job");
                     const canHandOff = row.kind !== "project" && row.kind !== "session";
                     return <tr key={row.id} className="unified-row" data-row-id={row.id}>
                       <th scope="row" data-label="Work"><span className="unified-work-name">{row.name}</span></th>
@@ -134,9 +130,8 @@ export function UnifiedWorkspace({
                       <td data-label="Status"><span className={`unified-status${row.needsSetup ? " attention" : ""}`}>{row.needsSetup ? "Needs setup" : row.status}</span></td>
                       <td data-label="Branch">{row.branch ? <code>{row.branch}</code> : <span className="unified-none" aria-label="No branch">None</span>}</td>
                       <td data-label="Actions" className="unified-actions"><div className="unified-action-buttons">
-                        {canOpen && <Button size="sm" variant="ghost" onClick={() => onOpen(row)} aria-label={`Open ${row.name} on ${row.targetLabel}`}>Open</Button>}
                         {canHandOff && <Button size="sm" variant="ghost" onClick={() => doHandOff(row)} aria-label={`Hand off ${row.name} from ${row.targetLabel}`}>Hand off</Button>}
-                        {!canOpen && !canHandOff && <span className="unified-none">None</span>}
+                        {!canHandOff && <span className="unified-none">None</span>}
                         {handoff?.id === row.id && <small role="status">{handoff.decision.target ? `Could move to ${targetName(handoff.decision.target, names)}. ` : ""}{handoff.decision.reason}</small>}
                       </div></td>
                     </tr>;

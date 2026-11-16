@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fakeWire } from "../../src/test/fakeHostWire";
-import { INPUT_BACKLOG_CHARS, INPUT_BACKLOG_MS, socketTerminals } from "./pty";
+import { INPUT_BACKLOG_CHARS, INPUT_BACKLOG_MS, INPUT_PIECE_CHARS, inputPieces, socketTerminals } from "./pty";
 
 const viewer = () => ({ onData: vi.fn(), onReset: vi.fn(), onSize: vi.fn(), onGone: vi.fn(), onNotice: vi.fn() });
 
@@ -110,5 +110,81 @@ describe("remote input while the host socket is unavailable", () => {
     f.receive({ t: "input-error", pty: 3, error: "terminal 3 is not accepting input" });
     expect(view.onNotice).toHaveBeenLastCalledWith(expect.stringContaining("terminal 3 is not accepting input"));
     transport.dispose();
+  });
+});
+
+describe("large pastes", () => {
+  it("split under the host's message cap, in order, without breaking a surrogate pair", () => {
+    const paste = "a".repeat(INPUT_PIECE_CHARS - 1) + "😀" + "b".repeat(INPUT_PIECE_CHARS * 2);
+    const pieces = inputPieces(paste);
+    expect(pieces.join("")).toBe(paste);
+    expect(pieces.every((p) => p.length <= INPUT_PIECE_CHARS)).toBe(true);
+    expect(pieces[0].endsWith("a")).toBe(true);
+    expect(pieces[1].startsWith("😀")).toBe(true);
+  });
+
+  it("queues a paste the open socket refuses for backpressure and sends all of it", () => {
+    vi.useFakeTimers();
+    const f = fakeWire(), transport = socketTerminals(f.wire), view = viewer();
+    transport.attachPty(4, view);
+    let room = 2;
+    f.send.mockImplementation(() => room-- > 0);
+    const paste = "x".repeat(INPUT_PIECE_CHARS * 5);
+    transport.writePty(4, paste);
+    expect(view.onNotice).not.toHaveBeenCalled();
+    f.send.mockImplementation(() => true);
+    vi.advanceTimersByTime(1000);
+    const delivered = f.send.mock.results
+      .map((r, i) => (r.value ? f.send.mock.calls[i][0] : null))
+      .filter((m) => m && m.t === "input")
+      .map((m) => m!.data)
+      .join("");
+    expect(delivered).toBe(paste);
+    expect(view.onNotice).not.toHaveBeenCalledWith(expect.stringMatching(/not sent|couldn't/i));
+    transport.dispose();
+    vi.useRealTimers();
+  });
+
+  it("keeps sending a slow paste that takes longer than the backlog window", () => {
+    vi.useFakeTimers();
+    try {
+      const f = fakeWire(), transport = socketTerminals(f.wire), view = viewer();
+      transport.attachPty(4, view);
+      // One piece gets through every 10s: the whole paste takes far past 30s.
+      let room = 1;
+      f.send.mockImplementation(() => room-- > 0);
+      const paste = "z".repeat(INPUT_PIECE_CHARS * 6);
+      transport.writePty(4, paste);
+      for (let i = 0; i < 6; i++) { vi.advanceTimersByTime(10_000); room = 1; }
+      vi.advanceTimersByTime(1000);
+      const delivered = f.send.mock.results
+        .map((r, i) => (r.value ? f.send.mock.calls[i][0] : null))
+        .filter((m) => m && m.t === "input")
+        .map((m) => m!.data)
+        .join("");
+      expect(delivered).toBe(paste);
+      expect(view.onNotice).not.toHaveBeenCalledWith(expect.stringMatching(/not sent|couldn't/i));
+      transport.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("says part was sent when a paste stalls past the window after starting", () => {
+    vi.useFakeTimers();
+    try {
+      const f = fakeWire(), transport = socketTerminals(f.wire), view = viewer();
+      transport.attachPty(4, view);
+      let room = 1;
+      f.send.mockImplementation(() => room-- > 0);
+      transport.writePty(4, "q".repeat(INPUT_PIECE_CHARS * 3));
+      vi.advanceTimersByTime(INPUT_BACKLOG_MS + 1000);
+      room = 10;
+      vi.advanceTimersByTime(1000);
+      expect(view.onNotice).toHaveBeenLastCalledWith(expect.stringMatching(/^Some input/));
+      transport.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("leaves normal typing as one message", () => {
+    expect(inputPieces("ls\r")).toEqual(["ls\r"]);
   });
 });

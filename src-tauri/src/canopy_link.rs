@@ -175,7 +175,50 @@ enum Outcome {
     Fatal(String),
 }
 
-type Streams = Arc<Mutex<HashMap<u32, WriteHalf<DuplexStream>>>>;
+/// One browser connection. Dropping it aborts both of its tasks, which drops
+/// the pipe's read half too, so the portal side sees the connection end.
+struct Stream {
+    /// None after the browser half-closed (END); the response may still flow.
+    write: Option<WriteHalf<DuplexStream>>,
+    tasks: Vec<tokio::task::AbortHandle>,
+    /// Tells this stream from a later one the edge opened with the same id.
+    generation: u64,
+}
+
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+type Streams = Arc<Mutex<HashMap<u32, Stream>>>;
+
+/// The portal that serves new streams, swapped when Remote access restarts
+/// (a PIN change is a full restart).
+struct Served {
+    router: axum::Router,
+    closed: watch::Receiver<bool>,
+    /// The portal's shutdown sender is gone.
+    dropped: bool,
+}
+
+impl Served {
+    fn current(app: &AppHandle) -> Option<Self> {
+        crate::portal::portal_link(app).map(|(router, closed)| Served {
+            router,
+            closed,
+            dropped: false,
+        })
+    }
+
+    fn stale(&self) -> bool {
+        self.dropped || *self.closed.borrow()
+    }
+}
 
 async fn run_once(
     app: &AppHandle,
@@ -184,7 +227,7 @@ async fn run_once(
     stop: &mut watch::Receiver<bool>,
     attempt: &mut u32,
 ) -> Outcome {
-    let Some(router) = crate::portal::portal_router(app) else {
+    let Some(mut served) = Served::current(app) else {
         return Outcome::Fatal("Remote access is off.".into());
     };
     let mut request = match grant.tunnel.as_str().into_client_request() {
@@ -233,8 +276,23 @@ async fn run_once(
                     break Outcome::Retry("Lost the connection to Canopy's edge. Reconnecting…".into());
                 }
             }
+            // The portal restarted: its streams are dead, and new ones need the new one.
+            changed = served.closed.changed(), if !served.stale() => {
+                served.dropped |= changed.is_err();
+                if served.stale() {
+                    streams.lock().unwrap().clear();
+                }
+            }
             message = source.next() => match message {
-                Some(Ok(Message::Binary(bytes))) => handle_frame(&bytes, &router, &streams, &out_tx).await,
+                Some(Ok(Message::Binary(bytes))) => {
+                    if served.stale() && parse(&bytes).is_some_and(|(kind, ..)| kind == OPEN) {
+                        if let Some(next) = Served::current(app) {
+                            served = next;
+                        }
+                    }
+                    let router = (!served.stale()).then_some(&served.router);
+                    handle_frame(&bytes, router, &streams, &out_tx).await
+                }
                 Some(Ok(Message::Close(Some(close)))) if u16::from(close.code) == REPLACED => {
                     break Outcome::Fatal("Another computer took over your Canopy link. Turn remote access on again here to take it back.".into());
                 }
@@ -245,15 +303,23 @@ async fn run_once(
             }
         }
     };
+    // Aborts every stream's tasks; idle keep-alive streams would otherwise hold
+    // their senders open and the writer would never finish.
     streams.lock().unwrap().clear();
     drop(out_tx);
-    let _ = writer.await;
+    let stuck = writer.abort_handle();
+    if tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .is_err()
+    {
+        stuck.abort();
+    }
     outcome
 }
 
 async fn handle_frame(
     bytes: &[u8],
-    router: &axum::Router,
+    router: Option<&axum::Router>,
     streams: &Streams,
     out: &mpsc::Sender<Message>,
 ) {
@@ -262,6 +328,11 @@ async fn handle_frame(
     };
     match kind {
         OPEN => {
+            // Remote access is off or restarting: refuse rather than serve the old portal.
+            let Some(router) = router else {
+                let _ = out.send(Message::Binary(frame(RESET, id, &[]))).await;
+                return;
+            };
             let owner = serde_json::from_slice::<Value>(payload)
                 .ok()
                 .and_then(|v| v.get("auth").and_then(Value::as_str).map(|a| a == "owner"))
@@ -276,17 +347,29 @@ async fn handle_frame(
         }
         DATA => {
             // Take the writer out while writing so the lock never spans an await.
-            let writer = streams.lock().unwrap().remove(&id);
+            let writer = streams
+                .lock()
+                .unwrap()
+                .get_mut(&id)
+                .and_then(|s| s.write.take());
             if let Some(mut writer) = writer {
                 if writer.write_all(payload).await.is_ok() {
-                    streams.lock().unwrap().insert(id, writer);
+                    if let Some(stream) = streams.lock().unwrap().get_mut(&id) {
+                        stream.write = Some(writer);
+                    }
                 } else {
+                    streams.lock().unwrap().remove(&id);
                     let _ = out.send(Message::Binary(frame(RESET, id, &[]))).await;
                 }
             }
         }
         END => {
-            let writer = streams.lock().unwrap().remove(&id);
+            // Half-close only: the tasks keep running until the response is out.
+            let writer = streams
+                .lock()
+                .unwrap()
+                .get_mut(&id)
+                .and_then(|s| s.write.take());
             if let Some(mut writer) = writer {
                 let _ = writer.shutdown().await;
             }
@@ -309,9 +392,18 @@ fn open_stream(
 ) {
     let (near, far) = tokio::io::duplex(STREAM_BUFFER);
     let (mut read, write) = tokio::io::split(near);
-    streams.lock().unwrap().insert(id, write);
+    let generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // A reused id replaces (and aborts) the old stream.
+    streams.lock().unwrap().insert(
+        id,
+        Stream {
+            write: Some(write),
+            tasks: Vec::new(),
+            generation,
+        },
+    );
 
-    tokio::spawn(async move {
+    let serve = tokio::spawn(async move {
         let service =
             hyper_util::service::TowerToHyperService::new(router.layer(axum::Extension(auth)));
         let _ = hyper::server::conn::http1::Builder::new()
@@ -320,7 +412,9 @@ fn open_stream(
             .await;
     });
 
-    tokio::spawn(async move {
+    let reader_streams = streams.clone();
+    let pump = tokio::spawn(async move {
+        let streams = reader_streams;
         let mut buf = vec![0u8; READ_CHUNK];
         loop {
             match read.read(&mut buf).await {
@@ -343,8 +437,25 @@ fn open_stream(
                 }
             }
         }
-        streams.lock().unwrap().remove(&id);
+        let gone = {
+            let mut map = streams.lock().unwrap();
+            if map.get(&id).is_some_and(|s| s.generation == generation) {
+                map.remove(&id)
+            } else {
+                None
+            }
+        };
+        if let Some(mut gone) = gone {
+            // Don't abort ourselves; the server task still goes.
+            gone.tasks.pop();
+        }
     });
+    let tasks = vec![serve.abort_handle(), pump.abort_handle()];
+    match streams.lock().unwrap().get_mut(&id) {
+        Some(stream) if stream.generation == generation => stream.tasks = tasks,
+        // Already ended (or torn down) before we got here.
+        _ => tasks.iter().for_each(|t| t.abort()),
+    }
 }
 
 #[cfg(test)]
@@ -399,7 +510,7 @@ mod tests {
         let (out, mut frames) = mpsc::channel::<Message>(64);
         handle_frame(
             &frame(OPEN, 1, br#"{"auth":"owner"}"#),
-            &router,
+            Some(&router),
             &streams,
             &out,
         )
@@ -410,7 +521,7 @@ mod tests {
                 1,
                 b"GET /who HTTP/1.1\r\nHost: vj.remote.test\r\nConnection: close\r\n\r\n",
             ),
-            &router,
+            Some(&router),
             &streams,
             &out,
         )
@@ -451,7 +562,7 @@ mod tests {
         let (out, mut frames) = mpsc::channel::<Message>(64);
         handle_frame(
             &frame(OPEN, 3, br#"{"auth":"owner"}"#),
-            &router,
+            Some(&router),
             &streams,
             &out,
         )
@@ -459,7 +570,7 @@ mod tests {
         let handshake = "GET /remote/ws HTTP/1.1\r\nHost: vj.remote.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
         handle_frame(
             &frame(DATA, 3, handshake.as_bytes()),
-            &router,
+            Some(&router),
             &streams,
             &out,
         )
@@ -477,6 +588,62 @@ mod tests {
             text.contains("sec-websocket-accept: s3pplmbitxaq9kygzzhzrbk+xoo="),
             "{text}"
         );
+    }
+
+    /// An idle keep-alive stream must not keep the tunnel's sender alive after
+    /// teardown, or reconnecting waits forever.
+    #[tokio::test]
+    async fn teardown_ends_idle_keep_alive_streams() {
+        use axum::routing::get;
+        let router = axum::Router::new().route("/ok", get(|| async { "ok" }));
+        let streams: Streams = Default::default();
+        let (out, mut frames) = mpsc::channel::<Message>(64);
+        handle_frame(
+            &frame(OPEN, 5, br#"{"auth":"none"}"#),
+            Some(&router),
+            &streams,
+            &out,
+        )
+        .await;
+        handle_frame(
+            &frame(DATA, 5, b"GET /ok HTTP/1.1\r\nHost: vj.remote.test\r\n\r\n"),
+            Some(&router),
+            &streams,
+            &out,
+        )
+        .await;
+        let Ok(Some(Message::Binary(first))) =
+            tokio::time::timeout(Duration::from_secs(5), frames.recv()).await
+        else {
+            panic!("no response");
+        };
+        assert_eq!(parse(&first).unwrap().0, DATA);
+        drop(out);
+        streams.lock().unwrap().clear();
+        // Every sender gone means both tasks ended.
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while frames.recv().await.is_some() {}
+        })
+        .await;
+        assert!(ended.is_ok(), "stream tasks still hold the tunnel open");
+    }
+
+    #[tokio::test]
+    async fn a_stream_opened_while_the_portal_is_down_is_reset() {
+        let streams: Streams = Default::default();
+        let (out, mut frames) = mpsc::channel::<Message>(4);
+        handle_frame(
+            &frame(OPEN, 9, br#"{"auth":"owner"}"#),
+            None,
+            &streams,
+            &out,
+        )
+        .await;
+        let Some(Message::Binary(bytes)) = frames.recv().await else {
+            panic!("no frame");
+        };
+        assert_eq!(parse(&bytes).map(|(k, i, _)| (k, i)), Some((RESET, 9)));
+        assert!(streams.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -3,8 +3,9 @@ import {Button,TextInput,Checkbox} from '../components/ui';
 import {useEffect,useState} from 'react';
 import {invoke} from '../host';
 import './workspace.css';
+import {remoteRoot} from './remoteRoot';
 type Entry={name:string;path:string;is_dir:boolean;is_symlink:boolean};
-export function DirectoryPicker({multiple=false,initialPath='/workspace',title='Choose remote directory',body,confirmLabel,editablePath=false,onSelect,onCancel}:{multiple?:boolean;initialPath?:string;title?:string;body?:string;confirmLabel?:string;editablePath?:boolean;onSelect:(paths:string[])=>void;onCancel:()=>void}){
+export function DirectoryPicker({multiple=false,initialPath=remoteRoot(),title='Choose remote directory',body,confirmLabel,editablePath=false,onSelect,onCancel}:{multiple?:boolean;initialPath?:string;title?:string;body?:string;confirmLabel?:string;editablePath?:boolean;onSelect:(paths:string[])=>void;onCancel:()=>void}){
  const [path,setPath]=useState(initialPath),[draftPath,setDraftPath]=useState(initialPath),[loadedPath,setLoadedPath]=useState(''),[entries,setEntries]=useState<Entry[]>([]),[selected,setSelected]=useState<string[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(true),[name,setName]=useState(''),[creating,setCreating]=useState(false);
  useEffect(()=>setDraftPath(path),[path]);
  useEffect(()=>{let alive=true;setBusy(true);setError('');setEntries([]);void invoke<Entry[]>('fs_read_dir',{path}).then(v=>{if(alive){setEntries(v.filter(e=>e.is_dir&&!e.is_symlink).sort((a,b)=>a.name.localeCompare(b.name)));setLoadedPath(path);}}).catch(e=>{if(alive)setError(String(e));}).finally(()=>{if(alive)setBusy(false);});return()=>{alive=false;};},[path]);

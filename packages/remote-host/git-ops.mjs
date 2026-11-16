@@ -5,6 +5,7 @@
 // stay reserved for "git couldn't run" and for the guards Rust also throws.
 // Inspection goes through ctx.run (safeGitRead for read subcommands); commands
 // whose exit code or both output streams matter use ctx.execute.
+import {WORKSPACE_ROOT} from './paths.mjs';
 import path from 'node:path';
 import {access,stat,lstat,mkdir,copyFile,rm,rename,rmdir,realpath,constants} from 'node:fs/promises';
 import {listWorkspaceFiles} from './file-search.mjs';
@@ -44,7 +45,7 @@ export {parseWorktrees,classifyCheckout,classifyExtra,stripGhNoise,remoteUnreach
 
 // ---------- git plumbing over ctx ----------
 export function gitTools(ctx){
- const {run,scoped}=ctx,root=ctx.root??'/workspace';
+ const {run,scoped}=ctx,root=ctx.root??WORKSPACE_ROOT;
  const env={...process.env,HOME:ctx.home??process.env.HOME,GIT_TERMINAL_PROMPT:'0',GIT_OPTIONAL_LOCKS:'0'};
  const read=(dir,argv,timeout)=>run('git',argv,dir,timeout);
  const opt=async(dir,argv)=>{try{return (await read(dir,argv)).trim();}catch{return null;}};
@@ -394,9 +395,9 @@ export function gitOpsCommands(ctx){
    if(typeof where!=='string'||!where)throw Error('Invalid workspace path');
    // Only a linked worktree git itself lists for this repository; the folder
    // may already be gone (a locked, missing workspace takes force 2).
-   const known=await worktreeOf(top,path.resolve(ctx.root??'/workspace',where));
+   const known=await worktreeOf(top,path.resolve(ctx.root??WORKSPACE_ROOT,where));
    if(!known)throw Error(`${where} is not a workspace of this repository`);
-   const lexical=path.resolve(known.path);if(lexical!==(ctx.root??'/workspace')&&!lexical.startsWith((ctx.root??'/workspace')+'/'))throw Error('Path outside selected workspace');
+   const lexical=path.resolve(known.path);if(lexical!==(ctx.root??WORKSPACE_ROOT)&&!lexical.startsWith((ctx.root??WORKSPACE_ROOT)+'/'))throw Error('Path outside selected workspace');
    await must(top,['worktree','remove',...Array(count).fill('--force'),known.path]);
    return 'Workspace removed';
   },

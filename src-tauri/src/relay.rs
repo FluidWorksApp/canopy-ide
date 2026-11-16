@@ -366,6 +366,15 @@ enum Frame {
 /// Encrypt a frame and put it on a peer's channel. Every send goes through the
 /// per-peer `Arc<Mutex<Sender>>`: the AEAD nonce is a send counter, so two
 /// threads writing the same channel unserialised would reuse a nonce.
+/// Refuses a frame the peer would drop the connection over, with a reason to show.
+fn fits(frame: &Frame) -> Result<(), String> {
+    let len = serde_json::to_vec(frame).map_err(|e| e.to_string())?.len();
+    if len > secure::MAX_PLAINTEXT {
+        return Err("That's too big to send to the team. The limit is 2 MB.".into());
+    }
+    Ok(())
+}
+
 fn peer_send(sender: &Arc<Mutex<secure::Sender>>, frame: &Frame) -> bool {
     match serde_json::to_vec(frame) {
         Ok(bytes) => sender.lock().unwrap().send(&bytes),
@@ -392,6 +401,8 @@ pub(crate) mod secure {
     /// Ceiling on one encrypted frame. A larger length prefix is a broken or
     /// hostile peer; the connection drops rather than allocating it.
     const MAX_FRAME: usize = 2 * 1024 * 1024;
+    /// The largest plaintext whose sealed frame (plus the 16-byte tag) a peer accepts.
+    pub const MAX_PLAINTEXT: usize = MAX_FRAME - 16;
 
     /// 96-bit nonce = 4 zero bytes + a 64-bit counter. Unique per (key,
     /// direction) because each direction has its own key and a monotonic
@@ -466,6 +477,10 @@ pub(crate) mod secure {
 
     impl Sender {
         pub fn send(&mut self, plaintext: &[u8]) -> bool {
+            // The peer would drop the whole connection over it; send nothing instead.
+            if plaintext.len() > MAX_PLAINTEXT {
+                return false;
+            }
             let nonce = nonce_bytes(self.counter);
             let Ok(ct) = self.cipher.encrypt(Nonce::from_slice(&nonce), plaintext) else {
                 return false;
@@ -516,6 +531,69 @@ pub(crate) mod secure {
                 reader,
             },
         )
+    }
+
+    #[cfg(test)]
+    mod size_tests {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Shared(Arc<Mutex<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// A frame the peer would refuse is never written, and the channel stays in step.
+        #[test]
+        fn an_oversized_frame_is_refused_without_breaking_the_channel() {
+            let wire = Shared::default();
+            let key = [7u8; 32];
+            let (mut tx, _) = channel(
+                Box::new(wire.clone()),
+                BufReader::new(Box::new(std::io::empty())),
+                key,
+                key,
+            );
+            assert!(!tx.send(&vec![b'x'; MAX_PLAINTEXT + 1]));
+            assert!(wire.0.lock().unwrap().is_empty());
+            assert!(tx.send(b"hello"));
+            let bytes = wire.0.lock().unwrap().clone();
+            let (_, mut rx) = channel(
+                Box::new(std::io::sink()),
+                BufReader::new(Box::new(std::io::Cursor::new(bytes))),
+                key,
+                key,
+            );
+            assert_eq!(rx.recv().as_deref(), Some(&b"hello"[..]));
+        }
+
+        #[test]
+        fn the_largest_allowed_frame_still_fits_the_reader() {
+            let wire = Shared::default();
+            let key = [3u8; 32];
+            let (mut tx, _) = channel(
+                Box::new(wire.clone()),
+                BufReader::new(Box::new(std::io::empty())),
+                key,
+                key,
+            );
+            assert!(tx.send(&vec![b'y'; MAX_PLAINTEXT]));
+            let bytes = wire.0.lock().unwrap().clone();
+            let (_, mut rx) = channel(
+                Box::new(std::io::sink()),
+                BufReader::new(Box::new(std::io::Cursor::new(bytes))),
+                key,
+                key,
+            );
+            assert_eq!(rx.recv().map(|p| p.len()), Some(MAX_PLAINTEXT));
+        }
     }
 
     /// SPAKE2 over the raw stream, keyed by `code`. The joining client is the
@@ -2083,7 +2161,9 @@ pub async fn relay_send_chat(
         text,
         ts: now_ms(),
     };
-    deliver(&inner, to, Frame::Chat(msg.clone()))?;
+    let frame = Frame::Chat(msg.clone());
+    fits(&frame)?;
+    deliver(&inner, to, frame)?;
     Ok(msg)
 }
 
@@ -2105,7 +2185,9 @@ pub async fn relay_send_command(
         payload,
         ts: now_ms(),
     };
-    deliver(&inner, to, Frame::Command(msg.clone()))?;
+    let frame = Frame::Command(msg.clone());
+    fits(&frame)?;
+    deliver(&inner, to, frame)?;
     Ok(msg)
 }
 
@@ -2149,6 +2231,8 @@ pub async fn relay_send_collab(
             return Err("Not connected to a relay.".into());
         }
     };
+    // Outside the lock: a snapshot can be megabytes.
+    fits(&frame)?;
     if let Some(sender) = upstream {
         return if peer_send(&sender, &frame) {
             Ok(())

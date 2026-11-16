@@ -17,10 +17,11 @@
 //
 // The shims are installed by the runner at startup and put on PATH only for the
 // PTYs it spawns; the remote desktop and its browser never see them.
+import {AGENT_HOME} from './paths.mjs';
 import {chmod, mkdir, rename, rm, symlink, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 
-export const CLIPBOARD_BIN = '/home/agent/.canopy/clipboard-bin';
+export const CLIPBOARD_BIN = AGENT_HOME+'/.canopy/clipboard-bin';
 export const CLIPBOARD_TOOLS = ['xclip', 'xsel', 'wl-copy', 'pbcopy'];
 /** Matches the terminal's OSC 52 cap (OSC52_MAX_BYTES in terminalClipboard.ts):
  *  anything larger would be dropped on arrival, so it is refused here, where

@@ -34,7 +34,7 @@ if (typeof globalThis.localStorage === "undefined") {
 // selection in view (the palettes, the tab strip) would throw on the first
 // arrow key — a no-op stands in, since there is nothing to scroll here.
 // A test file may opt into `@vitest-environment node` (no DOM, Node's own
-// fetch and WebSocket, as the T3 integration test does); skip the DOM setup there.
+// fetch and WebSocket); skip the DOM setup there.
 const hasDom = typeof window !== "undefined";
 
 if (hasDom && !Element.prototype.scrollIntoView) {

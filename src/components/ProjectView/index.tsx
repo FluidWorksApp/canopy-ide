@@ -754,6 +754,7 @@ import { nativeHost } from "../../host/native";
 import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
 import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
 import { armPlanTracking, expectRun } from "../../plans/planStore";
+import {remoteRoot} from '../../remoteExecution/remoteRoot';
 import {
   documentResourceActive,
   shouldReuseInactiveDocumentPane,
@@ -7162,18 +7163,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!visible) return;
     const onFile = (event: Event) => {
-      const { path, line, cwd } =
-        (event as CustomEvent<OpenFileDetail>).detail ?? {};
-      if (!path) return;
+      const detail = (event as CustomEvent<OpenFileDetail & { projectId?: string }>).detail;
+      // App's own open (OS, command line) shares this event name; it has its own handler.
+      if (!detail?.path || detail.projectId) return;
+      const { path, line, cwd } = detail;
       event.preventDefault();
       const inside = digestRootsRef.current.some(
         (root) => path === root || path.startsWith(`${root}/`),
       );
+      // A staging failure (cwd outside the project) still opens the file itself.
       const ready =
         !inside && cwd && !isRemoteHost()
           ? ipc
               .spotStageDropImages(cwd, [path])
-              .then(([staged]) => staged ?? path)
+              .then(([staged]) => staged ?? path, () => path)
           : Promise.resolve(path);
       void ready.then(async (target) => {
         await openFileRef.current(target);
@@ -8352,7 +8355,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       let blocked: OpenBlock | null = null;
       let bytes: Uint8Array | null = null;
       try {
-        const stat = await ipc.fsStat(path);
+        const stat = await ipc.fsStat(path).catch(async (err) => {
+          // Outside every project folder: every open path asks for that one
+          // file here, so no click site can forget to. Native code decides.
+          if (!String(err).includes("outside")) throw err;
+          await ipc.fsGrantLinkFile(path);
+          return ipc.fsStat(path);
+        });
         blocked = opts?.force ? null : blockForOpen(path, kind, stat.size);
         if (!blocked) {
           bytes = await ipc.fsReadFile(
@@ -8377,11 +8386,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // Say which of the two it was, because they need different things of
         // the user.
         console.warn("open failed", path, err);
+        // The grant's own refusal (setting off, credentials) says why; pass it on.
+        const why = String(err).replace(/^Error:\s*/, "");
+        const refusal = /Settings → Privacy|credentials|private data/.test(why);
         onNotice(
           `Can't open ${basename(path)} — ${
-            String(err).includes("outside")
-              ? "it's outside this project's folders."
-              : "it may have been moved or deleted."
+            refusal ? why : "it may have been moved or deleted."
           }`,
           "error",
         );
@@ -15800,7 +15810,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <div className="side-panel-head">
             <span>Components & files</span>
             <span className="side-head-actions">
-              {upload.startUpload&&<Button size="sm" variant="ghost" disabled={upload.busy} onClick={e=>compMenu.open(e,uploadItems(components[0]?.path??'/workspace',true))}>Upload…</Button>}
+              {upload.startUpload&&<Button size="sm" variant="ghost" disabled={upload.busy} onClick={e=>compMenu.open(e,uploadItems(components[0]?.path??remoteRoot(),true))}>Upload…</Button>}
               <Button icon size="sm" variant="ghost" title="Refresh files" onClick={() => setTreeRefreshRevision(v => v + 1)}><RestartIcon size={14}/></Button>
               <Button icon size="sm" variant="ghost" title="Edit project" onClick={onEdit}><SettingsIcon size={14}/></Button>
             </span>
@@ -16554,11 +16564,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {machineTransition && visible && (
         <Dialog
           title={`Run on ${machineTransition.name}`}
-          body={
-            machineTransition.target.kind === "t3"
-              ? `${machineTransition.name} opens in its machine view. Continue there after it opens; this agent was not started on the active workspace.`
-              : `Switch to ${machineTransition.name}, then start the agent there. Nothing was started yet.`
-          }
+          body={`Switch to ${machineTransition.name}, then start the agent there. Nothing was started yet.`}
           dismissLabel="Cancel"
           onDismiss={() => setMachineTransition(null)}
           actions={[{
@@ -16568,7 +16574,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const target = machineTransition.target;
               // Carry the start across the switch: it happens by itself once
               // this project is open on that machine.
-              if (machineTransition.resumeAgent && target.kind !== "t3") {
+              if (machineTransition.resumeAgent) {
                 setPendingLaunch({
                   agentId: machineTransition.resumeAgent,
                   projectId: canonicalProjectId(project),
@@ -16578,7 +16584,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 });
               }
               setMachineTransition(null);
-              void requestTargetTransition(target, machineTransition.name);
+              void requestTargetTransition(target);
             },
           }]}
         />

@@ -3,6 +3,7 @@ import { installHost } from '../host';
 import { savedExecutionMode } from '../executionMode';
 import { NativeWorkspaceHost, type WorkspaceConnection } from './NativeWorkspaceHost';
 import { HarnessStream } from './harnessStream';
+import { normalizeRemoteRoot, setRemoteRoot } from './remoteRoot';
 import {renderStartupShell,startupDiagnostic} from './StartupShell';
 import {beginStartupWork,currentStartupWork,boundedStartup} from './startupWork';
 
@@ -15,7 +16,7 @@ export async function initializeWorkspace(epoch=beginStartupWork()) {
   if(!currentStartupWork(epoch))return false;
   if (connection) {
     active = new NativeWorkspaceHost(connection);
-    try { await boundedStartup(active.client.workspace(connection.workspaceId, '/open', {resume:false})); }
+    try { const opened = await boundedStartup(active.client.workspace<{root?:string}>(connection.workspaceId, '/open', {resume:false})); active.root = normalizeRemoteRoot(opened?.root); setRemoteRoot(active.root); }
     catch { active.dispose(); active = undefined; }
   }
   if(!currentStartupWork(epoch)){active?.dispose();active=undefined;return false;}

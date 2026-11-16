@@ -38,6 +38,25 @@ test('opening a running container does not report connected when its runner is u
  finally{await close(server);await close(upstream);}
 });
 
+test('open reports where the workspace files are',async()=>{
+ const upstream=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end('[]');});const upstreamUrl=await listen(upstream);
+ const config={workspaces:[{id:'a',accounts:[],memoryMiB:1024,cpus:1,root:'/home/me/work'},{id:'b',accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'owner',tokenSha256:digest('owner'),workspaces:['a','b'],scope:'drive'}]};
+ const server=createGateway({config,workspaces:{open:async()=>({url:upstreamUrl,token:'runtime'})}}),url=await listen(server);
+ try{
+  for(const [id,root] of [['a','/home/me/work'],['b','/workspace']]){const response=await fetch(url+`/v1/workspaces/${id}/open`,{method:'POST',headers:{authorization:'Bearer owner'}});assert.equal((await response.json()).root,root);}
+ }finally{await close(server);await close(upstream);}
+});
+
+test('the workspace list names the machine and each folder only when the host gives them',async()=>{
+ const config={workspaces:[{id:'a',accounts:[],memoryMiB:1024,cpus:1,root:'/home/me/work'},{id:'b',accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'owner',tokenSha256:digest('owner'),workspaces:['a','b'],scope:'drive'}]};
+ for(const hostName of ['box',undefined]){
+  const server=createGateway({config,workspaces:{open:async()=>({url:'http://127.0.0.1:1',token:'x'})},hostName}),url=await listen(server);
+  try{const body=await (await fetch(url+'/v1/workspaces',{headers:{authorization:'Bearer owner'}})).json();
+   assert.equal(body.host,hostName);assert.equal(body.workspaces[0].root,'/home/me/work');assert.equal('root' in body.workspaces[1],false);
+  }finally{await close(server);}
+ }
+});
+
 test('background opens do not resume runtimes and viewers cannot request a resume',async()=>{
  const upstream=http.createServer((req,res)=>res.end('[]')),opened=[];const upstreamUrl=await listen(upstream);
  const config={workspaces:[{id:'a',accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'owner',tokenSha256:digest('owner'),workspaces:['a'],scope:'drive'},{id:'viewer',tokenSha256:digest('viewer'),workspaces:['a'],scope:'view'}]};

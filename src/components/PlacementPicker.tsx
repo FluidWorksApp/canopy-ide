@@ -15,7 +15,7 @@ export const targetName = (target: Target | null, names: Record<string, string> 
     ? "nowhere"
     : target.kind === "local"
       ? "This Mac"
-      : names[targetKey(target)] ?? names[target.kind === "remote" ? target.workspaceId : target.machineId] ?? "the selected machine";
+      : names[targetKey(target)] ?? names[target.workspaceId] ?? "the selected machine";
 
 const fallbackTargets: DisplayTarget[] = [
   { target: { kind: "local" }, name: "This Mac", online: true },
@@ -46,7 +46,7 @@ export function PlacementPicker({
   const concrete = value.mode === "target" && !listed.some((item) => targetKey(item.target) === targetKey(value.target))
     ? [...listed, {
         target: value.target,
-        name: `Unavailable machine (${value.target.kind === "remote" ? value.target.workspaceId : value.target.kind === "t3" ? value.target.machineId : "This Mac"})`,
+        name: `Unavailable machine (${value.target.kind === "remote" ? value.target.workspaceId : "This Mac"})`,
         online: false,
       }]
     : listed;

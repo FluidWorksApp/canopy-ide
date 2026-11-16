@@ -3,8 +3,7 @@
 
 export type Target =
   | { kind: "local" }
-  | { kind: "remote"; workspaceId: string }
-  | { kind: "t3"; machineId: string };
+  | { kind: "remote"; workspaceId: string };
 
 /** What the user asked for. Inheritance is available only at override levels;
  * automatic is always an explicit request to balance over live targets. */
@@ -56,7 +55,7 @@ export interface PlacementDecision {
 }
 
 export const targetKey = (t: Target): string =>
-  t.kind === "local" ? "local" : t.kind === "remote" ? `remote:${t.workspaceId}` : `t3:${t.machineId}`;
+  t.kind === "local" ? "local" : `remote:${t.workspaceId}`;
 
 export const sameTarget = (a: Target, b: Target) => targetKey(a) === targetKey(b);
 

@@ -75,8 +75,52 @@ const TICK: Duration = Duration::from_secs(15);
 /// behind is detached (it re-attaches for a fresh snapshot) instead of making
 /// this machine buffer without limit or slowing the terminal.
 const OUTPUT_QUEUE: usize = 256;
+/// Output held back while the queue is full, mostly while the snapshot (up to
+/// 4 MiB) is still being written. Past this the peer is detached.
+const OUTPUT_BACKLOG_BYTES: usize = 8 * 1024 * 1024;
 /// How often an idle output bridge checks that its attach was closed.
 const BRIDGE_POLL: Duration = Duration::from_millis(250);
+/// How often a bridge with held-back output offers it again.
+const BACKLOG_POLL: Duration = Duration::from_millis(20);
+/// How long an ended terminal's held-back output may take to go out.
+const BACKLOG_DRAIN: Duration = Duration::from_secs(30);
+
+/// Output a slow peer has not taken yet. Without it a busy terminal filled the
+/// queue before the snapshot was out, and the peer re-attached in a loop.
+#[derive(Default)]
+struct Backlog {
+    chunks: std::collections::VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+impl Backlog {
+    /// Hands the queue what fits. Err once the peer is gone.
+    fn flush(&mut self, tx: &mpsc::SyncSender<Vec<u8>>) -> Result<(), ()> {
+        while let Some(chunk) = self.chunks.pop_front() {
+            let len = chunk.len();
+            match tx.try_send(chunk) {
+                Ok(()) => self.bytes -= len,
+                Err(mpsc::TrySendError::Full(back)) => {
+                    self.chunks.push_front(back);
+                    return Ok(());
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return Err(()),
+            }
+        }
+        Ok(())
+    }
+
+    /// False once more than the budget is waiting.
+    fn push(&mut self, chunk: Vec<u8>) -> bool {
+        self.bytes += chunk.len();
+        self.chunks.push_back(chunk);
+        self.bytes <= OUTPUT_BACKLOG_BYTES
+    }
+
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Status for the Settings row
@@ -328,20 +372,42 @@ impl SessionHandler for Handler {
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(OUTPUT_QUEUE);
         let mut events = att.events;
         tauri::async_runtime::spawn(async move {
+            let mut backlog = Backlog::default();
             while !stop.load(Ordering::SeqCst) {
-                match tokio::time::timeout(BRIDGE_POLL, events.recv()).await {
+                if backlog.flush(&tx).is_err() {
+                    break;
+                }
+                let wait = if backlog.is_empty() {
+                    BRIDGE_POLL
+                } else {
+                    BACKLOG_POLL
+                };
+                match tokio::time::timeout(wait, events.recv()).await {
                     // Idle: look at `stop` again.
                     Err(_) => {}
                     Ok(Ok(PtyEvent::Data(chunk))) => {
-                        // Full or gone: end it. The peer re-attaches for a
+                        // Over budget: end it. The peer re-attaches for a
                         // fresh snapshot rather than get a gap.
-                        if tx.try_send(chunk.to_vec()).is_err() {
+                        if !backlog.push(chunk.to_vec()) {
                             break;
                         }
                     }
                     // The wire has no resize event; the size travels in the
                     // attach reply.
                     Ok(Ok(PtyEvent::Resize(..))) => {}
+                    // The terminal ended: its last output still goes out.
+                    Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        let deadline = Instant::now() + BACKLOG_DRAIN;
+                        while !backlog.is_empty()
+                            && !stop.load(Ordering::SeqCst)
+                            && Instant::now() < deadline
+                            && backlog.flush(&tx).is_ok()
+                        {
+                            tokio::time::sleep(BACKLOG_POLL).await;
+                        }
+                        break;
+                    }
+                    // Lagged: there is a gap, so a fresh snapshot instead.
                     Ok(Err(_)) => break,
                 }
             }
@@ -737,6 +803,35 @@ mod tests {
     use super::*;
     use canopy_term_net::session::SessionClient;
     use canopy_term_net::tailscale::fake::{status_running, whois_user, FakeRunner};
+
+    #[test]
+    fn a_full_queue_holds_output_back_instead_of_detaching() {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(2);
+        let mut backlog = Backlog::default();
+        for n in 0..5u8 {
+            assert!(backlog.push(vec![n; 1024]));
+            backlog.flush(&tx).unwrap();
+        }
+        assert_eq!(backlog.chunks.len(), 3);
+        // The peer catches up and gets the rest in order.
+        let mut seen = vec![rx.recv().unwrap()[0], rx.recv().unwrap()[0]];
+        backlog.flush(&tx).unwrap();
+        seen.extend(rx.try_iter().map(|c| c[0]));
+        backlog.flush(&tx).unwrap();
+        seen.extend(rx.try_iter().map(|c| c[0]));
+        assert_eq!(seen, vec![0, 1, 2, 3, 4]);
+        assert_eq!(backlog.bytes, 0);
+    }
+
+    #[test]
+    fn the_backlog_gives_up_past_its_budget_or_without_a_peer() {
+        let mut backlog = Backlog::default();
+        assert!(backlog.push(vec![0; OUTPUT_BACKLOG_BYTES]));
+        assert!(!backlog.push(vec![0; 1]));
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
+        drop(rx);
+        assert!(backlog.flush(&tx).is_err());
+    }
     use canopy_term_net::Connection;
     use std::collections::HashMap;
     use std::io::{Read, Write};

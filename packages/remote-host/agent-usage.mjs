@@ -1,4 +1,5 @@
 // Numeric usage only; never return prompt/tool contents or credentials.
+import {AGENT_HOME} from './paths.mjs';
 import {readdir,stat,open,readFile,realpath} from 'node:fs/promises';
 import path from 'node:path';
 import {opencodeUsageReader} from './opencode-usage.mjs';
@@ -32,7 +33,7 @@ export function foldUsage(row,value){
   }
  }
 }
-export function agentUsageReader(home='/home/agent'){
+export function agentUsageReader(home=AGENT_HOME){
  const opencode=opencodeUsageReader(home),cache=new Map(),profiles=new WorkspaceProfiles(home),requested=new Map();let listingAt=0,files=[],inflight,profileStamp='';
  // Bound traversal and retained readers separately. An old directory must not
  // fill the retained 256 slots before an active or recently updated session.

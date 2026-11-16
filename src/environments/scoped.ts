@@ -5,7 +5,7 @@
 // An id with no environment means the primary one (the host this window loaded
 // with), so anything persisted before environments existed loads unchanged.
 
-/** `targetKey(target)` from placement/types: "local", "remote:<id>", "t3:<id>". */
+/** `targetKey(target)` from placement/types: "local" or "remote:<id>". */
 export type EnvId = string;
 
 export interface Scoped<T extends string | number = string | number> {
