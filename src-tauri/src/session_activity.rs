@@ -150,6 +150,21 @@ fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     Some(text[start..end].trim())
 }
 
+/// Every `<name>…</name>` value in `text`, in order.
+fn tags<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(&open) {
+        let after = &rest[i + open.len()..];
+        let Some(e) = after.find(&close) else { break };
+        out.push(after[..e].trim());
+        rest = &after[e + close.len()..];
+    }
+    out
+}
+
 fn status_word(s: &str) -> &'static str {
     match s {
         "completed" | "success" | "done" => "done",
@@ -170,29 +185,49 @@ fn apply_notifications(st: &mut State, text: &str, at: Option<i64>) {
             .unwrap_or(block.len());
         let n = &block[..end];
         rest = &block[end..];
-        let id = tag(n, "tool-use-id")
+        // One notice can name several agents: after a restart Claude Code
+        // sends a single "didn't finish before the previous session ended"
+        // notice listing every lost agent's <task-id>, and no <tool-use-id>.
+        let mut ids: Vec<String> = Vec::new();
+        let named = tags(n, "tool-use-id")
+            .into_iter()
             .map(str::to_string)
-            .or_else(|| tag(n, "task-id").and_then(|t| st.by_agent.get(t).cloned()));
-        let Some(sub) = id.and_then(|id| st.by_id.get_mut(&id)) else {
-            continue;
-        };
-        if let Some(s) = tag(n, "status") {
-            sub.status = status_word(s).into();
+            .chain(
+                tags(n, "task-id")
+                    .into_iter()
+                    .filter_map(|t| st.by_agent.get(t).cloned()),
+            );
+        for id in named {
+            if st.by_id.contains_key(&id) && !ids.contains(&id) {
+                ids.push(id);
+            }
         }
-        if sub.status != "running" {
-            sub.ended_ms = at.or(sub.ended_ms);
-        }
-        let num = |name: &str| tag(n, name).and_then(|v| v.parse::<u64>().ok());
-        sub.duration_ms = num("duration_ms").or(sub.duration_ms);
-        sub.tokens = num("subagent_tokens").or(sub.tokens);
-        sub.tool_uses = num("tool_uses").or(sub.tool_uses);
-        // The report itself may come separately (an agent-message); a
-        // <result> that only points there is not a summary.
-        if sub.result.is_none() {
-            if let Some(r) = tag(n, "result").filter(|r| !r.contains("was delivered to you")) {
-                sub.result = summary(r);
-            } else if let Some(s) = tag(n, "summary") {
-                sub.result = summary(s);
+        let single = ids.len() == 1;
+        for id in &ids {
+            let Some(sub) = st.by_id.get_mut(id) else {
+                continue;
+            };
+            if let Some(s) = tag(n, "status") {
+                sub.status = status_word(s).into();
+            }
+            if sub.status != "running" {
+                sub.ended_ms = at.or(sub.ended_ms);
+            }
+            // A group notice carries no per-agent usage.
+            if single {
+                let num = |name: &str| tag(n, name).and_then(|v| v.parse::<u64>().ok());
+                sub.duration_ms = num("duration_ms").or(sub.duration_ms);
+                sub.tokens = num("subagent_tokens").or(sub.tokens);
+                sub.tool_uses = num("tool_uses").or(sub.tool_uses);
+            }
+            // The report itself may come separately (an agent-message); a
+            // <result> that only points there is not a summary.
+            if sub.result.is_none() {
+                if let Some(r) = tag(n, "result").filter(|r| !r.contains("was delivered to you")) {
+                    sub.result = summary(r);
+                } else if let Some(s) = tag(n, "summary") {
+                    sub.result = summary(s);
+                }
             }
         }
     }
@@ -541,6 +576,36 @@ mod tests {
         );
         assert_eq!(by("t_run").status, "running");
         assert!(by("t_run").background);
+    }
+
+    #[test]
+    fn one_notice_that_lists_several_lost_agents_ends_each_of_them() {
+        let launch = |tu: &str, agent: &str, d: &str| {
+            [
+                line(
+                    serde_json::json!({"type":"assistant","timestamp":"2026-11-01T10:00:00Z",
+                "message":{"content":[{"type":"tool_use","id":tu,"name":"Agent","input":{"description":d,"run_in_background":true}}]}}),
+                ),
+                line(
+                    serde_json::json!({"type":"user","timestamp":"2026-11-01T10:00:01Z",
+                "message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":"launched"}]},
+                "toolUseResult":{"status":"async_launched","agentId":agent}}),
+                ),
+            ]
+        };
+        let mut lines: Vec<String> = Vec::new();
+        lines.extend(launch("tu_a", "ag_a", "Build one"));
+        lines.extend(launch("tu_b", "ag_b", "Build two"));
+        lines.extend(launch("tu_c", "ag_c", "Still here"));
+        lines.push(line(serde_json::json!({"type":"queue-operation","timestamp":"2026-11-01T11:00:00Z",
+            "content":"<task-notification>\n<task-id>ag_a</task-id>\n<task-id>ag_b</task-id>\n<task-id>ag_gone</task-id>\n<status>failed</status>\n<summary>3 background agents didn't finish before the previous session ended</summary>\n</task-notification>"})));
+        let a = activity_from_lines(lines.iter().map(String::as_str));
+        let by = |id: &str| a.subagents.iter().find(|s| s.id == id).unwrap().clone();
+        assert_eq!(by("tu_a").status, "failed");
+        assert_eq!(by("tu_b").status, "failed");
+        assert!(by("tu_a").ended_ms.is_some());
+        assert!(by("tu_b").result.unwrap().contains("didn't finish"));
+        assert_eq!(by("tu_c").status, "running");
     }
 
     #[test]
