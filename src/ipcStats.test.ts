@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { onAppStats, onPtyStats, workspaceAppStats, type AppStats } from "./ipc";
+import { onAppStats, onPtyStats, workspaceAppStats, WORKSPACE_STATS_MISSES, type AppStats } from "./ipc";
 import { installHost } from "./host";
 import type {Host} from "./host/contract";
 import { mockCommands } from "./test/setup";
@@ -50,7 +50,7 @@ it("samples the selected workspace in the same resource subscription and stops w
  vi.useFakeTimers();let unavailable=false;const invoke=vi.fn(async command=>{if(command!=="workspace_metrics")throw Error("Local stats must not be read");if(unavailable)throw Error("offline");return {cpuPercent:12,memoryBytes:1024,memoryLimitBytes:2048,cpus:1,elasticCpu:{minCpus:1,maxCpus:4,currentCpus:1,availableMaxCpus:2,status:"steady",sampledAt:0}};});
  const restore=installHost({kind:"socket",invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host);
  const readings:AppStats[]=[];let stop:(()=>void)|undefined;
- try{stop=await onAppStats(s=>readings.push(s));await vi.advanceTimersByTimeAsync(0);expect(readings.at(-1)?.workspace?.available).toBe(true);expect(readings.at(-1)?.mem_bytes).toBe(1024);expect(readings.at(-1)?.workspace?.elasticCpu?.maxCpus).toBe(4);unavailable=true;await vi.advanceTimersByTimeAsync(2000);expect(readings.at(-1)?.workspace?.available).toBe(false);stop();stop=undefined;const calls=invoke.mock.calls.length;await vi.advanceTimersByTimeAsync(4000);expect(invoke.mock.calls.length).toBe(calls);}finally{stop?.();restore();}
+ try{stop=await onAppStats(s=>readings.push(s));await vi.advanceTimersByTimeAsync(0);expect(readings.at(-1)?.workspace?.available).toBe(true);expect(readings.at(-1)?.mem_bytes).toBe(1024);expect(readings.at(-1)?.workspace?.elasticCpu?.maxCpus).toBe(4);unavailable=true;await vi.advanceTimersByTimeAsync(2000);expect(readings.at(-1)?.workspace?.available,"one dropped poll is not a lost connection").toBe(true);await vi.advanceTimersByTimeAsync(2000*(WORKSPACE_STATS_MISSES-1));expect(readings.at(-1)?.workspace?.available).toBe(false);stop();stop=undefined;const calls=invoke.mock.calls.length;await vi.advanceTimersByTimeAsync(4000);expect(invoke.mock.calls.length).toBe(calls);}finally{stop?.();restore();}
 });
 
 it("adds this computer's free memory to the local app's footprint", async () => {
@@ -75,4 +75,10 @@ it("reads a workspace's working set, not memory.current, and keeps older hosts a
   const older = workspaceAppStats({ cpuPercent: 25, memoryBytes: 21, memoryLimitBytes: 28, cpus: 8 });
   expect(older.mem_bytes).toBe(21);
   expect(older.workspace && "workingSetBytes" in older.workspace).toBe(false);
+});
+
+it("marks a whole-machine reading, and only that one", () => {
+  const base = { cpuPercent: 5, memoryBytes: 1, memoryLimitBytes: 2, cpus: 4, workingSetBytes: 1 };
+  expect(workspaceAppStats({ ...base, scope: "machine" }).workspace?.scope).toBe("machine");
+  expect(workspaceAppStats(base).workspace?.scope).toBeUndefined();
 });
