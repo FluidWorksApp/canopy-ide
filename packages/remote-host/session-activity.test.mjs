@@ -33,6 +33,22 @@ test('foreground results, errors, running agents and compactions',()=>{
  assert.equal(a.context.tokens,11379);assert.equal(a.compactions[0].trigger,'manual');
 });
 
+test('one notice that lists several lost agents ends each of them',()=>{
+ const launch=(tu,agent,d)=>[
+  L({type:'assistant',timestamp:'2026-11-01T10:00:00Z',message:{content:[{type:'tool_use',id:tu,name:'Agent',input:{description:d,run_in_background:true}}]}}),
+  L({type:'user',timestamp:'2026-11-01T10:00:01Z',message:{content:[{type:'tool_result',tool_use_id:tu,content:'launched'}]},toolUseResult:{status:'async_launched',agentId:agent}}),
+ ];
+ const a=activityFromLines([
+  ...launch('tu_a','ag_a','Build one'),...launch('tu_b','ag_b','Build two'),...launch('tu_c','ag_c','Still here'),
+  L({type:'queue-operation',timestamp:'2026-11-01T11:00:00Z',content:'<task-notification>\n<task-id>ag_a</task-id>\n<task-id>ag_b</task-id>\n<task-id>ag_gone</task-id>\n<status>failed</status>\n<summary>3 background agents didn\'t finish before the previous session ended</summary>\n</task-notification>'}),
+ ]);
+ const by=id=>a.subagents.find(s=>s.id===id);
+ assert.equal(by('tu_a').status,'failed');assert.equal(by('tu_b').status,'failed');
+ assert.equal(by('tu_a').ended_ms,Date.parse('2026-11-01T11:00:00Z'));
+ assert.match(by('tu_b').result,/didn't finish/);
+ assert.equal(by('tu_c').status,'running');
+});
+
 test('found through the profile home, read incrementally, unknown CLIs answer nothing',async()=>{
  const home=await realpath(await mkdtemp(path.join(os.tmpdir(),'canopy-activity-')));
  try{
