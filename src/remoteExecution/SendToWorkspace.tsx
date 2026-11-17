@@ -5,31 +5,36 @@
 // phase 1: files only, no session move.
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui";
-import type { ManagedWorkspace } from "./ManagedWorkspaces";
-import { peekWorkspaceList, refreshWorkspaceList, restoreWorkspaceList, subscribeWorkspaceList } from "./workspaceListCache";
+import { peekMachines, reachableMachines, refreshMachines, restoreMachines, subscribeMachines, type Machine } from "../machines/inventory";
 import { ProjectSetupDialog } from "./ProjectSetupDialog";
 import { openTemporaryWorkspace, type TemporaryWorkspace } from "./temporaryWorkspace";
 
-/** Workspaces a project can be sent to: ready, and this account may connect. */
-export const sendTargets = (workspaces: readonly ManagedWorkspace[]): ManagedWorkspace[] =>
-  workspaces.filter((w) => w.state === "ready" && w.access?.canConnect !== false);
+/** Machines a project can be sent to: ready, and this account may connect.
+ *  Cloud workspaces and the person's own machines alike (machines/inventory.ts). */
+export const sendTargets = reachableMachines;
+
+/** The machines to offer: every reachable one except `here`, the workspace
+ *  this window is attached to (absent on this Mac). */
+export function otherMachines(machines: readonly Machine[], here?: string): Machine[] {
+  return reachableMachines(machines).filter((m) => m.id !== here);
+}
 
 let lastTargetsFetch = 0;
 /** Fetch the list at most once a minute however many callers ask. */
 function refreshTargetsSoon() {
   if (Date.now() - lastTargetsFetch < 60_000) return;
   lastTargetsFetch = Date.now();
-  void refreshWorkspaceList().catch(() => {});
+  void refreshMachines();
 }
-/** Whether there is any workspace this project could be sent to. Unknown counts
- *  as none, so the offer appears only once a ready workspace is seen. Checked
+/** Whether there is any machine this project could be sent to. Unknown counts
+ *  as none, so the offer appears only once a ready one is seen. Checked
  *  again when the window regains focus and when the account changes. */
-export function useHasSendTargets(): boolean {
-  const [has, setHas] = useState(() => sendTargets(peekWorkspaceList()?.workspaces ?? []).length > 0);
+export function useHasSendTargets(here?: string): boolean {
+  const [has, setHas] = useState(() => otherMachines(peekMachines(), here).length > 0);
   useEffect(() => {
-    const unsubscribe = subscribeWorkspaceList((snap) => setHas(sendTargets(snap.workspaces).length > 0));
-    void restoreWorkspaceList()
-      .then((snap) => { if (snap) setHas(sendTargets(snap.workspaces).length > 0); })
+    const unsubscribe = subscribeMachines((machines) => setHas(otherMachines(machines, here).length > 0));
+    void restoreMachines()
+      .then((machines) => setHas(otherMachines(machines, here).length > 0))
       .catch(() => {})
       .finally(refreshTargetsSoon);
     const onAccount = () => {
@@ -44,7 +49,7 @@ export function useHasSendTargets(): boolean {
       window.removeEventListener("focus", refreshTargetsSoon);
       window.removeEventListener("canopy:account-changed", onAccount);
     };
-  }, []);
+  }, [here]);
   return has;
 }
 
@@ -52,12 +57,15 @@ export function SendToWorkspace({
   projectId,
   projectName,
   components,
+  here,
 }: {
   projectId: string;
   projectName: string;
   components: { componentId: string; label: string }[];
+  /** The workspace this window is attached to, which is never offered. */
+  here?: string;
 }) {
-  const [workspaces, setWorkspaces] = useState<ManagedWorkspace[]>(() => sendTargets(peekWorkspaceList()?.workspaces ?? []));
+  const [workspaces, setWorkspaces] = useState<Machine[]>(() => otherMachines(peekMachines(), here));
   const [chosen, setChosen] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState("");
@@ -66,13 +74,17 @@ export function SendToWorkspace({
 
   useEffect(() => {
     let live = true;
-    void refreshWorkspaceList()
-      .then((r) => live && setWorkspaces(sendTargets(r.workspaces)))
-      .catch((e) => live && setError(`Could not read your workspaces: ${String((e as Error)?.message ?? e)}`));
+    void refreshMachines().then((r) => {
+      if (!live) return;
+      const machines = otherMachines(r.machines, here);
+      setWorkspaces(machines);
+      // The account being unreachable only matters when it leaves nothing to pick.
+      if (r.failure && machines.length === 0) setError(`Could not read your workspaces: ${r.failure}`);
+    });
     return () => {
       live = false;
     };
-  }, []);
+  }, [here]);
 
   // Always let go of the connection: it holds a heartbeat until disposed.
   useEffect(() => () => openRef.current?.dispose(), []);
@@ -101,6 +113,8 @@ export function SendToWorkspace({
         workspaceName={open.workspaceName}
         components={components}
         remoteInvoke={open.invoke}
+        target={open.connection}
+        root={open.root}
       />
     );
   }
@@ -110,7 +124,7 @@ export function SendToWorkspace({
       <p className="workspace-description">
         Choose a workspace to send {projectName} to. Your window stays here.
       </p>
-      {workspaces.length === 0 && !error && <p className="workspace-description" role="status">No workspace is running that you can connect to.</p>}
+      {workspaces.length === 0 && !error && <p className="workspace-description" role="status">No workspace or machine of yours is running that you can connect to.</p>}
       <div role="radiogroup" aria-label="Workspace" className="cpick-machine-options">
         {workspaces.map((w) => (
           <button
@@ -122,6 +136,7 @@ export function SendToWorkspace({
             onClick={() => setChosen(w.id)}
           >
             {w.name}
+            {w.kind === "own" && <span className="cpick-machine-kind"> · your machine</span>}
           </button>
         ))}
       </div>

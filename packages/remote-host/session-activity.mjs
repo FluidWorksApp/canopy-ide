@@ -16,6 +16,8 @@ const textOf=v=>{if(typeof v==='string')return v;if(!Array.isArray(v))return nul
 const summary=t=>{const f=String(t??'').split(/\s+/).filter(Boolean).join(' ');return f?chars(f,RESULT_CHARS):null;};
 const tsMs=v=>{const t=Date.parse(v?.timestamp??'');return Number.isFinite(t)?t:null;};
 const tag=(text,name)=>{const open=`<${name}>`,close=`</${name}>`;const s=text.indexOf(open);if(s<0)return null;const e=text.indexOf(close,s+open.length);return e<0?null:text.slice(s+open.length,e).trim();};
+/** Every `<name>…</name>` value in `text`, in order. */
+const tags=(text,name)=>{const open=`<${name}>`,close=`</${name}>`;const out=[];let from=0;for(let s=text.indexOf(open,from);s>=0;s=text.indexOf(open,from)){const e=text.indexOf(close,s+open.length);if(e<0)break;out.push(text.slice(s+open.length,e).trim());from=e+close.length;}return out;};
 const statusWord=s=>['completed','success','done'].includes(s)?'done':['failed','error'].includes(s)?'failed':['killed','stopped','cancelled'].includes(s)?'stopped':'running';
 const num=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0?Math.trunc(v):null;
 
@@ -25,12 +27,21 @@ function applyNotifications(st,text,at){
  let rest=text;
  for(let i=rest.indexOf('<task-notification>');i>=0;i=rest.indexOf('<task-notification>')){
   const block=rest.slice(i);const close=block.indexOf('</task-notification>');const end=close<0?block.length:close+20;const n=block.slice(0,end);rest=block.slice(end);
-  const id=tag(n,'tool-use-id')??st.byAgent.get(tag(n,'task-id')??'');const sub=id&&st.byId.get(id);if(!sub)continue;
-  const s=tag(n,'status');if(s)sub.status=statusWord(s);
-  if(sub.status!=='running')sub.ended_ms=at??sub.ended_ms;
-  const n2=k=>{const v=Number(tag(n,k));return tag(n,k)!=null&&Number.isFinite(v)?v:null;};
-  sub.duration_ms=n2('duration_ms')??sub.duration_ms;sub.tokens=n2('subagent_tokens')??sub.tokens;sub.tool_uses=n2('tool_uses')??sub.tool_uses;
-  if(sub.result==null){const r=tag(n,'result');if(r&&!r.includes('was delivered to you'))sub.result=summary(r);else{const s2=tag(n,'summary');if(s2)sub.result=summary(s2);}}
+  // One notice can name several agents: after a restart Claude Code sends a
+  // single "didn't finish before the previous session ended" notice listing
+  // every lost agent's <task-id>, and no <tool-use-id>.
+  const ids=[...new Set([...tags(n,'tool-use-id'),...tags(n,'task-id').map(t=>st.byAgent.get(t))].filter(id=>id&&st.byId.has(id)))];
+  for(const id of ids){
+   const sub=st.byId.get(id);
+   const s=tag(n,'status');if(s)sub.status=statusWord(s);
+   if(sub.status!=='running')sub.ended_ms=at??sub.ended_ms;
+   // A group notice carries no per-agent usage.
+   if(ids.length===1){
+    const n2=k=>{const v=Number(tag(n,k));return tag(n,k)!=null&&Number.isFinite(v)?v:null;};
+    sub.duration_ms=n2('duration_ms')??sub.duration_ms;sub.tokens=n2('subagent_tokens')??sub.tokens;sub.tool_uses=n2('tool_uses')??sub.tool_uses;
+   }
+   if(sub.result==null){const r=tag(n,'result');if(r&&!r.includes('was delivered to you'))sub.result=summary(r);else{const s2=tag(n,'summary');if(s2)sub.result=summary(s2);}}
+  }
  }
 }
 

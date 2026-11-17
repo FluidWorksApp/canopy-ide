@@ -9,10 +9,21 @@
 // (packages/remote-host/mirror-apply.mjs). Nothing here reads local files.
 import type {Project,WorkspaceState} from '../projects';
 import {newComponentId,newProjectId} from '../projects';
-import {remoteRoot} from './remoteRoot';
+import {DEFAULT_REMOTE_ROOT,remoteRoot} from './remoteRoot';
+// A named target without a reported folder is a managed host (/workspace), never the active workspace's folder.
+const rootOf=(deps:MirrorDeps)=>deps.root??(targetOf(deps)?DEFAULT_REMOTE_ROOT:remoteRoot());
+// Read when sending: a cloud credential is renewed in place while the dialog is open.
+const targetOf=(deps:MirrorDeps)=>typeof deps.target==='function'?deps.target():deps.target;
+const targetArgs=(deps:MirrorDeps)=>{const t=targetOf(deps);return t?{target:{endpoint:t.endpoint,token:t.token,workspaceId:t.workspaceId,workspaceName:t.workspaceName,...(t.scope?{scope:t.scope}:{})}}:{};};
 
 export type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
+/** The machine a short-lived connection copies to; without it the active workspace. */
+export interface MirrorTarget{endpoint:string;token:string;workspaceId:string;workspaceName:string;scope?:string}
 export interface MirrorDeps{local:Invoke;remote:Invoke;sleep?:(ms:number)=>Promise<void>;newId?:()=>string;now?:()=>number;
+ /** Set together with `remote` for a connection that is not the active workspace. */
+ target?:MirrorTarget|(()=>MirrorTarget|undefined);
+ /** That machine's workspace folder (from /open); the active workspace's when absent. */
+ root?:string;
  /** Stops the run between repositories and stops waiting on the current one. A setup already running in the workspace finishes there. */
  signal?:AbortSignal}
 export interface MirrorOptions{includeEnv:boolean;install:boolean}
@@ -78,7 +89,7 @@ export interface SendInput{id:string;path:string;projectId:string;componentId:st
 /** Package one repository on this Mac, upload it, apply it in the workspace and wait. `onStarted` fires once the workspace owns the staged files. */
 async function sendAndApply(deps:MirrorDeps,sleep:(ms:number)=>Promise<void>,repo:RepoResult,input:SendInput,onStarted:()=>void,emit:()=>void){
  repo.stage='Sending work in progress';emit();
- const sent=await deps.local<SendResult>('execution_mirror_send',{id:input.id,projectId:input.projectId,componentId:input.componentId,includeEnv:input.includeEnv,...(input.extraFiles?.length?{extraFiles:input.extraFiles}:{}),...(input.filesOnly?{filesOnly:true}:{})});
+ const sent=await deps.local<SendResult>('execution_mirror_send',{...targetArgs(deps),root:rootOf(deps),id:input.id,projectId:input.projectId,componentId:input.componentId,includeEnv:input.includeEnv,...(input.extraFiles?.length?{extraFiles:input.extraFiles}:{}),...(input.filesOnly?{filesOnly:true}:{})});
  // What stayed on the Mac (stashes, over-limit files, withheld credentials) is information, not a failure.
  repo.notes.push(...sent.sent.skipped);
  repo.stage='Applying';emit();
@@ -142,7 +153,7 @@ export async function runMirror(deps:MirrorDeps,options:MirrorOptions,onProgress
   if(already.has(projectId)){result.state='skipped';result.detail='Already set up in this workspace';emit();continue;}
   const ready=components.filter(c=>!c.error);
   if(!ready.length){result.state='skipped';result.detail=components.map(c=>`${c.label}: ${c.error}`).join('; ');emit();continue;}
-  const id=newProjectId(),parent=`${remoteRoot()}/${id}`;
+  const id=newProjectId(),parent=`${rootOf(deps)}/${id}`;
   const mirrored:{local:LocalComponent;path:string}[]=[];
   try{
    await deps.remote('fs_create_dir',{path:parent});
@@ -273,11 +284,11 @@ export async function ensureProjectOnRemote(deps:MirrorDeps,options:EnsureOption
   }
 
   // Fresh setup. Private clones need the Mac's GitHub login in the workspace.
-  try{await deps.local('execution_remote_import_git');}catch{/* public repositories still clone */}
+  try{await deps.local('execution_remote_import_git',targetArgs(deps));}catch{/* public repositories still clone */}
   let applies=true;
   try{await deps.remote('mirror_apply_status',{id:'00000000-0000-0000-0000-000000000000'});}
   catch(error){if(unsupported(error,'mirror_apply_status'))applies=false;}
-  const id=newProjectId(),parent=`${remoteRoot()}/${id}`;
+  const id=newProjectId(),parent=`${rootOf(deps)}/${id}`;
   const mirrored:{local:LocalComponent;path:string}[]=[];
   await deps.remote('fs_create_dir',{path:parent});
   let index=0;

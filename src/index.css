@@ -29916,6 +29916,149 @@ a.btn-sm {
   border-radius: 6px;
 }
 
+/* Waiting on you: the agent's unanswered questions, each drawn by the kind
+   of answer it takes. The count is the one loud thing on the card: it is what
+   the person is holding up. */
+.agent-card-asks-count,
+.agent-card-pill-waiting {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.agent-card-asks {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.agent-card-asks::-webkit-scrollbar {
+  display: none;
+}
+.agent-card-ask {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  border-radius: 8px;
+}
+.agent-card-ask + .agent-card-ask {
+  margin-top: 2px;
+}
+.agent-card-ask:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.agent-card-ask:hover .agent-card-task-x {
+  opacity: 1;
+}
+.agent-card-ask-q {
+  padding-right: 20px;
+  overflow-wrap: anywhere;
+}
+.agent-card-ask-kind {
+  margin-top: -3px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.agent-card-ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.agent-card-ask-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.agent-card-ask-option:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 32%, transparent);
+}
+.agent-card-ask-option.is-on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text);
+}
+.agent-card-ask-option:focus-visible,
+.agent-card-asks-send:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.agent-card-ask-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 11px;
+  width: 11px;
+  height: 11px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 1;
+}
+.agent-card-ask-text {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+.agent-card-ask-text:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.agent-card-asks-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px 6px;
+  font-size: 11px;
+}
+.agent-card-asks-send {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.agent-card-asks-send:disabled {
+  border-color: color-mix(in srgb, var(--text) 14%, transparent);
+  background: none;
+  color: var(--text-dim);
+  cursor: default;
+}
+
 /* Tasks: the bar is the split (done green, in progress orange, the empty
    track is what has not started); the legend repeats it in numbers. */
 .agent-card-tasks-legend {

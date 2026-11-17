@@ -94,6 +94,10 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_editor_state",
     "canopy_hover",
     "canopy_job_done",
+    "canopy_machine_copy",
+    "canopy_machine_run",
+    "canopy_machine_sync",
+    "canopy_machines",
     "canopy_mesh",
     "canopy_mesh_send",
     "canopy_mesh_submit",
@@ -131,6 +135,7 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_vault_list",
     "canopy_vault_read",
     "canopy_wait_for",
+    "canopy_workflow_run",
     "canopy_workspace",
     "canopy_workspace_agents",
     "canopy_workspace_git",
@@ -4918,6 +4923,12 @@ struct UiOp {
     /// given; every one of them answers for the whole workspace otherwise,
     /// which is the point of the companion having them at all.
     project: Option<String>,
+    /// machine: which machine-channel op (list, run, sync, copy, workflow) and
+    /// its arguments, relayed to the window as they are.
+    #[serde(rename = "machineOp")]
+    machine_op: Option<String>,
+    #[serde(rename = "machineArgs")]
+    machine_args: Option<serde_json::Value>,
     /// confirm: what the agent proposes to do, and the specifics the user needs
     /// in order to judge it.
     action: Option<String>,
@@ -5047,6 +5058,9 @@ const MAX_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600)
 /// conversation, or preparing a workspace for a fresh agent. Long enough to
 /// cover both, short enough that a window that never answers is not forever.
 const MESSAGE_PR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A machine-channel op can be a workflow of several long runs.
+const MACHINE_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3 * 60 * 60 + 60);
 
 async fn ui_op(
     State(app): State<tauri::AppHandle>,
@@ -5258,6 +5272,30 @@ async fn ui_op(
                 .unwrap_or(std::time::Duration::from_secs(120))
                 .min(MAX_ASK_TIMEOUT)
         }
+        // Run, sync or copy between the user's machines, or a whole workflow
+        // of those. The window always answers (a result or a reason), so this
+        // only has to outlast the longest workflow; the caller holds its own,
+        // tighter, per-op timeout.
+        "machine" => {
+            match op.machine_op.as_deref() {
+                Some("list" | "run" | "sync" | "copy" | "workflow") => {}
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown machine op: {}", other.unwrap_or("(none)")),
+                    )
+                }
+            }
+            // The repository worked on is the caller's own: a caller with no
+            // working directory (not a session) has none.
+            if who.cwd().is_none() {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent session can use the machine tools.".into(),
+                );
+            }
+            MACHINE_OP_TIMEOUT
+        }
         other => return (StatusCode::BAD_REQUEST, format!("unknown ui op: {other}")),
     };
 
@@ -5307,6 +5345,10 @@ async fn ui_op(
         "deleteBranch": op.delete_branch,
     });
     // Set apart from the literal above, which is at serde_json's macro limit.
+    if op.op == "machine" {
+        payload["machineOp"] = serde_json::json!(op.machine_op);
+        payload["machineArgs"] = op.machine_args.clone().unwrap_or(serde_json::Value::Null);
+    }
     payload["targetPtyId"] = serde_json::json!(op.target_pty_id);
     payload["replyTo"] = serde_json::json!(op.reply_to);
     payload["requestId"] = serde_json::json!(request_id);

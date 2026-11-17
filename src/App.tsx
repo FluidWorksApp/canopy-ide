@@ -64,6 +64,7 @@ import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
 import { startSystemOneSync } from "./systemOne";
 import { startRequestTasks } from "./requestTasks";
+import { startWaitingOnYou } from "./waitingOnYou";
 import { startAwareness } from "./awareness/engine";
 import { setCloudNoteSender, setCloudRosterProvider } from "./awareness/roster";
 import { isWorkspaceHost } from "./host";
@@ -122,6 +123,11 @@ import { remoteAttentionSnapshot } from "./remoteAttention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { runUiOp, type CompanionOps, type WorkspaceProject } from "./agentOps";
+import { handleMachineOp, relaySources } from "./machines/directory";
+import { peekMachines, savedMachines } from "./machines/inventory";
+import { AgentRelays } from "./machines/agentRelay";
+import { liveEnvironments } from "./environments/live";
+import { THIS_MAC } from "./machines/ops";
 import { startClaudeIdeBridge } from "./claudeIdeBridge";
 import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorkspace";
 import { companionName, summonCompanion } from "./companion";
@@ -328,6 +334,10 @@ const PROJECTLESS_OPS = new Set([
   // Teams chat names people and teams, never a place.
   "team_people",
   "team_send",
+  // The machine channel works on the repository the caller's folder is a
+  // checkout of, on whichever machine that is: a session on this computer
+  // while the window is on a workspace is in none of the window's projects.
+  "machine",
 ]);
 
 /** Ticket for one companion-requested session launch, so the ProjectView that
@@ -351,6 +361,7 @@ export default function App() {
   useEffect(() => startBackgroundTeams(), []);
   useEffect(() => startSystemOneSync(), []);
   useEffect(() => startRequestTasks(), []);
+  useEffect(() => startWaitingOnYou(), []);
   // Tab stays inside whichever modal layer is open.
   useEffect(() => installModalFocusTrap(), []);
   // Live device streaming ships with the app: fetch its pinned tools once, in
@@ -815,15 +826,64 @@ export default function App() {
   relayInboxRef.current = relayInbox;
   /** A question an agent put to the user (canopy_ask_user), held until they
    *  answer — the agent's tool call is parked on the other end of `resolve`. */
-  const [ask, setAsk] = useState<{
-    id: number;
-    /** The channel item this question posted, so answering resolves it rather
-     *  than leaving it in the waiting count for good. */
-    attentionId: string;
-    question: string;
-    options: string[];
-    resolve: (answer: string) => void;
-  } | null>(null);
+  const [askQueue, setAskQueue] = useState<
+    Array<{
+      id: number;
+      /** The channel item this question posted, so answering resolves it rather
+       *  than leaving it in the waiting count for good. */
+      attentionId: string;
+      question: string;
+      options: string[];
+      resolve: (answer: string) => void;
+    }>
+  >([]);
+  /** One dialog at a time, in the order asked. A second question used to
+   *  replace the first, whose agent then waited on an answer nobody could
+   *  give; with machines asking for consent too, that is no longer rare. */
+  const ask = askQueue[0] ?? null;
+  // Agents on another machine reach this window through that machine's relay
+  // (machines/agentRelay.ts): what they ask of the machine channel is carried
+  // out here, the one place connected to every machine. Agents on this
+  // computer come through the app's own bridge instead (`agent:ui` below).
+  const relayAskSeq = useRef(0);
+  useEffect(() => {
+    const relays = new AgentRelays({
+      handle: (op, source) =>
+        handleMachineOp(
+          { kind: op.machineOp, args: op.machineArgs, originId: source.id, cwd: op.cwd },
+          (question, options) =>
+            new Promise<string>((resolve) => {
+              const attentionId = postAttention({
+                kind: "question",
+                tone: "info",
+                title: question,
+                body: `An agent on ${source.name} is asking`,
+                source: "agent",
+                ...projectIdentity(op.cwd),
+                where: { kind: "project", path: op.cwd },
+              });
+              // Negative, so it can never be taken for one of the bridge's own.
+              const id = -++relayAskSeq.current;
+              setAskQueue((queue) => [...queue, { id, attentionId, question, options, resolve }]);
+            }),
+        ),
+    });
+    let cancelled = false;
+    const refresh = () => {
+      void relaySources()
+        .then((sources) => {
+          if (!cancelled) relays.set(sources);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const off = liveEnvironments.subscribe(refresh);
+    return () => {
+      cancelled = true;
+      off();
+      relays.stop();
+    };
+  }, [projectIdentity]);
   const relayIntentional = useRef(false);
   const prevRelayRole = useRef(relayStatus.role);
   useEffect(() => {
@@ -999,10 +1059,14 @@ export default function App() {
     resolve: resolveAttention,
     now: Date.now,
     newId: () => crypto.randomUUID(),
-    cloudWorkspaces: () => (peekWorkspaceList()?.workspaces ?? []).map((w) => ({ id: w.id, name: w.name, state: w.state })),
+    // Every machine work can go to: the account's cloud workspaces and the
+    // person's own canopy-host machines alike (machines/inventory.ts).
+    cloudWorkspaces: () => peekMachines().map((m) => ({ id: m.id, name: m.name, state: m.state })),
     // The list is otherwise filled only when a workspace panel opens; agents
     // asking where work can go must not depend on that.
     refreshCloudWorkspaces: async () => {
+      // Own machines are read from this computer, signed in or not.
+      await savedMachines().catch(() => undefined);
       const cached = peekWorkspaceList() ?? (await restoreWorkspaceList());
       if (!cached || Date.now() - cached.at > 60_000) await refreshWorkspaceList();
     },
@@ -3225,44 +3289,49 @@ export default function App() {
                 .then((rs) => [...new Set(rs.map((r) => r.path))])
                 .catch(() => [])
             : [];
+          // An agent's question, which until now was the one attention
+          // mechanism with no notification at all: a modal that existed only
+          // while you happened to be looking at Canopy, left no trace when
+          // answered, and never named the project it came from. The dialog
+          // stays — the agent is blocked, so interrupting is right — but the
+          // question also goes into the channel, where it is counted, it
+          // reaches the OS, and it survives as history.
+          const ask = (question: string, options: string[]) =>
+            new Promise<string>((resolve) => {
+              const attentionId = postAttention({
+                kind: "question",
+                tone: "info",
+                title: question,
+                body: "An agent is asking",
+                source: "agent",
+                ...projectIdentity(op.route),
+                where:
+                  op.ptyId != null
+                    ? { kind: "terminal", ptyId: op.ptyId, path: op.route }
+                    : { kind: "project", path: op.route },
+              });
+              const item = {
+                id: op.id,
+                attentionId,
+                question,
+                options,
+                // An answer to an agent running a plan is a decision the
+                // plan did not foresee: it goes on the plan (plans/planStore).
+                resolve: (answer: string) => {
+                  resolve(answer);
+                  void notePlanQuestionAnswered({ ptyId: op.ptyId, route: op.route, question, options, answer }).catch(() => {});
+                },
+              };
+              setAskQueue((queue) => [...queue, item]);
+            });
           const data = await runUiOp(op, {
             roots,
             repos,
             inbox: relayInboxRef.current,
-            // An agent's question, which until now was the one attention
-            // mechanism with no notification at all: a modal that existed only
-            // while you happened to be looking at Canopy, left no trace when
-            // answered, and never named the project it came from. The dialog
-            // stays — the agent is blocked, so interrupting is right — but the
-            // question also goes into the channel, where it is counted, it
-            // reaches the OS, and it survives as history.
-            ask: (question, options) =>
-              new Promise<string>((resolve) => {
-                const attentionId = postAttention({
-                  kind: "question",
-                  tone: "info",
-                  title: question,
-                  body: "An agent is asking",
-                  source: "agent",
-                  ...projectIdentity(op.route),
-                  where:
-                    op.ptyId != null
-                      ? { kind: "terminal", ptyId: op.ptyId, path: op.route }
-                      : { kind: "project", path: op.route },
-                });
-                setAsk({
-                  id: op.id,
-                  attentionId,
-                  question,
-                  options,
-                  // An answer to an agent running a plan is a decision the
-                  // plan did not foresee: it goes on the plan (plans/planStore).
-                  resolve: (answer) => {
-                    resolve(answer);
-                    void notePlanQuestionAnswered({ ptyId: op.ptyId, route: op.route, question, options, answer }).catch(() => {});
-                  },
-                });
-              }),
+            ask,
+            // The machine channel: this bridge only ever speaks for sessions
+            // on this computer, so that is where the request comes from.
+            machine: (kind, args, cwd) => handleMachineOp({ kind, args, originId: THIS_MAC, cwd }, ask),
             // The companion's cross-project handlers, read through a ref so
             // this long-lived listener always calls the current ones without
             // re-subscribing on every workspace change. Absent when the
@@ -4719,7 +4788,7 @@ export default function App() {
           onAnswer={(answer) => {
             ask.resolve(answer);
             resolveAttention(ask.attentionId, "answered");
-            setAsk(null);
+            setAskQueue((queue) => queue.filter((item) => item !== ask));
           }}
         />
       )}

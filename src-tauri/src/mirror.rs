@@ -13,7 +13,17 @@
 //!                   by one (execution_mirror_candidates lists them)
 //! and uploads them to /workspace/.canopy-mirror/<id>/, where the workspace's
 //! mirror job (packages/remote-host/mirror-apply.mjs) applies them.
-use crate::client_mode::{execution_remote_get, RemoteConnectionState};
+use crate::client_mode::{execution_remote_get, RemoteConnection, RemoteConnectionState};
+
+/// Where the workspace expects the upload: `{root}/.canopy-mirror/{id}`, matching
+/// mirror-apply.mjs. No root means /workspace (managed and Docker hosts).
+fn mirror_staging(root: Option<&str>, id: &str) -> Result<String, String> {
+    let raw = root.unwrap_or("/workspace");
+    if !raw.starts_with('/') || raw.contains('\0') || raw.split('/').any(|p| p == "..") {
+        return Err("Invalid workspace folder".into());
+    }
+    Ok(format!("{}/.canopy-mirror/{id}", raw.trim_end_matches('/')))
+}
 use crate::git::{git, run};
 use crate::remote_upload::{claim_upload, remote, send_file};
 use crate::winproc::NoConsoleWindow;
@@ -721,11 +731,22 @@ pub async fn execution_mirror_send(
     include_env: bool,
     extra_files: Option<Vec<String>>,
     files_only: Option<bool>,
+    target: Option<RemoteConnection>,
+    root: Option<String>,
 ) -> Result<serde_json::Value, String> {
     if !valid_id(&id) {
         return Err("Invalid setup identifier".into());
     }
-    let connection = execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?;
+    let staging = mirror_staging(root.as_deref(), &id)?;
+    // A short-lived connection (Send to workspace, Run on another machine) names its own
+    // target; without one the upload goes to the active workspace, as before.
+    let connection = match target {
+        Some(target) => {
+            crate::client_mode::check_connection(&target)?;
+            target
+        }
+        None => execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?,
+    };
     if connection.scope.as_deref() == Some("view") {
         return Err("This workspace connection is view-only".into());
     }
@@ -765,7 +786,6 @@ pub async fn execution_mirror_send(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "Upload connection unavailable")?;
-    let staging = format!("/workspace/.canopy-mirror/{id}");
     remote(
         &client,
         &connection,
@@ -797,6 +817,22 @@ pub async fn execution_mirror_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_follows_the_workspace_folder_the_host_reports() {
+        let id = "6186b8f2-9811-48fe-b449-c64a5914d57e";
+        assert_eq!(
+            mirror_staging(None, id).unwrap(),
+            format!("/workspace/.canopy-mirror/{id}")
+        );
+        assert_eq!(
+            mirror_staging(Some("/home/me/work/"), id).unwrap(),
+            format!("/home/me/work/.canopy-mirror/{id}")
+        );
+        assert!(mirror_staging(Some("relative"), id).is_err());
+        assert!(mirror_staging(Some("/home/../etc"), id).is_err());
+        assert!(mirror_staging(Some("/home/me\0x"), id).is_err());
+    }
 
     fn sh(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

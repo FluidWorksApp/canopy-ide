@@ -935,7 +935,14 @@ export interface AgentUiOp {
     // Teams chat, open to every agent: who is on the user's teams, and
     // posting a message there as the user.
     | "team_people"
-    | "team_send";
+    | "team_send"
+    // The machine channel, open to every agent: run, sync and copy between
+    // the user's machines, and the repository's workflows (machines/ops.ts).
+    | "machine";
+  /** machine: which op (list, run, sync, copy, workflow) and its arguments,
+   *  as the agent gave them. Validated in machines/ops.ts. */
+  machineOp?: string | null;
+  machineArgs?: Record<string, unknown> | null;
   route: string;
   /** Agent terminal that initiated the operation, when there is one. For
    *  mesh_submit and mesh_message_cloud the bridge stamps it from the
@@ -2981,6 +2988,11 @@ let resourceStatsTimer: number | undefined;
 let latestPtyStats: SessionStats[] | undefined;
 let latestAppStats: AppStats | undefined;
 const RESOURCE_STATS_POLL_MS = 2_000;
+/** Failed workspace polls in a row before the status bar says "unavailable":
+ *  a busy workspace turns background polls away now and then (requestQueue),
+ *  and one dropped reading is not a lost connection. */
+export const WORKSPACE_STATS_MISSES = 3;
+let workspaceStatsMisses = 0;
 
 const pollResourceStats = async () => {
   if (!resourceStatsPolling) return;
@@ -2998,11 +3010,12 @@ const pollResourceStats = async () => {
         ? await invoke<WorkspaceResourceStats>("workspace_metrics").then(workspaceAppStats)
         : await desktopAppStats();
       if (stats) {
+        workspaceStatsMisses = 0;
         latestAppStats = stats;
         for (const subscriber of [...appStatsSubscribers]) subscriber(stats);
       }
     } catch {
-      if (isRemoteHost()) {
+      if (isRemoteHost() && ++workspaceStatsMisses >= WORKSPACE_STATS_MISSES) {
         const unavailable = workspaceAppStats(null);
         latestAppStats = unavailable;
         for (const subscriber of [...appStatsSubscribers]) subscriber(unavailable);
@@ -3235,6 +3248,9 @@ export interface AppStats {
    *  fields are absent from workspaces running an older host. */
   workspace?: {
     available: boolean;
+    /** "machine" when the workspace is a whole computer (an own-machine host,
+     *  no container): the figures are that computer's. */
+    scope?: "workspace" | "machine";
     memoryLimitBytes: number | null;
     cpus: number | null;
     elasticMemory?: ElasticWorkspaceMemory | null;
@@ -3289,6 +3305,7 @@ export interface ElasticWorkspaceMemory {
 }
 
 export interface WorkspaceResourceStats {
+  scope?: "workspace" | "machine";
   cpuPercent: number | null;
   memoryBytes: number;
   memoryLimitBytes: number | null;
@@ -3309,7 +3326,7 @@ export function workspaceAppStats(sample: WorkspaceResourceStats | null): AppSta
   const workingSet = typeof sample?.workingSetBytes === "number" ? sample.workingSetBytes : undefined;
   return { cpu: sample?.cpuPercent ?? NaN, mem_bytes: workingSet ?? sample?.memoryBytes ?? NaN,
     procs: 0, includes_webviews: true,
-    workspace: { available: sample !== null, memoryLimitBytes: sample?.memoryLimitBytes ?? null, cpus: sample?.cpus ?? null, elasticMemory: sample?.elasticMemory ?? null, elasticCpu: sample?.elasticCpu ?? null,
+    workspace: { available: sample !== null, ...(sample?.scope === "machine" ? { scope: "machine" as const } : {}), memoryLimitBytes: sample?.memoryLimitBytes ?? null, cpus: sample?.cpus ?? null, elasticMemory: sample?.elasticMemory ?? null, elasticCpu: sample?.elasticCpu ?? null,
       ...(workingSet !== undefined ? {
         memoryBytes: sample!.memoryBytes, workingSetBytes: workingSet,
         availableBytes: sample!.availableBytes ?? null, reclaimableBytes: sample!.reclaimableBytes ?? null,

@@ -14,6 +14,10 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { nativeHost } from "../host/native";
 import type { Host } from "../host/contract";
 import { NativeWorkspaceHost, type WorkspaceConnection } from "./NativeWorkspaceHost";
+import { RemoteExecutionClient } from "./client";
+import type { MirrorTarget } from "./mirror";
+import { normalizeRemoteRoot } from "./remoteRoot";
+import { ownMachineSavedId } from "../machines/inventory";
 
 export type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -26,6 +30,10 @@ export interface TemporaryWorkspace {
   host?: Host;
   /** Whether the credential is view-only. */
   readOnly: boolean;
+  /** The current credential, for the copy step's upload; read it when sending, since it is renewed in place. */
+  connection?: () => MirrorTarget;
+  /** Its workspace folder when the host reports one (canopy-host); else the default. */
+  root?: string;
   dispose: () => void;
 }
 
@@ -33,6 +41,9 @@ export interface TemporaryDeps {
   connect: (workspaceId: string, clientId: string) => Promise<WorkspaceConnection>;
   clientId: (workspaceId: string) => string;
   makeHost: (connection: WorkspaceConnection, desktop: Host) => Pick<NativeWorkspaceHost, "invoke" | "dispose"> & Partial<Host>;
+  /** The saved connection to open instead, when the workspace is the person's
+   *  own machine (a canopy-host link): the account cannot issue it a credential. */
+  ownSavedId?: (workspaceId: string) => Promise<string | null>;
 }
 
 /** The desktop side of a temporary host: everything native as usual, except the
@@ -72,14 +83,48 @@ const defaultDeps: TemporaryDeps = {
   },
   clientId: stableClientId,
   makeHost: (connection, desktop) => new NativeWorkspaceHost(connection, desktop),
+  ownSavedId: (workspaceId) => ownMachineSavedId(workspaceId),
 };
 
+/** A short-lived connection to any machine in the inventory (machines/inventory.ts):
+ *  a cloud workspace through the account, the person's own machine through the
+ *  link saved on this Mac. Every "other machine" feature opens one here, so
+ *  none of them needs to know which kind it is talking to. */
 export async function openTemporaryWorkspace(workspaceId: string, deps: TemporaryDeps = defaultDeps): Promise<TemporaryWorkspace> {
+  const savedId = deps.ownSavedId ? await deps.ownSavedId(workspaceId).catch(() => null) : null;
+  if (savedId) return openSavedMachine(savedId, { ...savedDeps, makeHost: deps.makeHost });
   const connection = await deps.connect(workspaceId, deps.clientId(workspaceId));
-  const host = deps.makeHost(connection, guardedDesktop());
+  return wrap(connection, deps.makeHost(connection, guardedDesktop()));
+}
+
+export interface SavedMachineDeps {
+  saved: (id: string) => Promise<WorkspaceConnection | null>;
+  open: (connection: WorkspaceConnection) => Promise<{ root?: unknown }>;
+  makeHost: TemporaryDeps["makeHost"];
+}
+
+const savedDeps: SavedMachineDeps = {
+  saved: (id) => tauriInvoke<WorkspaceConnection | null>("execution_remote_saved_connection", { id }),
+  open: (c) => new RemoteExecutionClient(c.endpoint, c.token).workspace<{ root?: unknown }>(c.workspaceId, "/open", { resume: true }),
+  makeHost: defaultDeps.makeHost,
+};
+
+/** A machine saved from a canopy-host link, without switching the window to it. Its
+ *  credential comes from this Mac's store; /open starts its runner and reports its folder. */
+export async function openSavedMachine(savedId: string, deps: SavedMachineDeps = savedDeps): Promise<TemporaryWorkspace> {
+  const connection = await deps.saved(savedId);
+  if (!connection) throw new Error("This machine is no longer saved on this Mac.");
+  const opened = await deps.open(connection);
+  return wrap(connection, deps.makeHost(connection, guardedDesktop()), normalizeRemoteRoot(opened?.root));
+}
+
+function wrap(connection: WorkspaceConnection, host: ReturnType<TemporaryDeps["makeHost"]>, root?: string): TemporaryWorkspace {
+  const workspaceId = connection.workspaceId;
   let closed = false;
   return {
     workspaceId,
+    connection: () => ({ endpoint: connection.endpoint, token: connection.token, workspaceId, workspaceName: connection.workspaceName, ...(connection.scope ? { scope: connection.scope } : {}) }),
+    ...(root ? { root } : {}),
     workspaceName: connection.workspaceName || workspaceId,
     ...(typeof host.listen === "function" && typeof host.channel === "function" ? { host: host as unknown as Host } : {}),
     readOnly: host.readOnly === true,

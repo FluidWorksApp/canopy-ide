@@ -32,6 +32,8 @@ import {agentUsageReader} from './agent-usage.mjs';
 import {metricsReader,sessionUsage} from './workspace-metrics.mjs';
 import {writeWorkspaceFile} from './file-write.mjs';
 import {WorkspaceUploads} from './file-upload.mjs';
+import {scratchFile} from './scratch-files.mjs';
+import {machineRelay} from './machine-relay.mjs';
 import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
 import {agentWorkspaceCommands} from './agent-workspace.mjs';
 import {gitOpsCommands} from './git-ops.mjs';
@@ -82,6 +84,16 @@ export async function scoped(value,create=false){
 }
 async function scopedFile(value,create=false){
  return resolveWorkspacePath(value,{scratch:'/scratch',create});
+}
+// A file the IDE may read: one in the workspace, or an agent's scratch file
+// (its CLI's scratchpad under the temp folder, Canopy's session files), which
+// the agent card lists as Assets. Read only: every write still goes through
+// scopedFile (scratch-files.mjs). `workspaceOnly` is what the gateway stamps on
+// a viewer's read (readonly-native.mjs): they were shown the workspace, not
+// the machine.
+async function readableFile(value,workspaceOnly=false){
+ try{return await scopedFile(value);}
+ catch(error){if(workspaceOnly||!/outside selected workspace/.test(String(error?.message)))throw error;return scratchFile(value,HOME);}
 }
 
 const cloneJobs=new CloneJobs({scoped});
@@ -209,6 +221,10 @@ export async function nativeInvoke(command,args={}){
   // Proof receipts: the workspace re-runs checks itself (src/receipts/).
   if(command==='receipt_run_check')return receiptRunCheck(args,{scoped,home:HOME});
   if(command==='receipt_check_start')return receiptCheckStart(args,{scoped,home:HOME});
+  // The window collecting what this machine's agents asked of the machine
+  // channel, and answering (machine-relay.mjs).
+  if(command==='machine_relay_poll')return (await machineRelay()).poll(args);
+  if(command==='machine_relay_result')return (await machineRelay()).result(args);
   if(command==='receipt_check_status')return receiptCheckStatus(args);
   if(command==='receipt_isolate')return receiptIsolate(args,{scoped,home:HOME});
   if(command==='receipt_release')return receiptRelease(args,{scoped});
@@ -284,7 +300,7 @@ export async function nativeInvoke(command,args={}){
   }
   if(command==='store_save'){const parsed=JSON.parse(args.data);if(!Array.isArray(parsed.projects))throw Error('Invalid projects');for(const project of parsed.projects)for(const component of project.components??[])await scoped(component.path);await saveMetadata('ide-projects.json',parsed);return;}
   if(command==='fs_read_dir'){const directory=await scoped(target);const entries=await readdir(directory,{withFileTypes:true});if(entries.length>4096)throw Error('Directory too large');return entries.map(e=>({name:e.name,path:path.join(directory,e.name),is_dir:e.isDirectory(),is_symlink:e.isSymbolicLink()}));}
-  if(command==='fs_read_file'){const bytes=await boundedRead(await scopedFile(target),Math.min(args.maxBytes??1048576,1048576));return {b64:bytes.toString('base64')};}
+  if(command==='fs_read_file'){const bytes=await boundedRead(await readableFile(target,args.workspaceOnly===true),Math.min(args.maxBytes??1048576,1048576));return {b64:bytes.toString('base64')};}
   // A bounded slice of a file, for reads larger than one answer (a note image).
   if(command==='fs_read_range'){
    const offset=Number(args.offset??0),length=Math.min(Number(args.length??1048576),1048576);if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<0)throw Error('Invalid file range');
@@ -305,7 +321,7 @@ export async function nativeInvoke(command,args={}){
   }
   if(command==='fs_rename'){await rename(await scoped(args.from??args.oldPath),await scoped(args.to??args.newPath,true));return args.to??args.newPath;}
   if(command==='fs_duplicate'){const destination=args.destination??args.path+'.copy';await cp(await scoped(args.path),await scoped(destination,true),{recursive:true,dereference:false,errorOnExist:true,force:false});return destination;}
-  if(command==='fs_stat'||command==='fs_stat_many'){const inspect=async p=>{const x=await stat(await scopedFile(p));return {path:p,is_dir:x.isDirectory(),size:x.size,modified_ms:x.mtimeMs};};return command==='fs_stat'?inspect(target):Promise.all((args.paths??[]).slice(0,512).map(inspect));}
+  if(command==='fs_stat'||command==='fs_stat_many'){const inspect=async p=>{const x=await stat(await readableFile(p,args.workspaceOnly===true));return {path:p,is_dir:x.isDirectory(),size:x.size,modified_ms:x.mtimeMs};};return command==='fs_stat'?inspect(target):Promise.all((args.paths??[]).slice(0,512).map(inspect));}
   if(command==='fs_list_files'||command==='fs_search'){
     if(!Array.isArray(args.roots)||args.roots.length>64)throw Error('Choose project component folders');
     const roots=[...new Set(await Promise.all(args.roots.map(root=>scoped(root))))];

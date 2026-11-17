@@ -236,12 +236,8 @@ fn is_tailnet_name(host: &str) -> bool {
     })
 }
 
-#[tauri::command(async)]
-pub fn execution_remote_set(
-    app: tauri::AppHandle,
-    state: tauri::State<RemoteConnectionState>,
-    connection: RemoteConnection,
-) -> Result<(), String> {
+/// A connection the app may send a token to: https, or http to loopback or a tailnet name.
+pub(crate) fn check_connection(connection: &RemoteConnection) -> Result<(), String> {
     let endpoint =
         reqwest::Url::parse(&connection.endpoint).map_err(|_| "Invalid host endpoint")?;
     let loopback = matches!(
@@ -263,6 +259,16 @@ pub fn execution_remote_set(
     {
         return Err("Invalid remote workspace connection".into());
     }
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn execution_remote_set(
+    app: tauri::AppHandle,
+    state: tauri::State<RemoteConnectionState>,
+    connection: RemoteConnection,
+) -> Result<(), String> {
+    check_connection(&connection)?;
     let mut all = saved_connections()?;
     all.retain(|c| connection_id(c) != connection_id(&connection));
     if all.len() >= 64 {
@@ -360,6 +366,11 @@ pub struct SavedWorkspace {
     endpoint: String,
     workspace_id: String,
     workspace_name: String,
+    /// Connected from a canopy-host link: cloud connections carry an account key or expiry.
+    own: bool,
+}
+fn is_own_machine(c: &RemoteConnection) -> bool {
+    c.credential_account_key.is_none() && c.expires_at.is_none()
 }
 #[tauri::command(async)]
 pub fn execution_remote_list() -> Result<Vec<SavedWorkspace>, String> {
@@ -367,11 +378,19 @@ pub fn execution_remote_list() -> Result<Vec<SavedWorkspace>, String> {
         .into_iter()
         .map(|c| SavedWorkspace {
             id: connection_id(&c),
+            own: is_own_machine(&c),
             endpoint: c.endpoint,
             workspace_id: c.workspace_id,
             workspace_name: c.workspace_name,
         })
         .collect())
+}
+/// One saved machine's connection, for a short-lived connection that leaves the window where it is.
+#[tauri::command(async)]
+pub fn execution_remote_saved_connection(id: String) -> Result<Option<RemoteConnection>, String> {
+    Ok(saved_connections()?
+        .into_iter()
+        .find(|c| connection_id(c) == id))
 }
 #[tauri::command(async)]
 pub fn execution_remote_forget(
@@ -937,8 +956,16 @@ fn not_updated(result: &serde_json::Value, sent: &[String]) -> Vec<String> {
 pub async fn execution_remote_import_git(
     app: tauri::AppHandle,
     state: tauri::State<'_, RemoteConnectionState>,
+    target: Option<RemoteConnection>,
 ) -> Result<serde_json::Value, String> {
-    let connection = execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?;
+    // A short-lived connection names its own target; otherwise the active workspace.
+    let connection = match target {
+        Some(target) => {
+            check_connection(&target)?;
+            target
+        }
+        None => execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?,
+    };
     let gh = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
         .into_iter()
         .find(|bin| Path::new(bin).is_file())
@@ -1352,6 +1379,46 @@ mod credential_thread_tests {
             checked >= 6,
             "expected the credential-store commands, found {checked}"
         );
+    }
+}
+
+#[cfg(test)]
+mod own_machine_tests {
+    use super::{check_connection, is_own_machine, RemoteConnection};
+
+    fn connection(endpoint: &str) -> RemoteConnection {
+        RemoteConnection {
+            endpoint: endpoint.into(),
+            token: "synthetic-token-0123456789abcdef".into(),
+            workspace_id: "work-0a1b2c3d".into(),
+            workspace_name: "box".into(),
+            scope: None,
+            client_id: None,
+            expires_at: None,
+            credential_account_key: None,
+        }
+    }
+
+    #[test]
+    fn tokens_go_only_to_https_loopback_or_tailnet_names() {
+        assert!(check_connection(&connection("http://127.0.0.1:8787")).is_ok());
+        assert!(check_connection(&connection("http://box.tail1234.ts.net:8787")).is_ok());
+        assert!(check_connection(&connection("https://vm.example")).is_ok());
+        assert!(check_connection(&connection("http://vm.example:8787")).is_err());
+        let mut short = connection("http://127.0.0.1:8787");
+        short.token = "short".into();
+        assert!(check_connection(&short).is_err());
+    }
+
+    #[test]
+    fn a_pasted_link_is_an_own_machine_and_an_account_connection_is_not() {
+        assert!(is_own_machine(&connection("http://127.0.0.1:8787")));
+        let mut cloud = connection("https://w1.workspaces.example");
+        cloud.credential_account_key = Some("account".into());
+        assert!(!is_own_machine(&cloud));
+        let mut expiring = connection("https://w1.workspaces.example");
+        expiring.expires_at = Some("2026-11-16T00:00:00Z".into());
+        assert!(!is_own_machine(&expiring));
     }
 }
 

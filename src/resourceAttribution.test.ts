@@ -40,6 +40,11 @@ describe("attributeUsage", () => {
     ]);
   });
 
+  it("on an own machine, what terminals don't use is the rest of that computer", () => {
+    const rows = attributeUsage([], { workingSetBytes: 2 * GB, cpusUsed: 1, wholeMachine: true }, "u-me");
+    expect(rows.find((r) => r.kind === "services")?.label).toBe("Rest of this computer");
+  });
+
   it("lists teammates' own runtimes on the machine after this workspace's rows", () => {
     const rows = attributeUsage([], { workingSetBytes: 2 * GB, cpusUsed: 1 }, "u-me", [
       { kind: "workspace", memberId: null, name: null, workingSetBytes: 5 * GB, cpusUsed: null },

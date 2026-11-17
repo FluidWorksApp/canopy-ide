@@ -1,4 +1,6 @@
 import {readFile} from 'node:fs/promises';
+import os from 'node:os';
+import {parseMeminfo,parseProcStat} from './machine-metrics.mjs';
 export function cpuPercent(previous,current,cpus){
  if(!previous||current.time<=previous.time||current.usage<previous.usage)return null;
  return Math.max(0,Math.min(100,(current.usage-previous.usage)/((current.time-previous.time)*1000*cpus)*100));
@@ -31,10 +33,37 @@ export function memoryFigures(current,limit,stat){
  const breakdown=stat&&Number.isFinite(stat.anon)&&Number.isFinite(stat.file)?{anonBytes:stat.anon,fileBytes:Math.max(0,stat.file-(stat.shmem??0)),shmemBytes:stat.shmem??0,kernelBytes:kernel,activeFileBytes:stat.active_file??null,inactiveFileBytes:stat.inactive_file??null}:null;
  return {workingSetBytes:workingSet,availableBytes:limit==null?null:Math.max(0,limit-workingSet),reclaimableBytes:reclaimable,memoryBreakdown:breakdown};
 }
-export function metricsReader(read=readFile,now=()=>performance.now()){
+/** The whole machine as the workspace: what an own-machine host (canopy-host,
+ *  a plain process with no container) reports. Its cgroup is the machine's
+ *  root, which has no memory.current, memory.max or cpu.max. */
+function machineReader(read,cores){
  let previous;
  return async()=>{
-  const [memory,limit,cpu,quota]=await Promise.all(['memory.current','memory.max','cpu.stat','cpu.max'].map(file=>read('/sys/fs/cgroup/'+file,'utf8')));
+  const [meminfo,stat]=await Promise.all([read('/proc/meminfo','utf8'),read('/proc/stat','utf8')]);
+  const memory=parseMeminfo(meminfo),cpu=parseProcStat(stat),cpus=cores();
+  const delta=previous&&cpu.total>previous.total&&cpu.busy>=previous.busy?(cpu.busy-previous.busy)/(cpu.total-previous.total):null;previous=cpu;
+  const used=Math.max(0,memory.totalBytes-memory.availableBytes),cpusUsedNow=delta==null?null:delta*cpus;
+  return {
+   memoryBytes:used,memoryLimitBytes:memory.totalBytes,cpuPercent:delta==null?null:Math.min(100,delta*100),cpus,scope:'machine',sampledAt:Date.now(),
+   workingSetBytes:used,availableBytes:memory.availableBytes,reclaimableBytes:null,memoryBreakdown:null,
+   cpusUsed:cpusUsedNow,cpusAvailable:cpusUsedNow==null?null:Math.max(0,cpus-cpusUsedNow),
+  };
+ };
+}
+const missing=error=>error?.code==='ENOENT';
+export function metricsReader(read=readFile,now=()=>performance.now(),cores=()=>os.availableParallelism?.()??os.cpus().length){
+ let previous,machine;
+ return async()=>{
+  if(machine)return machine();
+  let files;
+  try{files=await Promise.all(['memory.current','memory.max','cpu.stat','cpu.max'].map(file=>read('/sys/fs/cgroup/'+file,'utf8')));}
+  catch(error){
+   // Only a missing file means "no container": any other failure inside a
+   // container must not report the whole VM as the workspace.
+   if(!missing(error))throw error;
+   machine=machineReader(read,cores);return machine();
+  }
+  const [memory,limit,cpu,quota]=files;
   // Optional: a kernel or runtime without memory.stat still reports totals.
   const stat=await Promise.resolve().then(()=>read('/sys/fs/cgroup/memory.stat','utf8')).then(parseMemoryStat,()=>null);
   const parts=quota.trim().split(/\s+/),cpus=parts[0]==='max'?null:Number(parts[0])/Number(parts[1]);

@@ -253,6 +253,7 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `execution_remote_forget` | a | Invoked through `@tauri-apps/api/core` directly: desktop account / workspace switcher plumbing. |
 | `execution_remote_import_accounts` | a | Invoked through `@tauri-apps/api/core` directly: desktop account / workspace switcher plumbing. |
 | `execution_remote_list` | a | Invoked through `@tauri-apps/api/core` directly: desktop account / workspace switcher plumbing. |
+| `execution_remote_saved_connection` | a | Invoked through `@tauri-apps/api/core` directly: one saved machine's connection, for a short-lived connection (Send to workspace, Run on) |
 | `execution_remote_login_prepare` | a | Invoked through `@tauri-apps/api/core` directly: desktop account / workspace switcher plumbing. |
 | `fs_repo_path` | c | Host: `git-ops.mjs` (mirrors git.rs / sync.rs / fsx.rs) |
 | `fs_reveal` | d | A VM path cannot be shown in this computer's file manager. Menu items hidden in a workspace (GitPanel, FileView); relay downloads use fsRevealDesktop. |

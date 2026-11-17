@@ -7,7 +7,7 @@ import { isRemoteHost } from "../host";
 import { loadWorkspace } from "../projects";
 import { activeWorkspace } from "../remoteExecution/workspace";
 import { probeSessions, runningSessions } from "../remoteExecution/workspaceProbe";
-import { peekWorkspaceList, refreshWorkspaceList } from "../remoteExecution/workspaceListCache";
+import { refreshMachines } from "../machines/inventory";
 import { localRemoteJobs } from "../meshJobs";
 import { collectResources, type ResourceSources } from "./resources";
 import { canonicalProjects, type ProjectLike } from "./identity";
@@ -19,16 +19,24 @@ const LOCAL_CAPACITY = 6;
 const failureMessage = (source: string, error: unknown) =>
   `Could not read ${source}: ${String((error as { message?: string })?.message ?? error)}`;
 
+/** The machine this window is attached to, when it is not this Mac. */
+function activeMachine() {
+  const connection = isRemoteHost() ? activeWorkspace()?.connection : undefined;
+  return connection
+    ? { workspaceId: connection.workspaceId, workspaceName: connection.workspaceName, endpoint: connection.endpoint }
+    : null;
+}
+
+/** Cloud workspaces and the person's own machines (machines/inventory.ts). The
+ *  machine a window is on is always in the list: it is connected, so it is a
+ *  place to launch even when no source names it. A failed account read keeps
+ *  whatever could be read and is reported beside it. */
 async function discoverWorkspaces() {
-  const cached = peekWorkspaceList();
-  try {
-    return { remoteWorkspaces: (await refreshWorkspaceList()).workspaces, failure: null };
-  } catch (error) {
-    return {
-      remoteWorkspaces: cached?.workspaces ?? [],
-      failure: failureMessage("connected workspaces", error),
-    };
-  }
+  const { machines, failure } = await refreshMachines(activeMachine());
+  return {
+    remoteWorkspaces: machines,
+    failure: failure ? failureMessage("connected workspaces", failure) : null,
+  };
 }
 
 async function discoverInventory() {
