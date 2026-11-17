@@ -25,7 +25,7 @@ import {runtimeAuthority} from './runtime-authority.mjs';
 import {hostReport} from './host-release.mjs';
 import {startHostAdmin,HOST_ADMIN_SOCKET} from './host-admin.mjs';
 import {memberAuthority} from './member-authority.mjs';
-import {authorizeNativeRead} from './readonly-native.mjs';
+import {viewerNativePayload} from './readonly-native.mjs';
 import {runnerRequestId} from './runner-harness.mjs';
 import {memberRuntime} from './member-runtime.mjs';
 import {memberRenewal} from './member-renewal.mjs';
@@ -343,8 +343,8 @@ export function createGateway({ config, workspaces, origins = [], cpus = os.avai
         tickets.issue(ticket, { principalId: principal.id, principalFingerprint:principal.tokenSha256, expiresAt:principal.expiresAt, memberPrincipal:principal.memberId?principal:undefined, bearer:principal.memberId?request.headers.authorization:undefined, workspaceId, stream: args.stream });
         return json(response, 200, { ticket });
       }
-      const nativePayload=operation==='/native'&&request.method==='POST'?await body(request):undefined;
-      if(operation==='/native'){if(request.method!=='POST')throw Error('Unsupported native method');if(principal.scope==='view')authorizeNativeRead(nativePayload?.command);else authorize(config,principal,workspaceId,'drive');}
+      let nativePayload=operation==='/native'&&request.method==='POST'?await body(request):undefined;
+      if(operation==='/native'){if(request.method!=='POST')throw Error('Unsupported native method');if(principal.scope==='view')nativePayload=viewerNativePayload(nativePayload);else authorize(config,principal,workspaceId,'drive');}
       if(principal.memberId&&principal.scope==='view'&&operation==='/sessions')return json(response,200,[]);
       const opening=operation==='/open'&&request.method==='POST'?await body(request,4096):{};
       if(opening.resume===true&&(!principal.memberId||principal.scope!=='view'))authorize(config,principal,workspaceId,'drive');

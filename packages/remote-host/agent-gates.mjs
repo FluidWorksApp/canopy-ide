@@ -167,7 +167,7 @@ export async function gatesInstalled(agent,root,home,helper){
 // as setup_*_mcp in agents.rs does: a JSON map for Cursor, Antigravity,
 // oh-my-pi, Kiro and OpenCode, Amp's dotted `amp.mcpServers` key, and Grok's TOML
 // (the Codex section form, edited as text so the user's comments survive).
-export const FORWARDED_ENV=['CANOPY_CTX_PORT','CANOPY_CTX_TOKEN','CANOPY_CTX_SOCKET','CANOPY_PTY','CANOPY_INSTANCE','CANOPY_PROFILE','CANOPY_RUN_ID','CANOPY_ATTEMPT_ID','CANOPY_PLAN_ID','CANOPY_MICRO_TASK','CANOPY_VIBE','CANOPY_RESEARCH','CANOPY_RESEARCH_DIR','CANOPY_WRITE_ROOT','CANOPY_COMPANION','CANOPY_COMPANION_AUTHORITY','CANOPY_COMPANION_POLICY'];
+export const FORWARDED_ENV=['CANOPY_CTX_PORT','CANOPY_CTX_TOKEN','CANOPY_CTX_SOCKET','CANOPY_RELAY_SOCKET','CANOPY_RELAY_TOKEN','CANOPY_PTY','CANOPY_INSTANCE','CANOPY_PROFILE','CANOPY_RUN_ID','CANOPY_ATTEMPT_ID','CANOPY_PLAN_ID','CANOPY_MICRO_TASK','CANOPY_VIBE','CANOPY_RESEARCH','CANOPY_RESEARCH_DIR','CANOPY_WRITE_ROOT','CANOPY_COMPANION','CANOPY_COMPANION_AUTHORITY','CANOPY_COMPANION_POLICY'];
 const isCanopyMcp=entry=>{const c=entry?.command;const cmd=typeof c==='string'?c:Array.isArray(c)&&typeof c[0]==='string'?c[0]:null;return !!cmd&&cmd.includes('canopy-hook');};
 const registered=(changed,agent)=>changed?`Canopy MCP server registered — new ${agent} sessions get canopy_* context tools`:'Canopy MCP server already registered';
 const MCP={

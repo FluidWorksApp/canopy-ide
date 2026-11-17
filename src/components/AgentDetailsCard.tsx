@@ -33,6 +33,8 @@ import { openRemoteFile } from "../environments/remoteFiles";
 import { collectAssets, previewAssets, type Asset } from "../agentAssets";
 import { AssetPreview } from "./AssetPreview";
 import { requestTasksFor, subscribeRequestTasks } from "../requestTasks";
+import { WaitingOnYou } from "./WaitingOnYou";
+import { openAsksFor, subscribeAsks } from "../waitingOnYou";
 import { AgentIcon, GitBranchIcon, TasksIcon } from "./icons";
 import type { Life } from "../../shared/agentLife";
 
@@ -667,6 +669,8 @@ export function AgentDetailsCard({
     (t) => !hiddenTasks.includes(t.text),
   );
   const summary = summarizeTasks(tasks);
+  // Questions the agent asked that are still unanswered (waitingOnYou.ts).
+  const waiting = useSyncExternalStore(subscribeAsks, () => openAsksFor(digest?.session_id ?? "")).length;
   const cli = agentCliFor(agent);
   const ws = activeWorkspace();
   const machine = remoteMachine
@@ -709,12 +713,19 @@ export function AgentDetailsCard({
         onClick={() => toggle(false)}
         aria-label="Show agent details"
         title={
-          summary.total
-            ? `Tasks ${summary.done}/${summary.total}`
-            : "Agent details"
+          waiting
+            ? `Waiting on you: ${waiting} unanswered`
+            : summary.total
+              ? `Tasks ${summary.done}/${summary.total}`
+              : "Agent details"
         }
       >
         <AgentIcon id={agent} size={14} />
+        {waiting > 0 && (
+          <span className="agent-card-pill-waiting" aria-label={`${waiting} waiting on you`}>
+            {waiting}
+          </span>
+        )}
         {summary.total > 0 && (
           <span className="agent-card-pill-count">
             {summary.done}/{summary.total}
@@ -1311,6 +1322,14 @@ export function AgentDetailsCard({
         )
       )}
       </div>
+
+      <WaitingOnYou
+        sessionId={digest?.session_id ?? ""}
+        canAct={canAct}
+        actHint={actHint}
+        onSend={onSendToAgent}
+        onNotice={onNotice}
+      />
 
       <div className="agent-card-section">
       <button

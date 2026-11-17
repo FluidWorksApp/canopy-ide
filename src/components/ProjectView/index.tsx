@@ -12,7 +12,8 @@ import { useAllWorkspaces } from "../../remoteExecution/allMode";
 import { connectMachine } from "../../environments/live";
 import { closedKey, machineBadge, parseMachineSessions, rememberableTab, sessionsNeedingTabs, THIS_MAC_ENV, withoutClosed, workspacesToJoin } from "../../environments/allWorkspaceTabs";
 import { routeOf } from "../../environments/ptyRoute";
-import { peekWorkspaceList } from "../../remoteExecution/workspaceListCache";
+import { peekMachines, savedMachines } from "../../machines/inventory";
+import { repoResolver, reposOf, sessionsInRepos, type RepoMachine } from "../../machines/repoIdentity";
 import { setPendingLaunch, takePendingLaunch, type PendingLaunch } from "../../placement/pendingLaunch";
 import { canonicalProjectId } from "../../placement/identity";
 import type { DisplayTarget, Preference, Target } from "../../placement/types";
@@ -26,7 +27,7 @@ import {
   withoutLiveSessions,
 } from "../../terminalRecovery";
 import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
-import {isReadOnlyHost,isRemoteHost,isWorkspaceHost} from "../../host";
+import {invoke as hostInvoke,isReadOnlyHost,isRemoteHost,isWorkspaceHost} from "../../host";
 import { reconnectDiagnostic } from "../../reconnectDiagnostic";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
 import {AccountChatView,type AccountConversation} from "../AccountChatView";
@@ -616,6 +617,7 @@ import {
 } from "../../settledSessions";
 import {
   buildSnapshot,
+  snapshotTabs,
   terminalLaunch,
   wakeSteps,
   writeHibernation,
@@ -623,6 +625,7 @@ import {
   HIBERNATED_EVENT,
   type SnapshotTab,
 } from "../../hibernation";
+import { pinnedDocuments, pinsToRestore, rememberPinnedTabs, rememberedPinnedTabs } from "../../pinnedTabs";
 import {
   forgetTerminals,
   rememberTerminals,
@@ -759,6 +762,11 @@ import {
   documentResourceActive,
   shouldReuseInactiveDocumentPane,
 } from "../../documentResourceActive";
+
+/** Said when a workspace's host refuses a file outside its folder. An agent's
+ *  scratch files are the exception a current host makes; an older one has none. */
+const OUTSIDE_WORKSPACE =
+  "it is outside this workspace's folder. An agent's scratch files open once canopy-host on that machine is up to date.";
 export { tabDisplayLabel, previewLabel, deviceLabel };
 export type {
   SideTab,
@@ -1910,7 +1918,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [onNotice, project.id],
   );
   const [sendOpen, setSendOpen] = useState(false);
-  const hasSendTargets = useHasSendTargets();
+  const hasSendTargets = useHasSendTargets(activeWorkspace()?.connection.workspaceId);
   // A Claude agent being moved to a workspace (teleport): the tab it runs in
   // and the session, folder and state it had when the person asked.
   const [teleport, setTeleport] = useState<{ tabId: string; sessionId: string; cwd: string; idle: boolean } | null>(null);
@@ -1971,6 +1979,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Sessions whose tab the person closed here. The refresh below must not add
   // them back while they keep running on their machine.
   const closedViaAllRef = useRef(new Set<string>());
+  const componentPathsRef = useRef<string[]>([]);
+  componentPathsRef.current = project.components.map((c) => c.path).filter(Boolean);
   useEffect(() => {
     if (!visible) return;
     if (!allWorkspaces) {
@@ -1985,11 +1995,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
       return;
     }
     let live = true;
+    // What joins this project's strip is decided by the git repository and
+    // nothing else (machines/repoIdentity.ts): a terminal on another machine
+    // belongs here when its folder is a checkout of a repository this project
+    // has a checkout of. Project names, ids and folder layouts differ from
+    // machine to machine; the origin does not. A terminal outside any
+    // repository belongs to no project and is left on its own machine.
+    const projectRepos = () => {
+      const here: RepoMachine = {
+        env: isRemoteHost() ? `remote:${activeWorkspace()?.connection.workspaceId ?? "active"}` : THIS_MAC_ENV,
+        invoke: hostInvoke,
+        desktop: !isRemoteHost(),
+      };
+      return reposOf(here, componentPathsRef.current);
+    };
     // One machine's live terminals, each given a tab and attached right away:
     // the person chose this mode, so nothing waits on a button.
     const addFrom = async (
-      machine: { env: string; name: string; invoke: <T>(command: string) => Promise<T> },
+      machine: { env: string; name: string; invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>; desktop?: boolean },
       reconnect: (env: string, sessionId: number) => ReturnType<typeof remoteTabReconnect>,
+      repos: Awaited<ReturnType<typeof projectRepos>>,
     ) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const raw = await Promise.race([
@@ -1997,11 +2022,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), 10_000); }),
       ]).finally(() => clearTimeout(timer));
       if (!live) return;
-      const need = sessionsNeedingTabs(
+      const candidates = sessionsNeedingTabs(
         machine.env,
         withoutClosed(machine.env, parseMachineSessions(raw), closedViaAllRef.current),
         tabsRef.current,
       );
+      if (candidates.length === 0) return;
+      const mine = await sessionsInRepos(candidates, repos, (dir) => repoResolver.repoOf(machine, dir));
+      if (!live) return;
+      // Asked again after the wait: a pass that overlapped this one may have
+      // given some of them a tab meanwhile.
+      const need = sessionsNeedingTabs(machine.env, mine, tabsRef.current);
       if (need.length === 0) return;
       const added = need.map((session) => ({
         id: tabId(),
@@ -2045,28 +2076,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
         syncing = false;
       }
     };
+    // A machine that did not answer is left alone for a minute: the person's
+    // own machine may simply be off, and asking every pass would keep a
+    // connection attempt permanently in flight.
+    const unreachableUntil = new Map<string, number>();
     const syncOnce = async () => {
+      const repos = await projectRepos().catch(() => []);
+      // A project that is no checkout of anything has nothing to be joined by.
+      if (!live || repos.length === 0) return;
       // While a workspace is this window's own machine, this Mac is just
       // another machine: its terminals join the strip like any other's.
       if (isWorkspaceHost()) {
         try {
           joinThisMac();
           await addFrom(
-            { env: THIS_MAC_ENV, name: "This Mac", invoke: (command) => nativeHost.invoke(command) },
+            { env: THIS_MAC_ENV, name: "This Mac", invoke: (command, args) => nativeHost.invoke(command, args), desktop: true },
             (_env, sessionId) => localTabReconnect(sessionId),
+            repos,
           );
         } catch {
           /* This Mac could not be read; the strip stays as it is. */
         }
       }
-      const running = workspacesToJoin(peekWorkspaceList()?.workspaces ?? [], activeWorkspace()?.connection.workspaceId);
+      // Cloud workspaces and the person's own machines alike (machines/inventory.ts).
+      await savedMachines();
+      if (!live) return;
+      const running = workspacesToJoin(peekMachines(), activeWorkspace()?.connection.workspaceId);
       for (const workspace of running) {
+        if ((unreachableUntil.get(workspace.id) ?? 0) > Date.now()) continue;
         try {
           const machine = await connectMachine(workspace.id);
-          await addFrom(machine, (env, sessionId) => remoteTabReconnect(env, sessionId));
+          unreachableUntil.delete(workspace.id);
+          await addFrom(machine, (env, sessionId) => remoteTabReconnect(env, sessionId), repos);
         } catch {
-          /* A workspace that cannot be read adds nothing; the strip stays as it is. */
+          /* A machine that cannot be read adds nothing; the strip stays as it is. */
+          unreachableUntil.set(workspace.id, Date.now() + 60_000);
         }
+        if (!live) return;
       }
     };
     void sync();
@@ -2413,6 +2459,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           killAttachedOnClose: killOnClose || undefined,
           icon: predecessor.icon ?? icon,
           command: presentation?.command,
+          ...(predecessor.pinned ? { pinned: true } : {}),
         }));
         if (activate || activeTabIdRef.current === predecessor.id) setActiveTabId(id);
         return id;
@@ -2460,6 +2507,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           rememberedSessionId: identity.sessionId,
           componentId: presentation?.componentId,
           runCommandId: presentation?.runCommandId,
+          // The pin is the person's standing choice: a restart must not undo it.
+          ...(saved?.pinned ? { pinned: true } : {}),
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -3238,6 +3287,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           t.rememberedSessionId ??
           undefined,
         profile: t.profile,
+        ...(t.pinned ? { pinned: true } : {}),
       }));
     rememberTerminals(project.id, open, terminalGroups, terminalMemoryScope);
   }, [tabs, terminalGroups, project.id, events, thisInstance, terminalMemoryScope]);
@@ -3341,9 +3391,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // A name the user chose outlives the pty that held it: it comes back in
       // its own slot, and the spawn callback re-asserts it on the new session.
       restoreTerminalNames(id, t);
+      if (t.pinned) patchTabRaw(id, { pinned: true } as Partial<SubTab>);
       return id;
     },
-    [addTerminal, restoreTerminalNames],
+    [addTerminal, restoreTerminalNames, patchTabRaw],
   );
 
   const resumeSession = useCallback(
@@ -8359,6 +8410,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // Outside every project folder: every open path asks for that one
           // file here, so no click site can forget to. Native code decides.
           if (!String(err).includes("outside")) throw err;
+          // On a workspace its host decides: it reads an agent's scratch files
+          // itself (scratch-files.mjs), and a grant made on this computer
+          // would be for a file that is not on it.
+          if (isRemoteHost()) throw new Error(OUTSIDE_WORKSPACE);
           await ipc.fsGrantLinkFile(path);
           return ipc.fsStat(path);
         });
@@ -8388,7 +8443,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         console.warn("open failed", path, err);
         // The grant's own refusal (setting off, credentials) says why; pass it on.
         const why = String(err).replace(/^Error:\s*/, "");
-        const refusal = /Settings → Privacy|credentials|private data/.test(why);
+        const refusal = /Settings → Privacy|credentials|private data/.test(why) || why === OUTSIDE_WORKSPACE;
         onNotice(
           `Can't open ${basename(path)} — ${
             refusal ? why : "it may have been moved or deleted."
@@ -9169,7 +9224,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   /** Rebuild one snapshotted tab and answer with its id, so the tab that was in
    *  front can be found again once the whole strip is back. */
-  const restoreTab = useCallback(
+  const restoreTabUnpinned = useCallback(
     async (t: SnapshotTab): Promise<string | null> => {
       const push = (tab: SubTab) => {
         setTabs((prev) => [...prev, tab]);
@@ -9334,6 +9389,65 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [addTerminal, patchFile, patchTabRaw, ticketRepo, restoreTerminalNames],
   );
+  /** `restoreTabUnpinned`, then the pin: a terminal re-asserts its own above;
+   *  every other kind (a file, a pull request, a list) gets it here. */
+  const restoreTab = useCallback(
+    async (t: SnapshotTab): Promise<string | null> => {
+      const id = await restoreTabUnpinned(t);
+      if (id && t.kind !== "terminal" && t.pinned) patchTabRaw(id, { pinned: true } as Partial<SubTab>);
+      return id;
+    },
+    [restoreTabUnpinned, patchTabRaw],
+  );
+
+  // Pinned tabs that are not terminals survive a restart (pinnedTabs.ts).
+  // Terminals come back through terminal memory with their pin; these would
+  // otherwise be gone. Restored once, the first time the project is shown,
+  // and never while it wakes from sleep: the snapshot brings its own pins.
+  const pinsRestored = useRef(false);
+  const lastPinsWritten = useRef<string | null>(null);
+  useEffect(() => {
+    if (pinsRestored.current || !visible) return;
+    if (restore) {
+      pinsRestored.current = true;
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const front = activeTabIdRef.current;
+      const missing = pinsToRestore(
+        rememberedPinnedTabs(project.id, terminalMemoryScopeRef.current),
+        snapshotTabs(tabsRef.current),
+      );
+      for (const tab of missing) {
+        if (cancelled) return;
+        try {
+          await restoreTab({ ...tab, pinned: true });
+        } catch (error) {
+          // One pin that cannot come back (a deleted file) must not cost the rest.
+          console.warn("pinned tab not restored", tab.kind, error);
+        }
+      }
+      if (cancelled) return;
+      // Bringing pins back is not a reason to move the person: whatever was in
+      // front stays in front.
+      if (missing.length && front && tabsRef.current.some((t) => t.id === front)) setActiveTabId(front);
+      pinsRestored.current = true;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, restore, restoreTab, project.id]);
+  useEffect(() => {
+    // Nothing is written until the remembered pins are back: an early write
+    // would record the still-empty strip and erase them.
+    if (!pinsRestored.current) return;
+    const pinned = pinnedDocuments(snapshotTabs(tabs));
+    const text = JSON.stringify(pinned);
+    if (text === lastPinsWritten.current) return;
+    lastPinsWritten.current = text;
+    rememberPinnedTabs(project.id, pinned, terminalMemoryScope);
+  }, [tabs, project.id, terminalMemoryScope]);
 
   // Wake: rebuild the workspace step by step while the frost (rendered by App,
   // above this view) stays put. In snapshot order, so the strip comes back
@@ -16628,6 +16742,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               projectId={project.id}
               projectName={project.name}
               components={project.components.map((component) => ({ componentId: component.id, label: component.label }))}
+              here={activeWorkspace()?.connection.workspaceId}
             />
           }
         />

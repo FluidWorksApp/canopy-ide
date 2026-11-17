@@ -102,8 +102,8 @@ function machineSessionIdOf(t: { ptyId: number | null; reconnect?: { sessionId: 
   return t.ptyId != null ? (routeOf(t.ptyId)?.id) : undefined;
 }
 
-export type SnapshotTab =
-  | TerminalSnapshot
+/** A tab that is not a terminal: a document, a list, a page. */
+export type DocumentSnapshot =
   | { kind: "file"; path: string; view: "preview" | "source" | "diff" }
   | { kind: "preview"; url: string }
   | { kind: "pr"; repo: string; pr: ipc.PrInfo }
@@ -130,6 +130,11 @@ export type SnapshotTab =
   | { kind: "mcp"; server: ipc.McpServer }
   | { kind: "claim"; claim: ipc.AgentClaim }
   | { kind: "chat"; peer: string | null; name: string };
+
+export type SnapshotTab =
+  | TerminalSnapshot
+  /** Pinned to the front of the strip; restored pinned. */
+  | (DocumentSnapshot & { pinned?: boolean });
 
 export interface ProjectSnapshot {
   version: 1;
@@ -174,6 +179,23 @@ export function snapshotTabs(
 ): SnapshotTab[] {
   const out: SnapshotTab[] = [];
   for (const t of tabs) {
+    const before = out.length;
+    snapshotOne(t, out, sessionFor, agentFor);
+    // A terminal records its own pin (snapshotOne); every other kind gets it here, so
+    // a pinned file or pull request wakes (and restarts) pinned too.
+    const added = out.length > before ? out[out.length - 1] : undefined;
+    if (added && added.kind !== "terminal" && (t as { pinned?: unknown }).pinned === true) added.pinned = true;
+  }
+  return out;
+}
+
+function snapshotOne(
+  t: SubTab,
+  out: SnapshotTab[],
+  sessionFor: (ptyId: number) => string | undefined,
+  agentFor: (ptyId: number) => string | undefined,
+): void {
+  {
     switch (t.type) {
       case "terminal": {
         if (t.micro) break;
@@ -308,7 +330,6 @@ export function snapshotTabs(
         break;
     }
   }
-  return out;
 }
 
 /** Build the whole snapshot. `activeTabId` is resolved against the tabs that

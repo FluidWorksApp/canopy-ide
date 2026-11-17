@@ -32,6 +32,7 @@ mod devicehub_proxy;
 #[cfg(feature = "dictation")]
 mod dictation;
 mod execution;
+mod machine_channel;
 mod mirror;
 mod privacy;
 mod remote_download;
@@ -810,6 +811,8 @@ pub fn run() {
             ledger::ledger_root,
             ledger::ledger_update_status,
             receipt::receipt_run_check,
+            machine_channel::machine_file_read,
+            machine_channel::machine_file_write,
             receipt::receipt_isolate,
             receipt::receipt_release,
             session_doc::session_transcript_tail,

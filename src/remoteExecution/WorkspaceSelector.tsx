@@ -25,6 +25,7 @@ import './workspace.css';
 import {WorkspacePanel} from './WorkspacePanel';
 import {WorkspaceProgress,type WorkspaceProgressState} from './WorkspaceProgress';
 import {peekWorkspaceList,refreshWorkspaceList} from './workspaceListCache';
+import {ownMachineSavedId} from '../machines/inventory';
 import {connectionLabel,useSettledConnectionState} from './connectionState';
 import {WorkspaceMenu,type WorkspaceMenuRow} from './WorkspaceMenu';
 import {AccountSync} from './AccountSync';
@@ -69,7 +70,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     setBusy(true);setError('');
     try{await invoke('canopy_account_request',{route:'/api/workspaces',body:{action:'remove-connection',id:target.id,confirmName:accountRemovalName}});
       if(epoch!==accountRemovalEpoch.current)return;
-      if(selected?.managedId===target.id)await invoke('execution_remote_forget',{id:selected.savedId??selected.id});
+      if(selected?.managedId===target.id)await invoke('execution_remote_forget',{id:selected.savedId??selected.id});window.dispatchEvent(new Event('canopy:machines-changed'));
       setManaged(items=>items.filter(item=>item.id!==target.id));setSaved(items=>items.filter(item=>item.workspaceId!==target.id&&!item.id.endsWith('/'+target.id)));setSelectedId('local');setAccountRemoval(null);setNotice('Connection removed. The VM, disks, files and usage history are kept.');void refreshWorkspaceList().catch(()=>{});
       if(active?.connection.workspaceId===target.id)await setExecutionMode('local');
     }catch(error){if(epoch===accountRemovalEpoch.current)setError(String(error));}finally{if(epoch===accountRemovalEpoch.current)setBusy(false);}
@@ -77,7 +78,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   async function forgetConnection(){
     if(!selected||!canSwitchExecutionMode()){setError('Save or close unsaved files before removing this connection.');return;}
     setBusy(true);setError('');
-    try{if(selectedActive)await setExecutionMode('local');await invoke('execution_remote_forget',{id:selected.savedId??selected.id});setSaved(items=>items.filter(item=>item.id!==(selected.savedId??selected.id)));setSelectedId('local');setForgetConfirm(false);}
+    try{if(selectedActive)await setExecutionMode('local');await invoke('execution_remote_forget',{id:selected.savedId??selected.id});window.dispatchEvent(new Event('canopy:machines-changed'));setSaved(items=>items.filter(item=>item.id!==(selected.savedId??selected.id)));setSelectedId('local');setForgetConfirm(false);}
     catch(error){setError(String(error));}finally{setBusy(false);}
   }
   const [hibernateConfirm,setHibernateConfirm]=useState(false);
@@ -175,9 +176,21 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     // soon as its list has it. Only if the account really doesn't list it
     // does the panel open, to say so.
     if(detail.connect){
-     setOpenRequest({id,nonce:Date.now()});
-     const missing=()=>{setError('Your account doesn’t list this workspace. Ask its owner to share it with you, then open the link again.');setOpen(true);};
-     if(!known)void refreshWorkspaceList().then(result=>{if(!result.workspaces.some(w=>w.id===id))missing();},missing);
+     const fromAccount=()=>{
+      setOpenRequest({id,nonce:Date.now()});
+      const missing=()=>{setError('Your account doesn’t list this workspace. Ask its owner to share it with you, then open the link again.');setOpen(true);};
+      if(!known)void refreshWorkspaceList().then(result=>{if(!result.workspaces.some(w=>w.id===id))missing();},missing);
+     };
+     if(known){fromAccount();return;}
+     // The person's own machine (a canopy-host link): the account does not
+     // list it, so it opens from the connection saved on this Mac, exactly as
+     // picking it from the menu does.
+     void ownMachineSavedId(id).catch(()=>null).then(async savedId=>{
+      if(!savedId){fromAccount();return;}
+      if(!canSwitchExecutionMode()){setError('Save or close unsaved files before changing workspace.');setOpen(true);return;}
+      try{await invoke('execution_remote_activate',{id:savedId});await setExecutionMode('remote');}
+      catch(e){setError(String((e as {message?:string})?.message??e));setOpen(true);}
+     });
      return;
     }
     showDetails();
@@ -206,6 +219,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     const client = new RemoteExecutionClient(host.endpoint, host.token);
     await client.workspace(workspace.id, '/open', {resume:true});
     await invoke('execution_remote_set', {connection: {endpoint: client.endpoint, token: host.token, workspaceId: workspace.id, workspaceName: workspace.name}});
+    window.dispatchEvent(new Event('canopy:machines-changed'));
     if (copy) await invoke('execution_remote_import_accounts');
     await setExecutionMode('remote');
   };

@@ -665,3 +665,14 @@ export function InfoIcon({ size = 14, className }: IconProps) {
     </svg>
   );
 }
+
+/** A question in a circle: something is waiting on the person's answer. */
+export function AskIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.4 9.6a2.7 2.7 0 1 1 4 2.4c-.9.5-1.4 1.1-1.4 2" />
+      <path d="M12 17h.01" />
+    </svg>
+  );
+}

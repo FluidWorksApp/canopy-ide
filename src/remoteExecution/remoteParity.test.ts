@@ -49,6 +49,10 @@ const REMOTE_BRANCHED = new Set([
   "native_term_hand_over", "native_term_take_back", "native_term_forget", "native_term_handover_status",
   // fsReadPreview reads this computer's disk, so it rejects on a workspace host.
   "fs_read_preview",
+  // The machine channel's desktop file slices: channel.ts sends them only to a
+  // machine marked `desktop` (this computer); a workspace gets fs_read_range
+  // and fs_upload_* instead.
+  "machine_file_read", "machine_file_write",
 ]);
 
 const SRC = join(__dirname, "..");

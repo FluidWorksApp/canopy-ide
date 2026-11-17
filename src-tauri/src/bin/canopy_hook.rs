@@ -4707,6 +4707,49 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                 "team": { "type": "string", "description": "Team name or id, when the user is in more than one" }
             }, "required": ["to", "text"], "additionalProperties": false }
         }),
+        serde_json::json!({
+            "name": "canopy_machines",
+            "description": "The machines the user works on (this computer, their cloud workspaces, their own canopy-host machines), where THIS repository is checked out on each, and the workflows the repository defines in .canopy/machines.json. Call this first when work should happen on another machine: building or testing on a faster machine, installing a build on a phone plugged into the user's computer. The other tools find the repository's checkout on a machine by its git origin, so you never pass a path on another machine.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_machine_run",
+            "description": "Run a shell command in this repository's checkout on one of the user's machines and get its exit code and output. Use it to compile or test on a machine with more headroom, or to install an artifact on the machine that has the device. When the machine is not the one you are on, your working tree (uncommitted changes and new files included) is synced there first, so the command sees what you just changed; pass sync=false to skip that. Blocks until the command ends (20 minutes at most). A non-zero exit is returned as a result with the output, not as an error.",
+            "inputSchema": { "type": "object", "properties": {
+                "command": { "type": "string", "description": "The shell command, as you would type it at the top of the repository" },
+                "machine": { "type": "string", "description": "A machine name or id from canopy_machines, a role from the repository's recipe, \"this-mac\" (the computer showing the IDE) or \"here\" (default: the machine you are on)" },
+                "dir": { "type": "string", "description": "A folder inside the repository to run in, relative to its top (default: the top)" },
+                "timeout_minutes": { "type": "number", "description": "How long the command may run (default 10, at most 20)" },
+                "sync": { "type": "boolean", "description": "Sync your working tree to that machine first (default true; ignored when the machine is the one you are on)" }
+            }, "required": ["command"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_machine_sync",
+            "description": "Make another machine's checkout of this repository match a machine's working tree exactly: branch, unpushed commits, uncommitted edits, new files and deletions (ignored files such as build output stay where they are). One direction, mechanical, nothing is pushed to the remote. It refuses rather than destroy work: if the destination has changes or commits of its own, the error lists them; sync those back the other way first, or pass overwrite=true to replace them (what was there is kept as a backup commit).",
+            "inputSchema": { "type": "object", "properties": {
+                "to": { "type": "string", "description": "The machine to bring up to date (name, id, role, \"this-mac\" or \"here\")" },
+                "from": { "type": "string", "description": "The machine whose working tree is the source (default \"here\")" },
+                "overwrite": { "type": "boolean", "description": "Replace changes the destination made itself (default false)" }
+            }, "required": ["to"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_machine_copy",
+            "description": "Copy a file or folder between this repository's checkouts on two of the user's machines: typically a build artifact from the machine that built it to the machine that will install or open it. Paths are relative to the repository on both sides and may be ignored files (build output). An existing file at the destination is replaced.",
+            "inputSchema": { "type": "object", "properties": {
+                "from": { "type": "string", "description": "The machine that has the file (name, id, role, \"this-mac\" or \"here\")" },
+                "to": { "type": "string", "description": "The machine that should get it" },
+                "path": { "type": "string", "description": "The file or folder, relative to the repository (e.g. app/build/outputs/apk/debug/app-debug.apk)" },
+                "to_path": { "type": "string", "description": "Where it goes on the destination, relative to the repository (default: the same path)" }
+            }, "required": ["from", "to", "path"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_workflow_run",
+            "description": "Run a named workflow from the repository's .canopy/machines.json: a fixed list of sync, run and copy steps across the user's machines (for example \"build\": sync to the build machine, compile there, copy the artifact back, install it). Steps run in order and stop at the first that fails; the result lists each step with its output. canopy_machines shows the workflows and an example recipe when there is none. Prefer a workflow over issuing the same steps by hand.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "The workflow's name" },
+                "machines": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Which machine plays each role for this run, overriding the recipe (e.g. {\"build\": \"Build Box\"})" }
+            }, "required": ["name"], "additionalProperties": false }
+        }),
     ]
 }
 
@@ -6193,6 +6236,72 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         }
         "canopy_mesh_targets" => text(ui_op("mesh_targets", &serde_json::json!({}), 25)),
         "canopy_team_people" => text(ui_op("team_people", &serde_json::json!({}), 25)),
+        "canopy_machines" => text(machine_op("list", &serde_json::json!({}), 90)),
+        "canopy_machine_run" => {
+            if args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map_or(true, |c| c.trim().is_empty())
+            {
+                return Err("missing required argument: command".into());
+            }
+            let minutes = args
+                .get("timeout_minutes")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(10.0)
+                .clamp(0.1, 20.0);
+            let body = serde_json::json!({
+                "machine": args.get("machine"),
+                "command": args.get("command"),
+                "dir": args.get("dir"),
+                "timeoutMinutes": minutes,
+                "sync": args.get("sync"),
+            });
+            // The command's own time, plus the sync that may come before it.
+            text(machine_op("run", &body, (minutes * 60.0) as u64 + 660))
+        }
+        "canopy_machine_sync" => {
+            if args
+                .get("to")
+                .and_then(|v| v.as_str())
+                .map_or(true, |t| t.trim().is_empty())
+            {
+                return Err(
+                    "missing required argument: to (a machine from canopy_machines)".into(),
+                );
+            }
+            text(machine_op("sync", args, 1260))
+        }
+        "canopy_machine_copy" => {
+            for key in ["from", "to", "path"] {
+                if args
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map_or(true, |t| t.trim().is_empty())
+                {
+                    return Err(format!("missing required argument: {key}"));
+                }
+            }
+            let body = serde_json::json!({
+                "from": args.get("from"),
+                "to": args.get("to"),
+                "path": args.get("path"),
+                "toPath": args.get("to_path"),
+            });
+            text(machine_op("copy", &body, 1860))
+        }
+        "canopy_workflow_run" => {
+            if args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map_or(true, |t| t.trim().is_empty())
+            {
+                return Err(
+                    "missing required argument: name (a workflow from canopy_machines)".into(),
+                );
+            }
+            text(machine_op("workflow", args, MACHINE_WORKFLOW_SECS))
+        }
         "canopy_team_send" => {
             let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
             let to = arg("to")
@@ -6432,6 +6541,88 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         "canopy_browser_network" => text(browser_op("network", args)),
         other => Err(format!("unknown tool: {other}")),
     }
+}
+
+/// A whole workflow: several steps, each of which may be a twenty-minute run.
+const MACHINE_WORKFLOW_SECS: u64 = 3 * 60 * 60;
+
+/// One machine-channel op (run, sync, copy, a workflow), carried out by the
+/// window, which is the one place connected to every machine the user works
+/// on. The op and its arguments travel as one value: the window validates
+/// them (src/machines/ops.ts), the bridge only relays.
+fn machine_op(kind: &str, args: &serde_json::Value, timeout_secs: u64) -> Result<String, String> {
+    let body = serde_json::json!({ "machineOp": kind, "machineArgs": args });
+    // On a remote machine the window that carries these out is elsewhere: the
+    // host relays the op to it. A session there has the relay whether or not
+    // it also has a bridge (a cloud workspace's Canopy service is one, and
+    // does not serve machine ops); a session on the desktop never has it.
+    if let Some((endpoint, token)) = relay_env() {
+        let mut body = body;
+        body["op"] = serde_json::json!("machine");
+        body["cwd"] = serde_json::json!(cwd());
+        body["ptyId"] = serde_json::json!(std::env::var("CANOPY_PTY")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok()));
+        return request_at(
+            &endpoint,
+            &token,
+            "POST",
+            "/ctx/ui",
+            Some(body.to_string()),
+            std::time::Duration::from_secs(timeout_secs),
+        )
+        .map(pretty);
+    }
+    ui_op("machine", &body, timeout_secs).map(pretty)
+}
+
+/// The host's machine relay (packages/remote-host/machine-relay.mjs): a socket
+/// and its token, from this process's environment or, when the CLI launched
+/// this sidecar with a scrubbed one, from the terminal's processes above it.
+fn relay_env() -> Option<(Endpoint, String)> {
+    if let Some(found) = relay_from(
+        std::env::var("CANOPY_RELAY_SOCKET").ok(),
+        std::env::var("CANOPY_RELAY_TOKEN").ok(),
+    ) {
+        return Some(found);
+    }
+    // Every Canopy terminal stamps its sessions. An environment that still
+    // carries the stamp was not scrubbed, so a relay would be named in it:
+    // there is none (the desktop), and no reason to go asking the parents.
+    if std::env::var_os("CANOPY_PTY").is_some() {
+        return None;
+    }
+    let mut pid = parent_of(std::process::id())?;
+    for _ in 0..8 {
+        if pid <= 1 {
+            break;
+        }
+        if let Some(found) = read_environ(pid).and_then(relay_in) {
+            return Some(found);
+        }
+        pid = parent_of(pid)?;
+    }
+    None
+}
+
+fn relay_in(environ: Vec<String>) -> Option<(Endpoint, String)> {
+    let mut socket = None;
+    let mut token = None;
+    for entry in environ {
+        if let Some(v) = entry.strip_prefix("CANOPY_RELAY_SOCKET=") {
+            socket = Some(v.to_string());
+        } else if let Some(v) = entry.strip_prefix("CANOPY_RELAY_TOKEN=") {
+            token = Some(v.to_string());
+        }
+    }
+    relay_from(socket, token)
+}
+
+/// A relay is a socket and a token, both present. There is no TCP form.
+fn relay_from(socket: Option<String>, token: Option<String>) -> Option<(Endpoint, String)> {
+    let socket = socket.filter(|path| cfg!(unix) && !path.is_empty())?;
+    let token = token.filter(|t| !t.is_empty())?;
+    Some((Endpoint::Socket(socket, None), token))
 }
 
 /// POST an op only the running UI can answer. Same shape as browser_op, but the
@@ -8251,6 +8442,103 @@ mod tests {
             assert!(seen.contains("\r\nAuthorization: Bearer tok\r\n"), "{seen}");
         }
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_relay_needs_both_its_socket_and_its_token() {
+        let both = relay_in(vec![
+            "PATH=/usr/bin".into(),
+            "CANOPY_RELAY_SOCKET=/run/user/1000/canopy-relay-w/relay.sock".into(),
+            "CANOPY_RELAY_TOKEN=tok".into(),
+        ]);
+        if cfg!(unix) {
+            match both {
+                Some((Endpoint::Socket(path, port), token)) => {
+                    assert_eq!(path, "/run/user/1000/canopy-relay-w/relay.sock");
+                    assert_eq!(port, None);
+                    assert_eq!(token, "tok");
+                }
+                _ => panic!("expected a relay socket"),
+            }
+        } else {
+            assert!(both.is_none());
+        }
+        assert!(relay_in(vec!["CANOPY_RELAY_SOCKET=/x/relay.sock".into()]).is_none());
+        assert!(relay_in(vec!["CANOPY_RELAY_TOKEN=tok".into()]).is_none());
+        assert!(relay_from(Some(String::new()), Some("tok".into())).is_none());
+        // The desktop bridge's variables are not a relay.
+        assert!(relay_in(vec![
+            "CANOPY_CTX_SOCKET=/x/ctx.sock".into(),
+            "CANOPY_CTX_TOKEN=tok".into()
+        ])
+        .is_none());
+    }
+
+    /// The five machine tools are published, and each names the argument it
+    /// cannot do without.
+    #[test]
+    fn the_machine_tools_are_described() {
+        let tools = static_tool_defs();
+        let required = |name: &str| -> Vec<String> {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is not described"));
+            tool["inputSchema"]["required"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert!(required("canopy_machines").is_empty());
+        assert_eq!(required("canopy_machine_run"), ["command"]);
+        assert_eq!(required("canopy_machine_sync"), ["to"]);
+        assert_eq!(required("canopy_machine_copy"), ["from", "to", "path"]);
+        assert_eq!(required("canopy_workflow_run"), ["name"]);
+    }
+
+    /// A machine op posted to the host's relay is the body the relay expects,
+    /// and the relay's refusal reaches the agent as its own sentence.
+    #[cfg(unix)]
+    #[test]
+    fn a_relay_refusal_is_the_relays_message() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("canopy-relay-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("relay.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            answer_one(
+                stream,
+                "503 Service Unavailable",
+                "{\"error\":\"unavailable\",\"reason\":\"no-ide\",\"message\":\"No Canopy window is connected to this machine.\"}",
+            )
+        });
+        let reply = request_at(
+            &Endpoint::Socket(socket.to_string_lossy().into_owned(), None),
+            "tok",
+            "POST",
+            "/ctx/ui",
+            Some("{\"op\":\"machine\",\"machineOp\":\"list\"}".into()),
+            std::time::Duration::from_secs(5),
+        );
+        let seen = server.join().unwrap();
+        assert!(seen.starts_with("POST /ctx/ui HTTP/1.1"), "{seen}");
+        assert!(seen.contains("\r\nAuthorization: Bearer tok\r\n"), "{seen}");
+        assert!(
+            seen.ends_with("{\"op\":\"machine\",\"machineOp\":\"list\"}"),
+            "{seen}"
+        );
+        assert_eq!(
+            reply,
+            Err("No Canopy window is connected to this machine.".into())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
