@@ -95,7 +95,9 @@ export async function terminalOwner(waitMs = 1000): Promise<ResourceOwner> {
  *  measured per process tree and can double-count shared pages). */
 export function attributeUsage(
   sessions: SessionUsage[],
-  totals: { workingSetBytes: number; cpusUsed: number | null },
+  /** `wholeMachine`: the totals are a whole computer's (an own-machine
+   *  workspace), so what terminals don't account for is the rest of it. */
+  totals: { workingSetBytes: number; cpusUsed: number | null; wholeMachine?: boolean },
   selfId: string,
   runtimes: RuntimeUsage[] = [],
 ): PersonUsage[] {
@@ -138,7 +140,7 @@ export function attributeUsage(
   rows.push({
     key: "services",
     kind: "services",
-    label: "Workspace services",
+    label: totals.wholeMachine ? "Rest of this computer" : "Workspace services",
     memoryBytes: Math.max(0, totals.workingSetBytes - termMem),
     cpusUsed: totals.cpusUsed == null ? null : Math.max(0, totals.cpusUsed - termCpu),
     terminals: 0,

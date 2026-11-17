@@ -38,3 +38,29 @@ test('terminal usage carries who started each terminal, and a stale pass is no a
  assert.equal(sessionUsage(pass,20_000),null);assert.equal(sessionUsage(null),null);
  assert.deepEqual(sessionOwner({owner:{id:'u2'}}),{id:'u2',name:'Teammate'});
 });
+const enoent=file=>Object.assign(Error('ENOENT: '+file),{code:'ENOENT'});
+const MEMINFO=`MemTotal:       16384000 kB\nMemFree:         1000000 kB\nMemAvailable:    12288000 kB\n`;
+test('an own machine with no container cgroup reports the whole machine',async()=>{
+ let busy=1000,total=10000;
+ const read=async file=>{
+  if(file.startsWith('/sys/fs/cgroup/'))throw enoent(file);
+  if(file==='/proc/meminfo')return MEMINFO;
+  if(file==='/proc/stat')return `cpu  ${busy} 0 0 ${total-busy} 0 0 0 0 0 0\ncpu0 1 0 0 1 0 0 0 0 0 0\n`;
+  throw enoent(file);
+ };
+ const sample=metricsReader(read,()=>0,()=>4);
+ const first=await sample();
+ assert.equal(first.scope,'machine');
+ assert.equal(first.memoryLimitBytes,16384000*1024);assert.equal(first.availableBytes,12288000*1024);
+ assert.equal(first.workingSetBytes,4096000*1024);assert.equal(first.memoryBytes,4096000*1024);
+ assert.equal(first.cpus,4);assert.equal(first.cpusUsed,null);assert.equal(first.cpuPercent,null);
+ busy+=500;total+=1000;const s=await sample();
+ assert.equal(s.cpuPercent,50);assert.equal(s.cpusUsed,2);assert.equal(s.cpusAvailable,2);
+});
+test('inside a container, a cgroup read that fails for another reason is not swapped for the whole machine',async()=>{
+ const read=async file=>{if(file.endsWith('memory.current'))throw Object.assign(Error('EACCES'),{code:'EACCES'});if(file==='/proc/meminfo')return MEMINFO;return '';};
+ await assert.rejects(metricsReader(read,()=>0,()=>4)());
+});
+test('neither the cgroup nor /proc: still unavailable',async()=>{
+ await assert.rejects(metricsReader(async file=>{throw enoent(file);},()=>0,()=>4)());
+});
