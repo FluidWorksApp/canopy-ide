@@ -14,9 +14,8 @@ import type { Project } from "../projects";
 import { canonicalProjectId } from "../placement/identity";
 import { openTemporaryWorkspace, type Invoke, type TemporaryWorkspace } from "../remoteExecution/temporaryWorkspace";
 import { activeWorkspace } from "../remoteExecution/workspace";
-import { peekWorkspaceList, refreshWorkspaceList } from "../remoteExecution/workspaceListCache";
-import { sendTargets } from "../remoteExecution/SendToWorkspace";
-import type { ManagedWorkspace } from "../remoteExecution/ManagedWorkspaces";
+import { peekMachines, refreshMachines, type Machine } from "../machines/inventory";
+import { otherMachines } from "../remoteExecution/SendToWorkspace";
 import { branchHeldElsewhere, carrySendFiles, isDirty, mirrorSendFiles, readRepoState, sha256Hex, teleportHome, transcriptIo } from "../teleport/deps";
 import { chosen, defaultSelection, ignoredItem, type TeleportItem, type TeleportProgress } from "../teleport/selection";
 import { checkMove, rebaseCwd, runMove, type MoveProject, type MovePlan } from "../teleport/sessionMove";
@@ -73,7 +72,7 @@ export function TeleportFlow({
   const toMac = direction === "toMac";
   // The machine the agent is on now, and the one it is going to.
   const sourceInvoke = toMac ? here : local;
-  const [workspaces, setWorkspaces] = useState<ManagedWorkspace[]>(() => sendTargets(peekWorkspaceList()?.workspaces ?? []));
+  const [workspaces, setWorkspaces] = useState<Machine[]>(() => otherMachines(peekMachines(), activeWorkspace()?.connection.workspaceId));
   const [pick, setPick] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState("");
@@ -96,7 +95,7 @@ export function TeleportFlow({
 
   useEffect(() => {
     let live = true;
-    void refreshWorkspaceList().then((r) => live && setWorkspaces(sendTargets(r.workspaces))).catch(() => {});
+    void refreshMachines().then((r) => live && setWorkspaces(otherMachines(r.machines, activeWorkspace()?.connection.workspaceId)));
     return () => {
       live = false;
     };
@@ -283,7 +282,7 @@ export function TeleportFlow({
         actions={[{ label: connecting ? "Connecting…" : "Continue", primary: true, disabled: !pick || connecting, onClick: () => void connect() }]}
         body={
           <div>
-            {workspaces.length === 0 && <p role="status">No workspace is running that you can connect to.</p>}
+            {workspaces.length === 0 && <p role="status">No workspace or machine of yours is running that you can connect to.</p>}
             <div role="radiogroup" aria-label="Workspace" className="cpick-machine-options">
               {workspaces.map((w) => (
                 <button key={w.id} type="button" role="radio" aria-checked={pick === w.id} className={pick === w.id ? "is-selected" : ""} onClick={() => setPick(w.id)}>

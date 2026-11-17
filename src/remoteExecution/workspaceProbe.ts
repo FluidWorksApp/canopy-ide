@@ -8,6 +8,7 @@
 // heartbeats and never resumes a stopped workspace.
 import { invoke } from "@tauri-apps/api/core";
 import { RemoteExecutionClient, type RemoteSession } from "./client";
+import { ownMachineSavedId } from "../machines/inventory";
 
 export interface ProbeConnection {
   endpoint: string;
@@ -54,6 +55,16 @@ function stableClientId(workspaceId: string): string {
 
 const defaultDeps: ProbeDeps = {
   connect: async (workspaceId, clientId) => {
+    // The person's own machine (a canopy-host link): its credential is saved
+    // on this Mac, and the account has never heard of it.
+    const savedId = await ownMachineSavedId(workspaceId).catch(() => null);
+    if (savedId) {
+      const own = await invoke<ProbeConnection | null>("execution_remote_saved_connection", { id: savedId });
+      if (!own || typeof own.endpoint !== "string" || typeof own.token !== "string" || !own.token) {
+        throw new Error("This machine is no longer saved on this Mac.");
+      }
+      return { endpoint: own.endpoint, token: own.token, workspaceId: own.workspaceId };
+    }
     const result = await invoke<{ connection?: ProbeConnection; expiresAt?: string }>("canopy_account_request", {
       route: "/api/operations",
       body: { action: "connect", workspaceId, clientId },

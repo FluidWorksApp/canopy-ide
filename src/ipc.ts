@@ -935,7 +935,14 @@ export interface AgentUiOp {
     // Teams chat, open to every agent: who is on the user's teams, and
     // posting a message there as the user.
     | "team_people"
-    | "team_send";
+    | "team_send"
+    // The machine channel, open to every agent: run, sync and copy between
+    // the user's machines, and the repository's workflows (machines/ops.ts).
+    | "machine";
+  /** machine: which op (list, run, sync, copy, workflow) and its arguments,
+   *  as the agent gave them. Validated in machines/ops.ts. */
+  machineOp?: string | null;
+  machineArgs?: Record<string, unknown> | null;
   route: string;
   /** Agent terminal that initiated the operation, when there is one. For
    *  mesh_submit and mesh_message_cloud the bridge stamps it from the

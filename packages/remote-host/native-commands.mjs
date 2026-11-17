@@ -4,7 +4,7 @@
 // IDE says plainly instead of reporting a missing feature. Bump HOST_PROTOCOL
 // whenever commands are added, so a desktop can tell a stale host up front.
 // native-commands.test.mjs keeps this list equal to what native.mjs handles.
-export const HOST_PROTOCOL=8;
+export const HOST_PROTOCOL=9;
 export const NATIVE_PREFIXES=['fs_upload_','claude_ide_','gates_'];
 export const NATIVE_COMMANDS=new Set([
  // Files, projects and the workspace itself.
@@ -44,7 +44,7 @@ export const NATIVE_COMMANDS=new Set([
  // MCP server connections.
  'mcp_connect','mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel','mcp_disconnect','mcp_connected',
  // Proof receipts, session documents and change churn (agent awareness).
- 'receipt_run_check','receipt_check_start','receipt_check_status','receipt_isolate','receipt_release','session_transcript_tail','session_activity','session_compact','git_churn',
+ 'receipt_run_check','receipt_check_start','receipt_check_status','machine_relay_poll','machine_relay_result','receipt_isolate','receipt_release','session_transcript_tail','session_activity','session_compact','git_churn',
  // Spot search index.
  'spot_ingest','spot_search','spot_index_stats','spot_index_clear','spot_save_context_text',
 ]);

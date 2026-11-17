@@ -17,6 +17,7 @@ import { NativeWorkspaceHost, type WorkspaceConnection } from "./NativeWorkspace
 import { RemoteExecutionClient } from "./client";
 import type { MirrorTarget } from "./mirror";
 import { normalizeRemoteRoot } from "./remoteRoot";
+import { ownMachineSavedId } from "../machines/inventory";
 
 export type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -40,6 +41,9 @@ export interface TemporaryDeps {
   connect: (workspaceId: string, clientId: string) => Promise<WorkspaceConnection>;
   clientId: (workspaceId: string) => string;
   makeHost: (connection: WorkspaceConnection, desktop: Host) => Pick<NativeWorkspaceHost, "invoke" | "dispose"> & Partial<Host>;
+  /** The saved connection to open instead, when the workspace is the person's
+   *  own machine (a canopy-host link): the account cannot issue it a credential. */
+  ownSavedId?: (workspaceId: string) => Promise<string | null>;
 }
 
 /** The desktop side of a temporary host: everything native as usual, except the
@@ -79,9 +83,16 @@ const defaultDeps: TemporaryDeps = {
   },
   clientId: stableClientId,
   makeHost: (connection, desktop) => new NativeWorkspaceHost(connection, desktop),
+  ownSavedId: (workspaceId) => ownMachineSavedId(workspaceId),
 };
 
+/** A short-lived connection to any machine in the inventory (machines/inventory.ts):
+ *  a cloud workspace through the account, the person's own machine through the
+ *  link saved on this Mac. Every "other machine" feature opens one here, so
+ *  none of them needs to know which kind it is talking to. */
 export async function openTemporaryWorkspace(workspaceId: string, deps: TemporaryDeps = defaultDeps): Promise<TemporaryWorkspace> {
+  const savedId = deps.ownSavedId ? await deps.ownSavedId(workspaceId).catch(() => null) : null;
+  if (savedId) return openSavedMachine(savedId, { ...savedDeps, makeHost: deps.makeHost });
   const connection = await deps.connect(workspaceId, deps.clientId(workspaceId));
   return wrap(connection, deps.makeHost(connection, guardedDesktop()));
 }

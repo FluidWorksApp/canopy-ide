@@ -46,6 +46,10 @@ export interface RememberedTerminal {
   sessionId?: string;
   /** Account that owns the session store. */
   profile?: string;
+  /** Pinned to the front of the strip. A pin is the person's standing choice,
+   *  so it comes back with the tab after a restart, whether the session is
+   *  still running (reattached) or is reopened from the Resume list. */
+  pinned?: boolean;
 }
 
 export interface TerminalResumeLeaf {
