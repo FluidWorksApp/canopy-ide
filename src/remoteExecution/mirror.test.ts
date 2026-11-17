@@ -153,6 +153,36 @@ it('sets up one project on demand without the whole-Mac mirror, sending only the
  expect(h.store().projects.map(p=>p.mirroredFrom)).toEqual(['p1']);
 });
 
+it('copies to a named machine and its folder, not the active workspace',async()=>{
+ const h=ondemand();const target={endpoint:'http://box.tail1234.ts.net:8787',token:'synthetic-token-0123456789abcdef',workspaceId:'work-0a1b2c3d',workspaceName:'box'};
+ await ensureProjectOnRemote({local:h.local,remote:h.remote,target,root:'/home/me/work',sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{},install:false},()=>{});
+ expect(h.calls.find(c=>c.command==='execution_mirror_send')!.args).toMatchObject({target,root:'/home/me/work'});
+ expect(h.calls.find(c=>c.command==='execution_remote_import_git')!.args).toEqual({target});
+ expect(String(h.calls.find(c=>c.command==='fs_create_dir')!.args!.path)).toMatch(/^\/home\/me\/work\//);
+});
+
+it('reads a renewed credential when sending, not when the dialog opened',async()=>{
+ const h=ondemand();const live={endpoint:'https://w1.workspaces.example',token:'synthetic-token-old-0123456789',workspaceId:'w1',workspaceName:'Cloud'};
+ const done=ensureProjectOnRemote({local:h.local,remote:h.remote,target:()=>live,sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{},install:false},()=>{});
+ live.token='synthetic-token-new-0123456789';await done;
+ expect((h.calls.find(c=>c.command==='execution_mirror_send')!.args!.target as {token:string}).token).toBe('synthetic-token-new-0123456789');
+});
+
+it('a target with no reported folder uses /workspace, not the active folder',async()=>{
+ const h=ondemand();const target={endpoint:'https://w1.workspaces.example',token:'synthetic-token-0123456789abcdef',workspaceId:'w1',workspaceName:'Cloud'};
+ const roots=await import('./remoteRoot');roots.setRemoteRoot('/home/me/work');
+ try{await ensureProjectOnRemote({local:h.local,remote:h.remote,target,sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{},install:false},()=>{});}
+ finally{roots.setRemoteRoot(undefined);}
+ expect(h.calls.find(c=>c.command==='execution_mirror_send')!.args).toMatchObject({root:'/workspace'});
+});
+
+it('without a target uploads to the active workspace and its folder',async()=>{
+ const h=ondemand();await ensure(h);
+ const send=h.calls.find(c=>c.command==='execution_mirror_send')!.args!;
+ expect(send.target).toBeUndefined();expect(send.root).toBe('/workspace');
+ expect(h.calls.find(c=>c.command==='execution_remote_import_git')!.args).toEqual({});
+});
+
 it('is idempotent: an already set up project only gets the selected files that are missing remotely',async()=>{
  const first=ondemand();await ensure(first);
  const saved=JSON.stringify({projects:first.store().projects.map(p=>({...p,components:[{...p.components[0],label:'web',path:'/workspace/x/repo-1/shop'}]})),openIds:[]});

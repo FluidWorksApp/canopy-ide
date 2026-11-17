@@ -29,9 +29,11 @@ export async function initHost({ home = os.homedir(), projects = path.join(home,
   await mkdir(paths.dir, { recursive: true, mode: 0o700 });
   try { await access(paths.config); return { ...paths, created: false }; } catch {}
   const token = randomBytes(32).toString('base64url');
+  // Unique per machine: the app keys saved machines by address + workspace id, and every tunnel is 127.0.0.1:8787.
+  const id = `work-${randomBytes(4).toString('hex')}`;
   const config = {
-    workspaces: [{ id: 'work', name: path.basename(projects) || 'work', root: projects, memoryMiB: 512, cpus: 1, accounts: [] }],
-    principals: [{ id: 'owner', tokenSha256: digest(token), scope: 'drive', workspaces: ['work'] }],
+    workspaces: [{ id, name: path.basename(projects) || 'work', root: projects, memoryMiB: 512, cpus: 1, accounts: [] }],
+    principals: [{ id: 'owner', tokenSha256: digest(token), scope: 'drive', workspaces: [id] }],
   };
   validateConfig(config);
   await writeFile(paths.token, token + '\n', { mode: 0o600, flag: 'wx' });
@@ -81,6 +83,7 @@ export function checks() {
     { ok: major >= 22, label: `Node ${process.versions.node}`, fix: 'Install Node.js 22 or newer.' },
     { ok: !!run('git', ['--version']), label: 'git', fix: 'Install git.' },
     { ok: !!run('systemctl', ['--user', '--version']), label: 'systemd (user)', fix: 'This needs systemd.' },
+    { ok: !!run('gh', ['--version']), optional: true, label: 'GitHub CLI (gh)', fix: 'Install gh so Canopy can clone your private repositories here.' },
     { ok: !!claude, optional: true, label: claude ? `claude ${claude.split(' ')[0]}` : 'claude not found', fix: 'Install Claude Code to run agents here.' },
     { ok: true, optional: true, label: run('docker', ['--version']) ? 'Docker found, but workspaces run as you (no containers)' : 'No Docker needed: workspaces run as you' },
   ];

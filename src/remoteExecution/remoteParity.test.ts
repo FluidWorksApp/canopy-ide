@@ -16,7 +16,7 @@ import { isHarnessCommand } from "./harnessCommands";
  *  host): the account, workspace switcher and sign-in plumbing of the desktop. */
 const DESKTOP_DIRECT = new Set([
   "execution_remote_account_candidates", "execution_remote_activate", "execution_remote_forget",
-  "execution_remote_import_accounts", "execution_remote_list", "execution_remote_login_prepare",
+  "execution_remote_import_accounts", "execution_remote_list", "execution_remote_login_prepare", "execution_remote_saved_connection",
   // "Set up from this Mac" reads this Mac's repositories; the workspace half goes through the host (mirror_apply_*).
   "execution_mirror_inspect", "execution_mirror_send",
   "canopy_account_cache_key",
@@ -49,6 +49,10 @@ const REMOTE_BRANCHED = new Set([
   "native_term_hand_over", "native_term_take_back", "native_term_forget", "native_term_handover_status",
   // fsReadPreview reads this computer's disk, so it rejects on a workspace host.
   "fs_read_preview",
+  // The machine channel's desktop file slices: channel.ts sends them only to a
+  // machine marked `desktop` (this computer); a workspace gets fs_read_range
+  // and fs_upload_* instead.
+  "machine_file_read", "machine_file_write",
 ]);
 
 const SRC = join(__dirname, "..");

@@ -153,6 +153,31 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
         label: "Mesh history",
         note: "Its own sent and received messages, by id",
       },
+      {
+        name: "canopy_machines",
+        label: "Machines",
+        note: "Your machines, where this repository is on each, and its workflows",
+      },
+      {
+        name: "canopy_machine_run",
+        label: "Run on a machine",
+        note: "Compile or test on another of your machines, synced first",
+      },
+      {
+        name: "canopy_machine_sync",
+        label: "Sync a machine",
+        note: "Make another machine's checkout match, uncommitted work included",
+      },
+      {
+        name: "canopy_machine_copy",
+        label: "Copy between machines",
+        note: "Bring a build artifact from one machine to another",
+      },
+      {
+        name: "canopy_workflow_run",
+        label: "Run a workflow",
+        note: "The repository's own steps across machines (.canopy/machines.json)",
+      },
       { name: "canopy_tickets", label: "Tickets", note: "Issues from connected trackers" },
       { name: "canopy_reviews", label: "Reviews", note: "Relay review requests and open PRs" },
     ],

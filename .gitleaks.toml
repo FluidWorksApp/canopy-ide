@@ -60,3 +60,10 @@ condition = "AND"
 regexTarget = "secret"
 paths = ['''^src-tauri/src/canopy_link\.rs$''']
 regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
+
+[[rules.allowlists]]
+description = "localStorage key name for remembered pinned tabs, not a credential"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^src/pinnedTabs\.ts$''']
+regexes = ['''^canopy\.pinnedTabs\.v1$''']

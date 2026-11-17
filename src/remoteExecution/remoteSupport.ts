@@ -52,7 +52,7 @@ export const hostFeatureName = (command: string) =>
 /** Commands Canopy sends on its own, not because the person used a feature
  * (the status bar's branch sync check). The outdated-host notice must not
  * name them as the feature that needs the update. */
-const BACKGROUND_HOST_COMMANDS: ReadonlySet<string> = new Set(["git_sync_probe", "host_capabilities"]);
+const BACKGROUND_HOST_COMMANDS: ReadonlySet<string> = new Set(["git_sync_probe", "host_capabilities", "machine_relay_poll", "machine_relay_result"]);
 export const outdatedNoticeCommand = (command?: string | null) =>
   command && !BACKGROUND_HOST_COMMANDS.has(command) ? command : undefined;
 

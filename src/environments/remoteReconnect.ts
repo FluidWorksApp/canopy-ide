@@ -7,7 +7,7 @@ import { adoptMachineTerminal, type PtyMachine } from "../ipc";
 import { nativeHost } from "../host/native";
 import { connectMachine, type ConnectedMachine } from "./live";
 import { THIS_MAC_ENV } from "./allWorkspaceTabs";
-import { peekWorkspaceList } from "../remoteExecution/workspaceListCache";
+import { machineName } from "../machines/inventory";
 
 export type ReconnectResult =
   | { kind: "attached"; alias: number; machineName: string }
@@ -19,7 +19,7 @@ const workspaceIdOf = (env: string): string | null => (env.startsWith("remote:")
 /** The machine's name for messages, from what is already known; never fetched. */
 export function machineLabel(env: string): string {
   const id = workspaceIdOf(env);
-  const known = id ? peekWorkspaceList()?.workspaces.find((w) => w.id === id)?.name : undefined;
+  const known = id ? machineName(id) : undefined;
   return known ?? "its workspace";
 }
 

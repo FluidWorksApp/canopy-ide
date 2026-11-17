@@ -19,6 +19,7 @@ import {safeGitRead} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 import { analyze } from './language.mjs';
 import {harnessEnvironment} from './runner-harness.mjs';
+import {machineRelay} from './machine-relay.mjs';
 import {AgentBrowser} from './agent-browser.mjs';
 import {browserStreamServer, handleBrowserStream} from './browser-stream.mjs';
 import {claudeIde as defaultClaudeIde, lockDir as claudeIdeLockDir} from './claude-ide.mjs';
@@ -140,6 +141,10 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       }
       const sharedBin=args.sharedAgents?await prepareSharedAgentLaunch(accountHome,args.requestId,args.sharedAgents):null;
       const scratchEnv=await scratchSessionEnv(args.requestId,environment);
+      // The machine tools are carried out by the Canopy window, which is not
+      // on this machine: a session reaches it through this runner's relay
+      // (machine-relay.mjs), whatever else it has for a bridge.
+      const relayEnv=(await machineRelay(workspaceId)).env();
       const cols = 120, rows = 40;
       // A Claude Code tab gets its IDE server before it starts: the CLI looks
       // for the lock only during its first 30 s. A server that cannot start
@@ -156,7 +161,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+CLIPBOARD_BIN+':'+AGENT_HOME+'/.local/bin:$PATH" NPM_CONFIG_PREFIX='+AGENT_HOME+'/.local; canopy_tty=$(tty 2>/dev/null) && export CANOPY_TTY="$canopy_tty"; unset canopy_tty; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
         env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: AGENT_USER, NPM_CONFIG_PREFIX:AGENT_HOME+'/.local', TERM: 'xterm-256color',
           CANOPY_BROWSER_QUEUE:AGENT_HOME+'/.canopy/browser-requests',BROWSER:CANOPY_CODE+'/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:AGENT_HOME+'/.canopy/browser-requests', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
-          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...pinnedCliEnv(environment),...scratchEnv,...gitEnvironment,...harnessEnv,...ide?.env } });
+          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...pinnedCliEnv(environment),...scratchEnv,...gitEnvironment,...relayEnv,...harnessEnv,...ide?.env } });
       } catch (error) { claudeIde.close(id); throw error; }
       const session = { id, pty, kind: args.kind ?? 'terminal', title: args.command.slice(0, 80), cols, rows, accountId: args.accountId ?? null, output: Buffer.alloc(0), exitCode: null };
       sessions.set(id, session);

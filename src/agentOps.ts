@@ -430,6 +430,9 @@ export interface WorkspaceProject {
 export interface UiOpContext {
   roots: string[];
   repos: string[];
+  /** Run, sync or copy between the user's machines for the repository the
+   *  caller is in (`cwd`), or run one of its workflows (machines/ops.ts). */
+  machine?: (kind: string, args: Record<string, unknown>, cwd: string) => Promise<unknown>;
   inbox: ipc.RelayCommandMsg[];
   /** Put the question in front of the user and resolve with their answer. */
   ask: (question: string, options: string[]) => Promise<string>;
@@ -734,6 +737,9 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         fromName: op.fromName,
         requestId: op.requestId,
       });
+    case "machine":
+      if (!ctx.machine) throw new Error("The machine tools aren't available in this Canopy window yet — try again in a moment.");
+      return ctx.machine(op.machineOp ?? "", op.machineArgs ?? {}, op.route);
     case "team_people":
       return needTeamChat(ctx).people();
     case "team_send":
