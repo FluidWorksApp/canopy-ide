@@ -127,8 +127,8 @@ test('the socket answers the sidecar\'s request, and only with the token',async(
 
 test('the relay folder is private and short',()=>{
  assert.equal(relayDir('work-0a1b2c3d',{runtime:'/run/user/1000'}),'/run/user/1000/canopy-relay-work-0a1b2c3d');
- assert.equal(relayDir('work-0a1b2c3d',{runtime:undefined,tmp:'/tmp',uid:1000}),'/tmp/canopy-relay-work-0a1b2c3d-1000');
- assert.equal(relayDir('../../etc',{runtime:undefined,tmp:'/tmp',uid:1}),'/tmp/canopy-relay-etc-1');
+ assert.equal(relayDir('work-0a1b2c3d',{runtime:null,tmp:'/tmp',uid:1000}),'/tmp/canopy-relay-work-0a1b2c3d-1000');
+ assert.equal(relayDir('../../etc',{runtime:null,tmp:'/tmp',uid:1}),'/tmp/canopy-relay-etc-1');
  // A temp folder too deep for a socket path (macOS) falls back to /tmp.
- assert.equal(relayDir('work-0a1b2c3d',{runtime:undefined,tmp:'/var/folders/zz/'+'x'.repeat(60)+'/T',uid:501}),'/tmp/canopy-relay-work-0a1b2c3d-501');
+ assert.equal(relayDir('work-0a1b2c3d',{runtime:null,tmp:'/var/folders/zz/'+'x'.repeat(60)+'/T',uid:501}),'/tmp/canopy-relay-work-0a1b2c3d-501');
 });
