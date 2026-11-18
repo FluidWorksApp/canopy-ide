@@ -45,8 +45,12 @@ async function runOne(args,{scoped,env,home}){
  const tail=!args.head;
  // Same scrub as the desktop: CANOPY* would make the check look like an agent
  // session to the hooks. CI=1 keeps every runner we parse out of watch mode.
+ // pnpm 10+ installs before `pnpm run` when it thinks dependencies are stale,
+ // and in a receipt copy node_modules are links to the live checkout's: that
+ // install would rewrite them under the agent. pnpm 11 reads pnpm_config_*,
+ // pnpm 10 npm_config_*.
  const childEnv=Object.fromEntries(Object.entries(env).filter(([key])=>!key.startsWith('CANOPY')));
- Object.assign(childEnv,{CI:'1',NO_COLOR:'1',FORCE_COLOR:'0',GIT_TERMINAL_PROMPT:'0'},home?{HOME:home}:{});
+ Object.assign(childEnv,{CI:'1',NO_COLOR:'1',FORCE_COLOR:'0',GIT_TERMINAL_PROMPT:'0',pnpm_config_verify_deps_before_run:'false',npm_config_verify_deps_before_run:'false'},home?{HOME:home}:{});
  // What an isolated copy asks for (a build cache shared with the live
  // checkout); never a CANOPY* key.
  for(const pair of Array.isArray(args.env)?args.env.slice(0,16):[]){
