@@ -24,6 +24,11 @@ test('the check env is scrubbed of CANOPY* and forced non-interactive',async()=>
  assert.equal(r.stdout.trim(),'|1');
 });
 
+test('a check never lets pnpm install into the linked node_modules',async()=>{
+ const r=await receiptRunCheck({cwd:dir,argv:['/bin/sh','-c','echo "$pnpm_config_verify_deps_before_run|$npm_config_verify_deps_before_run"']},{scoped});
+ assert.equal(r.stdout.trim(),'false|false');
+});
+
 test('a missing program is a spawn error',async()=>{
  const r=await receiptRunCheck({cwd:dir,argv:['/definitely/not/here']},{scoped});
  assert.match(r.spawnError,/could not start/);assert.equal(r.code,null);
