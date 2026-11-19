@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { digest, validateConfig } from './policy.mjs';
+import { cgroupEnv, delegateHostCgroup } from './host-cgroup.mjs';
 
 const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_PORT = 8787;
@@ -43,16 +44,39 @@ export async function initHost({ home = os.homedir(), projects = path.join(home,
   return { ...paths, created: true };
 }
 
-export function serviceUnit({ node = process.execPath, script = path.join(CODE_DIR, 'canopy-host.mjs'), port = DEFAULT_PORT } = {}) {
+const GIB = 1024 ** 3;
+
+/** The whole service's memory ceiling: the machine less what the OS keeps
+ *  (10%, at least 1 GiB), throttled a little before it. Agents' dev servers and
+ *  builds hit it, and are throttled or stopped inside the service, before the
+ *  machine runs out and locks up. */
+export function serviceMemory(total = os.totalmem()) {
+  const reserve = Math.max(GIB, Math.round(total * 0.1));
+  const max = total - reserve >= GIB / 2 ? total - reserve : Math.round(total * 0.75);
+  return { max, high: Math.round(max * 0.9) };
+}
+
+// OOMPolicy=continue: when the kernel kills one process for memory (a dev
+// server), the rest of the service — the host, its runners, every agent —
+// keeps running; systemd's default stops the whole unit. Delegate=yes gives the
+// service its own cgroup to divide (host-cgroup.mjs): per-terminal memory
+// groups the governor throttles, without root.
+export function serviceUnit({ node = process.execPath, script = path.join(CODE_DIR, 'canopy-host.mjs'), port = DEFAULT_PORT, totalMemory = os.totalmem() } = {}) {
+  const memory = serviceMemory(totalMemory);
   return `[Unit]
 Description=Canopy host
 After=network-online.target
 
 [Service]
 ExecStart=${node} ${script} serve
-Environment=PORT=${port} CANOPY_SERVICE_ADMIN_SOCKET=off
+Environment=PORT=${port} CANOPY_SERVICE_ADMIN_SOCKET=off CANOPY_CGROUP_DELEGATE=1
 Restart=always
 RestartSec=3
+OOMPolicy=continue
+Delegate=yes
+MemoryAccounting=yes
+MemoryHigh=${memory.high}
+MemoryMax=${memory.max}
 
 [Install]
 WantedBy=default.target
@@ -165,14 +189,59 @@ async function serve() {
   const paths = hostPaths();
   const config = validateConfig(JSON.parse(await readFile(process.env.CANOPY_HOST_CONFIG ?? paths.config, 'utf8')));
   const secret = (await readFile(paths.key, 'utf8')).trim();
-  const [{ createGateway }, { ProcessWorkspaces }] = await Promise.all([import('./gateway.mjs'), import('./process-workspaces.mjs')]);
+  // Before any runner starts, so runners and terminals are born in host/.
+  const statusFile = path.join(paths.state, 'cgroup.json');
+  const cgroup = await delegateHostCgroup({ statusFile });
+  console.log(cgroup.ok ? 'Per-terminal memory limits on' : `Per-terminal memory limits off: ${cgroup.detail ?? `${cgroup.step}: ${cgroup.error}`}`);
+  Object.assign(process.env, cgroupEnv(cgroup, statusFile));
+  const [{ createGateway }, { ProcessWorkspaces }, { SessionResume }] = await Promise.all([import('./gateway.mjs'), import('./process-workspaces.mjs'), import('./session-resume.mjs')]);
   const workspaces = new ProcessWorkspaces({ secret });
   const server = createGateway({ config, workspaces, hostName: os.hostname() });
+  const resume = process.env.CANOPY_AGENT_RESUME === 'off' ? null : processResume({ config, workspaces, directory: path.join(paths.state, 'session-resume'), SessionResume });
   const port = Number(process.env.PORT ?? DEFAULT_PORT);
-  let stopTailnet = () => {};
-  const stop = () => { stopTailnet(); workspaces.close(); server.close(); process.exit(0); };
+  let stopTailnet = () => {}, reopenTimer = null;
+  const stop = () => { stopTailnet(); clearInterval(reopenTimer); resume?.close(); workspaces.close(); server.close(); process.exit(0); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
-  server.listen(port, '127.0.0.1', () => { console.log('Canopy host listening on loopback'); stopTailnet = tailnetForwarder(port); });
+  server.listen(port, '127.0.0.1', () => {
+    console.log('Canopy host listening on loopback'); stopTailnet = tailnetForwarder(port);
+    if (!resume) return;
+    // Now (the host restarted), and again whenever a runner died with terminals open.
+    const reopen = () => void reopenWorkspaces({ config, workspaces, resume }).catch(error => console.warn(`Agent resume failed: ${error.message}`));
+    reopen(); reopenTimer = setInterval(reopen, REOPEN_MS); reopenTimer.unref?.();
+  });
+}
+
+/** Agents running when the host stopped come back with their conversation, as
+ *  in a cloud workspace: session-resume.mjs on the user's own folders. */
+export function processResume({ config, workspaces, directory, SessionResume, home = os.homedir() }) {
+  const resume = new SessionResume({
+    directory, host: workspaces, config, home,
+    root: workspace => workspaces.root(workspace),
+    inspect: workspace => workspaces.runnerState(workspace),
+    listProcesses: async () => workspaces.listProcesses((await import('./session-resume.mjs')).PROCESS_SCRIPT),
+  });
+  resume.start();
+  return resume;
+}
+
+const REOPEN_MS = 30000;
+
+/** With no desktop connected: start the runner of every workspace that had
+ *  live terminals when the host last saw it and has none running now (the host
+ *  restarted, or its runner died), then resume what was interrupted.
+ *  Returns the ids it started. */
+export async function reopenWorkspaces({ config, workspaces, resume, read = file => readFile(file, 'utf8') }) {
+  const opened = [];
+  for (const workspace of config.workspaces ?? []) {
+    if (!resume.eligible(workspace) || workspaces.runtimes.has(workspace.id)) continue;
+    let state = null;
+    try { state = JSON.parse(await read(resume.file(workspace.id))); } catch {}
+    if (!state?.live || !Object.keys(state.live).length) continue;
+    try { await workspaces.open(workspace); opened.push(workspace.id); }
+    catch (error) { console.warn(`Workspace ${workspace.id} did not start: ${error.message}`); }
+  }
+  if (opened.length) await resume.checkAll();
+  return opened;
 }
 
 /** True when this file is the program being run, also through npx's node_modules/.bin symlink. */

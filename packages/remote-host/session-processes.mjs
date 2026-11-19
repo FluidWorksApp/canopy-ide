@@ -19,6 +19,17 @@ export function processAgentHint(argv,exe,name){
  if(path.basename(script)==='aider'||script.includes('/aider/'))return {bin:'aider',pkg:'py:aider',path:script,interactive:true};
  return null;
 }
+/** A terminal's processes the kernel may take first when memory runs out:
+ *  all but its agent CLIs and their ancestors (the shell holding an agent dies
+ *  with it). `procs` carry pid, parent and agent (an agent CLI). */
+export function expendablePids(procs){
+ const byPid=new Map(procs.map(proc=>[proc.pid,proc])),kept=new Set();
+ for(const proc of procs){
+  if(!proc.agent)continue;
+  for(let at=proc,depth=0;at&&depth<64&&!kept.has(at.pid);depth++){kept.add(at.pid);at=byPid.get(at.parent);}
+ }
+ return procs.filter(proc=>!kept.has(proc.pid)).map(proc=>proc.pid);
+}
 export function bindSessionProcesses(sessions,processes,runnerPid,known=new Map()){
  const active=sessions.filter(session=>session.exitCode==null).sort((a,b)=>a.id-b.id);
  const roots=processes.filter(proc=>proc.parent===runnerPid&&proc.tty!==0).sort((a,b)=>a.started-b.started||a.pid-b.pid);
@@ -86,7 +97,7 @@ export function sessionProcessReader(){
   const belongs=(proc,root)=>{for(let depth=0;proc&&depth<64;depth++){if(proc.pid===root.pid)return true;proc=byPid.get(proc.parent);}return false;};
   const measured=new Map(processes.map(proc=>{
    const old=previous.get(proc.pid),cpu=old&&old.started===proc.started&&now>old.at?Math.max(0,(proc.ticks-old.ticks)/hz/((now-old.at)/1000)*100):0;
-   return [proc.pid,{pid:proc.pid,parent:proc.parent,name:proc.name,cmd:path.basename(proc.argv[0]??proc.exe??proc.name),cpu,mem_bytes:Math.max(0,proc.rss*pageSize)}];
+   return [proc.pid,{pid:proc.pid,parent:proc.parent,name:proc.name,cmd:path.basename(proc.argv[0]??proc.exe??proc.name),cpu,mem_bytes:Math.max(0,proc.rss*pageSize),agent:!!processAgentHint(proc.argv,proc.exe,proc.name)}];
   }));
   previous.clear();for(const proc of processes)previous.set(proc.pid,{started:proc.started,ticks:proc.ticks,at:now});
   const sockets=listeningSockets(await Promise.all(['/proc/net/tcp','/proc/net/tcp6'].map(file=>readFile(file,'utf8').catch(()=>''))));

@@ -231,10 +231,11 @@ export class TerminalGovernor{
  }
 }
 
-/** The workspace's own memory: its cgroup limit and use, else the machine's. */
-export async function workspaceMemory(read=file=>readFile(file,'utf8')){
+/** The workspace's own memory: its cgroup limit and use, else the machine's.
+ *  On canopy-host's own machines that cgroup is the service's (CANOPY_CGROUP_ROOT). */
+export async function workspaceMemory(read=file=>readFile(file,'utf8'),root=process.env.CANOPY_CGROUP_ROOT||'/sys/fs/cgroup'){
  try{
-  const limit=Number((await read('/sys/fs/cgroup/memory.max')).trim()),used=Number((await read('/sys/fs/cgroup/memory.current')).trim());
+  const limit=Number((await read(root+'/memory.max')).trim()),used=Number((await read(root+'/memory.current')).trim());
   if(Number.isFinite(limit)&&Number.isFinite(used)&&limit>0)return {total:limit,available:Math.max(0,limit-used)};
  }catch{}
  return {total:os.totalmem(),available:os.freemem()};
@@ -244,13 +245,17 @@ export async function workspaceMemory(read=file=>readFile(file,'utf8')){
  *  live terminals as {id, bytes, cliKey}. A failed sample is skipped.
  *  `observed` gets each pass's terminals once measured (cgroup-charged bytes
  *  and working set when terminals have cgroups). */
-export function governorSampler({governor,sample,memory=workspaceMemory,intervalMs=2000,cgroups=null,observed=null}){
+/** `oom(pids)` marks processes the kernel should pick first when memory runs
+ *  out (oom-score.mjs): each terminal's `expendable` pids — everything but the
+ *  agent CLIs and the shells holding them. */
+export function governorSampler({governor,sample,memory=workspaceMemory,intervalMs=2000,cgroups=null,observed=null,oom=null}){
  let timer=null,busy=false;
  const tick=async()=>{
   if(busy)return;busy=true;
   try{
    const [observations,host]=await Promise.all([sample(),memory()]);
    const state=cgroups?await cgroups.probe():null;
+   if(oom)for(const o of observations)if(o.expendable?.length)await oom(o.expendable).catch(()=>{});
    if(state?.active){
     try{
      // Each terminal's tree into its own cgroup, measured as the kernel
