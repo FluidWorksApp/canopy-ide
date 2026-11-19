@@ -1,6 +1,6 @@
 import {WORKSPACE_ROOT,AGENT_HOME,AGENT_USER,CANOPY_CODE,RUNNER_PORT,RUNNER_BIND} from './paths.mjs';
 import {initializeScratch,scratchSessionEnv} from './scratch-environment.mjs';
-import {decodeTerminalInput,BINARY_TERMINAL_INPUT_PROTOCOL} from './terminal-input.mjs';
+import {decodeTerminalInput,BINARY_TERMINAL_INPUT_PROTOCOL,pacedWriter} from './terminal-input.mjs';
 import {prepareSharedAgentLaunch} from './shared-agent-launch.mjs';
 import {linkSharedCanopyState} from './account-homes.mjs';
 import { nativeInvoke, startNativeServer } from "./native.mjs";
@@ -264,7 +264,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         // Service delivery names the child it addressed; a replaced or exited
         // terminal must not receive a message meant for its predecessor.
         if (args.expectPid != null && (!Number.isSafeInteger(args.expectPid) || args.expectPid !== session.pty.pid)) return json(response, 409, { error: 'Terminal generation changed', pid: session.pty.pid ?? null });
-        if (match[2] === 'input' || match[2] === 'input-binary') { if (typeof args.data !== 'string') throw new Error('Invalid input'); session.pty.write(decodeTerminalInput(args.data,match[2]==='input-binary'?'latin1':undefined)); session.lastInputAt = Date.now(); }
+        if (match[2] === 'input' || match[2] === 'input-binary') { if (typeof args.data !== 'string') throw new Error('Invalid input'); (session.typeInput??=pacedWriter(text=>session.pty.write(text)))(decodeTerminalInput(args.data,match[2]==='input-binary'?'latin1':undefined)); session.lastInputAt = Date.now(); }
         if (match[2] === 'resize') {
           if (!Number.isInteger(args.cols) || args.cols < 1 || args.cols > 512 || !Number.isInteger(args.rows) || args.rows < 1 || args.rows > 256) throw new Error('Invalid geometry');
           session.pty.resize(args.cols, args.rows); session.cols = args.cols; session.rows = args.rows;
