@@ -104,3 +104,32 @@ export class SocketInput{
  }
  reject(code,reason){this.closed=true;this.close(code,reason);}
 }
+
+// Input longer than PACE_CHARS is typed in pieces PACE_GAP_MS apart (the twin
+// of PACE_BYTES in src-tauri/src/pty.rs). An agent TUI reads a long burst as
+// several pastes and kept only the typed tail on submit; pieces this size,
+// spaced, read as typing and arrive whole. A bracketed paste stays one write.
+// The next input waits PACE_SETTLE_MS after a paced one, so a submitting
+// return never joins the burst.
+export const PACE_CHARS=512,PACE_GAP_MS=30,PACE_SETTLE_MS=150;
+export function pacedPieces(text){
+ if(typeof text!=='string'||text.length<=PACE_CHARS||text.startsWith('\x1b[200~'))return [text];
+ const chars=[...text],pieces=[];
+ let piece='';
+ for(const ch of chars){if(piece.length+ch.length>PACE_CHARS){pieces.push(piece);piece='';}piece+=ch;}
+ if(piece)pieces.push(piece);
+ return pieces;
+}
+/** A writer that keeps input in order across calls and paces long input. */
+export function pacedWriter(write,{sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
+ let tail=Promise.resolve();
+ return text=>{
+  const pieces=pacedPieces(text);
+  const run=tail.then(async()=>{
+   for(let i=0;i<pieces.length;i++){if(i)await sleep(PACE_GAP_MS);write(pieces[i]);}
+   if(pieces.length>1)await sleep(PACE_SETTLE_MS);
+  });
+  tail=run.catch(()=>{});
+  return run;
+ };
+}
