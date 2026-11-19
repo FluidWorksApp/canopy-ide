@@ -43,7 +43,8 @@ import {SessionCgroups} from './cgroup-sessions.mjs';
 import {mcpClientCommands} from './mcp-client.mjs';
 import {spotIndexCommands} from './spot-index.mjs';
 import {workspaceActivity} from './activity.mjs';
-import {sessionProcessReader} from './session-processes.mjs';
+import {sessionProcessReader,expendablePids} from './session-processes.mjs';
+import {raiseOomScore} from './oom-score.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
@@ -144,8 +145,8 @@ familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list())
   const response=await runnerFetch('/sessions');if(!response.ok)throw Error('runner sessions unavailable');
   const meta=await metadata('ide-terminals.json',{});
   const sessions=(await response.json()).filter(x=>x.exitCode==null).slice(0,32).map(x=>({...x,requestId:meta[String(x.id)]?.requestId}));
-  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint),pids:stat.procs.map(p=>p.pid),cpu:stat.total_cpu,kind:meta[String(stat.id)]?.run?'build':'terminal',meta:meta[String(stat.id)]}));
- },cgroups:new SessionCgroups(),observed:sessions=>{lastSessionPass={at:Date.now(),sessions};}});
+  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint),pids:stat.procs.map(p=>p.pid),expendable:expendablePids(stat.procs),cpu:stat.total_cpu,kind:meta[String(stat.id)]?.run?'build':'terminal',meta:meta[String(stat.id)]}));
+ },cgroups:new SessionCgroups(),oom:raiseOomScore,observed:sessions=>{lastSessionPass={at:Date.now(),sessions};}});
  // Terminal cgroups and their limits hold whether or not an IDE is watching.
  familyContext.governorSampler.start();
  familyContext.stopSession=async id=>{const response=await runnerFetch(`/sessions/${id}/stop`,{method:'POST',body:'{}'});if(!response.ok)throw Error(`the workspace refused to stop terminal ${id}`);};
