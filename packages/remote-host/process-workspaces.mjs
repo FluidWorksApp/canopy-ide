@@ -1,7 +1,7 @@
 // Workspaces as plain processes: runner.mjs runs as the installing user, with no
 // Docker, image or root. Same open() result as DockerWorkspaces, so the gateway
 // is unchanged. No container isolation: agents run with this user's rights.
-import { spawn as childSpawn } from 'node:child_process';
+import { execFile, spawn as childSpawn } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import net from 'node:net';
@@ -25,6 +25,9 @@ export class ProcessWorkspaces {
     Object.assign(this, { secret, home, user, spawn, fetchImpl, port, readyMs, log });
     this.running = new Map();
     this.children = new Map();
+    // What session-resume.mjs watches: each open workspace's runner, and when it started.
+    this.runtimes = new Map();
+    this.started = new Map();
   }
 
   token(id) { return createHmac('sha256', this.secret).update(`workspace:${id}`).digest('hex'); }
@@ -51,10 +54,11 @@ export class ProcessWorkspaces {
       },
     });
     this.children.set(workspace.id, child);
+    const startedAt = new Date().toISOString();
     const exited = new Promise(resolve => child.once('exit', code => resolve(code)));
     void exited.then(code => {
       // The next open() starts a fresh runner.
-      if (this.children.get(workspace.id) === child) { this.children.delete(workspace.id); this.running.delete(workspace.id); }
+      if (this.children.get(workspace.id) === child) { this.children.delete(workspace.id); this.running.delete(workspace.id); this.runtimes.delete(workspace.id); this.started.delete(workspace.id); }
       this.log.warn?.(`Workspace ${workspace.id} runner exited (${code})`);
     });
     const url = `http://127.0.0.1:${runnerPort}`, nativeUrl = `http://127.0.0.1:${nativePort}`;
@@ -66,7 +70,23 @@ export class ProcessWorkspaces {
       if (Date.now() > deadline) { child.kill(); throw new Error('Workspace runner did not start'); }
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    return { url, nativeUrl, token };
+    const runtime = { url, nativeUrl, token };
+    this.runtimes.set(workspace.id, { workspace, runtime });
+    this.started.set(workspace.id, startedAt);
+    return runtime;
+  }
+
+  /** The runner as session-resume.mjs reads a container: running, and since
+   *  when. A new runner (the host restarted) is what it treats as a restart.
+   *  Not `inspectRuntime`: that would also add a per-runtime machine section. */
+  runnerState(workspace) {
+    const startedAt = this.started.get(workspace.id);
+    return startedAt && this.children.has(workspace.id) ? { State: { Running: true, Paused: false, Restarting: false, StartedAt: startedAt } } : null;
+  }
+
+  /** This machine's process table, in session-resume.mjs's PROCESS_SCRIPT format. */
+  listProcesses(script) {
+    return new Promise((resolve, reject) => execFile('/bin/sh', ['-c', script], { maxBuffer: 16 * 1024 * 1024, timeout: 10000 }, (error, stdout) => error ? reject(error) : resolve(stdout)));
   }
 
   async ready(url, token) {
@@ -78,5 +98,7 @@ export class ProcessWorkspaces {
     for (const child of this.children.values()) child.kill();
     this.children.clear();
     this.running.clear();
+    this.runtimes.clear();
+    this.started.clear();
   }
 }

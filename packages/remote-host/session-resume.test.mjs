@@ -82,7 +82,7 @@ function fakeAdmin({down=false}={}){
 
 // A real runner (history on disk, as in the container) behind a fake native
 // boundary, a fake Docker for inspect/exec and the real ServiceHarness.
-async function fixture({down=false}={}){
+async function fixture({down=false,ownMachine=false}={}){
  const directory=await mkdtemp(join(tmpdir(),'session-resume-'));
  const historyFile=join(directory,'session-history.json');
  const launches=[];let pid=100;
@@ -111,7 +111,12 @@ async function fixture({down=false}={}){
  const admin=fakeAdmin({down});
  const harness=new ServiceHarness({admin,config,tokenFor:()=>secret,log:()=>{}});
  const logs=[];
- const resume=new SessionResume({directory:join(directory,'state'),host,harness,config,fetch:fetchImpl,log:message=>logs.push(message),serviceWaitMs:60000});
+ // canopy-host on the user's own machine: no container, no Docker, no
+ // service harness; the runner's start time and the local process table.
+ const resume=ownMachine
+  ?new SessionResume({directory:join(directory,'state'),host:{runtimes:host.runtimes},config,fetch:fetchImpl,log:message=>logs.push(message),root:()=>'/home/sam/work',home:'/home/sam',
+    inspect:async()=>({State:{Running:true,StartedAt:docker.startedAt}}),listProcesses:async()=>docker.processes})
+  :new SessionResume({directory:join(directory,'state'),host,harness,config,fetch:fetchImpl,log:message=>logs.push(message),serviceWaitMs:60000});
  await startRunner();
  const desktopSpawn=async(body,metadata)=>{const response=await fetch(url+'/sessions',{method:'POST',headers:{authorization:`Bearer ${secret}`,'content-type':'application/json'},body:JSON.stringify(body)});const session=await response.json();native.metadata[String(session.id)]=metadata;return session;};
  return {directory,launches,native,docker,admin,resume,workspace,runtime,logs,startRunner,stopRunner,desktopSpawn,
@@ -148,6 +153,21 @@ test('after a container restart the running agent comes back with its conversati
   const state=JSON.parse(await readFile(join(f.directory,'state','alice.json'),'utf8'));
   assert.deepEqual(state.lastRecovery.resumed,[{from:agentTerminal.id,to:newId,agent:'claude'}]);
   assert.deepEqual(state.lastRecovery.interrupted,[{id:shell.id,reason:'no-agent'}]);
+ }finally{await f.cleanup();}
+});
+
+test('on an own machine (no Docker, no service) the agent comes back after the host restarts',async()=>{
+ const f=await fixture({ownMachine:true});
+ try{
+  const terminal=await f.desktopSpawn({requestId:'desktop-1',command:'/bin/bash'},{cwd:'/home/sam/work/app',projectId:'p1',title:'✳ Fix checkout',command:'/bin/bash',requestId:'desktop-1',run:false});
+  f.native.events.push(JSON.stringify({agent:'claude',canopy_pty:terminal.id,session_id:CONVERSATION,cwd:'/home/sam/work/app',transcript_path:'/home/sam/.claude/projects/-home-sam-work-app/'+CONVERSATION+'.jsonl',permission_mode:'auto',hook_event_name:'UserPromptSubmit'}));
+  f.docker.processes=[`${terminal.pid}\t1\t/bin/bash\x1f-lc\x1fx\x1f`,`900\t${terminal.pid}\tclaude\x1f--dangerously-skip-permissions\x1f`].join('\n');
+  assert.equal(await f.resume.observe(f.workspace,f.runtime),'watching');
+  await f.restart('2026-10-12T08:37:50.000Z');
+  assert.equal(await f.resume.observe(f.workspace,f.runtime),'resumed');
+  assert.equal(f.launches.length,2);
+  assert.match(f.launches[1].command,new RegExp(`cd '/home/sam/work/app' && env 'CANOPY_SESSION_REQUEST_ID=resume-${terminal.id}-\\d+' claude --resume ${CONVERSATION} --dangerously-skip-permissions; exec /bin/bash -l$`),'the default ~/.claude needs no CLAUDE_CONFIG_DIR');
+  assert.deepEqual(f.admin.calls.filter(c=>c[0]==='mint'),[],'no service harness on an own machine');
  }finally{await f.cleanup();}
 });
 

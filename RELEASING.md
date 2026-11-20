@@ -31,7 +31,7 @@ the version PR merges.
 | macOS Apple Silicon | signed/notarized DMG and updater archive | in-app updater |
 | macOS Intel | signed/notarized DMG, no dictation | in-app updater |
 | Linux x86_64 | AppImage, `.deb`, `.rpm` | AppImage in-app; packages through package manager |
-| Windows x86_64 | NSIS installer, currently unsigned | in-app updater |
+| Windows x86_64 | NSIS installer, signed with SSL.com eSigner when the `ES_*` secrets are set | in-app updater |
 
 Tauri cannot cross-compile the complete app between operating systems, so each
 target builds on its native GitHub Actions runner.

@@ -10,6 +10,7 @@
 import {execFile,spawn} from 'node:child_process';
 import {copyFile,lstat,mkdir,readFile,readdir,rm,stat,symlink,unlink as unlinkFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
+import {raiseOomScore} from './oom-score.mjs';
 import {randomUUID} from 'node:crypto';
 
 const DEFAULT_TIMEOUT=5*60*1000, CEILING=20*60*1000;
@@ -45,8 +46,12 @@ async function runOne(args,{scoped,env,home}){
  const tail=!args.head;
  // Same scrub as the desktop: CANOPY* would make the check look like an agent
  // session to the hooks. CI=1 keeps every runner we parse out of watch mode.
+ // pnpm 10+ installs before `pnpm run` when it thinks dependencies are stale,
+ // and in a receipt copy node_modules are links to the live checkout's: that
+ // install would rewrite them under the agent. pnpm 11 reads pnpm_config_*,
+ // pnpm 10 npm_config_*.
  const childEnv=Object.fromEntries(Object.entries(env).filter(([key])=>!key.startsWith('CANOPY')));
- Object.assign(childEnv,{CI:'1',NO_COLOR:'1',FORCE_COLOR:'0',GIT_TERMINAL_PROMPT:'0'},home?{HOME:home}:{});
+ Object.assign(childEnv,{CI:'1',NO_COLOR:'1',FORCE_COLOR:'0',GIT_TERMINAL_PROMPT:'0',pnpm_config_verify_deps_before_run:'false',npm_config_verify_deps_before_run:'false'},home?{HOME:home}:{});
  // What an isolated copy asks for (a build cache shared with the live
  // checkout); never a CANOPY* key.
  for(const pair of Array.isArray(args.env)?args.env.slice(0,16):[]){
@@ -58,6 +63,9 @@ async function runOne(args,{scoped,env,home}){
   let child;
   try{child=spawn(argv[0],argv.slice(1),{cwd,env:childEnv,stdio:['ignore','pipe','pipe'],detached:true});}
   catch(error){resolve(result({spawnError:`could not start \`${argv[0]}\`: ${error.message}`}));return;}
+  // A check (tests, a typecheck) is the first thing to go when memory runs out,
+  // never the host or an agent; what it starts inherits the score.
+  if(child.pid)void raiseOomScore([child.pid]);
   const out=capture(keep,tail),err=capture(keep,tail);
   let timedOut=false,settled=false;
   const killGroup=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{try{child.kill('SIGKILL');}catch{}}};

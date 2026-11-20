@@ -218,3 +218,18 @@ test('runner binary input writes bytes, while text keeps its existing UTF-8 beha
   assert.equal((await post('input-binary','界')).status,400);assert.equal(received.length,2);
  }finally{await close(runner);}
 });
+
+test('long input is typed in paced pieces, whole and in order',async()=>{
+ const {pacedPieces,pacedWriter,PACE_CHARS}=await import('./terminal-input.mjs');
+ assert.deepEqual(pacedPieces('hi\r'),['hi\r']);
+ assert.equal(pacedPieces('\x1b[200~'+'a'.repeat(3000)+'\x1b[201~').length,1);
+ const bin=Buffer.alloc(2000);assert.deepEqual(pacedPieces(bin),[bin]);
+ const text='😀'.repeat(700),pieces=pacedPieces(text);
+ assert.ok(pieces.length>1&&pieces.every(p=>p.length<=PACE_CHARS&&!/[\uD800-\uDBFF]$/.test(p)));
+ assert.equal(pieces.join(''),text);
+ const out=[],sleeps=[];
+ const type=pacedWriter(s=>out.push(s),{sleep:async ms=>{sleeps.push(ms);}});
+ type(text);await type('\r');
+ assert.equal(out.join(''),text+'\r');assert.equal(out.at(-1),'\r');
+ assert.ok(sleeps.includes(150));
+});
