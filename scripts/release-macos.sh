@@ -115,13 +115,7 @@ for target in "${TARGETS[@]}"; do
   else
     if [ ! -f "$ORT_DYLIB" ]; then
       echo "==> fetching ONNX Runtime $ORT_VER"
-      tmp="$(mktemp -d)"
-      curl -fSL -o "$tmp/ort.tgz" \
-        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-osx-arm64-${ORT_VER}.tgz"
-      tar -xzf "$tmp/ort.tgz" -C "$tmp"
-      mkdir -p src-tauri/onnxruntime
-      cp "$tmp/onnxruntime-osx-arm64-${ORT_VER}/lib/libonnxruntime.${ORT_VER}.dylib" "$ORT_DYLIB"
-      rm -rf "$tmp"
+      bash scripts/stage-onnxruntime.sh osx-arm64
     fi
     echo "==> re-signing ONNX Runtime for notarisation"
     codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$ORT_DYLIB"

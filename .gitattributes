@@ -15,3 +15,6 @@
 # The prebuilt terminal engine (see shared/terminalEngine/pkg/README.md).
 *.wasm binary
 shared/terminalEngine/pkg/canopy_term_wasm* linguist-generated
+
+# Run by git-bash on the Windows release runner, where a CRLF checkout breaks bash.
+scripts/stage-onnxruntime.sh text eol=lf
