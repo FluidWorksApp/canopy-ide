@@ -559,8 +559,9 @@ jobs:
       # ES_PASSWORD, ES_TOTP_SECRET, and ES_CREDENTIAL_ID (needed only with more
       # than one eSigner certificate); without them the installer is unsigned.
       # Tauri's sign command runs scripts/esigner-sign.ps1 on each executable:
-      # the app, its two sidecars, the installer and its uninstaller, so 5 paid
-      # signings per release. It skips DLLs and anything already signed and
+      # the app, its two sidecars, the installer and its uninstaller, so 6 paid
+      # signings per release (canopy-hook is signed twice: the cargo binary and
+      # the sidecar copy). It skips DLLs and anything already signed and
       # never retries. Pull requests (windows-packaging.yml) never sign.
       - name: Windows signing (SSL.com eSigner, when its secrets are set)
         if: matrix.platform == 'windows-latest'
@@ -570,8 +571,8 @@ jobs:
           ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
           ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
           CODESIGNTOOL_VERSION: v1.3.2
-          # SSL.com publishes no checksum for it; once a release has printed the hash below, pin it here.
-          CODESIGNTOOL_SHA256: ""
+          # SSL.com publishes no checksum; this is the hash v0.5.20's signed release printed.
+          CODESIGNTOOL_SHA256: 4afc32e8b7f79bbe1de7e4e7049aaad4e0f754357613b9bbec0e3052f06fd36b
         run: |
           $missing = "ES_USERNAME","ES_PASSWORD","ES_TOTP_SECRET" | Where-Object { -not [Environment]::GetEnvironmentVariable($_) }
           if ($missing) {
@@ -651,10 +652,19 @@ jobs:
       - name: Verify the Windows signatures (when signing was set up)
         if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGN_ARGS != ''
         shell: pwsh
+        # Checks what people get: the installer, then every exe it installs (the
+        # app, both sidecars, the uninstaller). The build folder also holds
+        # unsigned copies of the sidecars that are never shipped, so it is not
+        # the thing to check.
         run: |
-          $root = 'src-tauri/target/x86_64-pc-windows-msvc/release'
-          $files = @(Get-ChildItem "$root/*.exe") + @(Get-ChildItem "$root/bundle/nsis/*-setup.exe")
-          if (-not $files) { throw "no Windows executables found under $root" }
+          $setup = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS installer was built" }
+          Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait
+          $app = Get-ChildItem -Path "$env:LOCALAPPDATA/Canopy", "$env:LOCALAPPDATA/Programs/Canopy" -Filter 'canopy.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { throw "the installer did not put canopy.exe under %LOCALAPPDATA%" }
+          Write-Host "installed in $($app.DirectoryName)"
+          $files = @($setup) + @(Get-ChildItem -Path $app.DirectoryName -Filter '*.exe')
+          if (-not ($files | Where-Object { $_.Name -like 'uninstall*.exe' })) { throw "no uninstaller was installed" }
           foreach ($f in $files) {
             $sig = Get-AuthenticodeSignature $f.FullName
             Write-Host "$($f.Name): $($sig.Status) $($sig.SignerCertificate.Subject)"

@@ -30,7 +30,9 @@ $name = Split-Path -Leaf $target
 # Only the executables are signed (the app, its sidecars, the installer, its uninstaller), never a file twice, since
 # each is paid.
 $ext = [IO.Path]::GetExtension($target).ToLower()
-if ($ext -ne '.exe' -and $ext -ne '.msi') {
+# The NSIS uninstaller arrives as a temp file (nst*.tmp, from !uninstfinalize) that NSIS packs once this returns.
+$uninstaller = $name -like 'nst*.tmp'
+if ($ext -ne '.exe' -and $ext -ne '.msi' -and -not $uninstaller) {
   Write-Host "esigner-sign: skipping $name (not shipped as a signed file)"
   exit 0
 }
@@ -54,12 +56,24 @@ if ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq "$window")) {
 $out = Join-Path ([IO.Path]::GetTempPath()) ("esigner-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $out | Out-Null
 
+# CodeSignTool chooses how to sign from the extension, so the uninstaller is signed as a copy named .exe.
+$source = $target
+$signedName = $name
+$inDir = $null
+if ($uninstaller) {
+  $inDir = Join-Path ([IO.Path]::GetTempPath()) ("esigner-in-" + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $inDir | Out-Null
+  $signedName = 'uninstall.exe'
+  $source = Join-Path $inDir $signedName
+  Copy-Item -LiteralPath $target -Destination $source
+}
+
 $toolArgs = @(
   '-jar', $jar.FullName, 'sign',
   "-username=$env:ES_USERNAME",
   "-password=$env:ES_PASSWORD",
   "-totp_secret=$env:ES_TOTP_SECRET",
-  "-input_file_path=$target",
+  "-input_file_path=$source",
   "-output_dir_path=$out"
 )
 if ($env:ES_CREDENTIAL_ID) { $toolArgs += "-credential_id=$env:ES_CREDENTIAL_ID" }
@@ -72,13 +86,14 @@ try {
   $code = $LASTEXITCODE
 } finally {
   Pop-Location
+  if ($inDir) { Remove-Item -Recurse -Force $inDir -ErrorAction SilentlyContinue }
   [math]::Floor([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() / 30) | Set-Content $stamp
 }
 Write-Host $log.Trim()
 
 # CodeSignTool can print an error and still exit 0, so success is a file it wrote that Windows finds validly signed,
 # not the exit code or the wording of its log.
-$signed = Join-Path $out $name
+$signed = Join-Path $out $signedName
 $status = if (Test-Path -LiteralPath $signed) { (Get-AuthenticodeSignature -LiteralPath $signed).Status } else { 'missing' }
 if ($status -ne 'Valid') {
   Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
