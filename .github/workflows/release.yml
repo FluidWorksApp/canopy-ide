@@ -329,15 +329,7 @@ jobs:
       # bundle.resources lists onnxruntime/*, so something must match the glob.
       # The real build stages the runtime; this stages the same file.
       - name: Stage ONNX Runtime
-        run: |
-          ORT_VER=1.24.2
-          PKG="onnxruntime-linux-x64-${ORT_VER}"
-          curl -fSL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/${PKG}.tgz"
-          tar -xzf ort.tgz
-          mkdir -p src-tauri/onnxruntime
-          cp "${PKG}/lib/libonnxruntime.so.${ORT_VER}" src-tauri/onnxruntime/libonnxruntime.so
-          cp "${PKG}"/lib/*providers_shared* src-tauri/onnxruntime/ 2>/dev/null || true
-          rm -rf "${PKG}" ort.tgz
+        run: bash scripts/stage-onnxruntime.sh linux-x64
       - name: Build the deb
         # No signing key here, and a configured updater key without one makes
         # `tauri build` fail after bundling. So the check config is the real
@@ -511,7 +503,6 @@ jobs:
       - name: Stage ONNX Runtime (all platforms, for load-dynamic)
         shell: bash
         run: |
-          ORT_VER=1.24.2
           # Intel macOS builds dictation out — no ONNX Runtime to stage. Leave a
           # marker so the bundle.resources `onnxruntime/*` glob still matches, and
           # skip the rest.
@@ -523,35 +514,11 @@ jobs:
             exit 0
           fi
           case "${{ matrix.target }}" in
-            aarch64-apple-darwin)     A=osx-arm64;  EXT=tgz; IN=libonnxruntime.${ORT_VER}.dylib; OUT=libonnxruntime.dylib ;;
-            x86_64-unknown-linux-gnu) A=linux-x64;  EXT=tgz; IN=libonnxruntime.so.${ORT_VER};    OUT=libonnxruntime.so ;;
-            x86_64-pc-windows-msvc)   A=win-x64;    EXT=zip; IN=onnxruntime.dll;                 OUT=onnxruntime.dll ;;
+            aarch64-apple-darwin)     bash scripts/stage-onnxruntime.sh osx-arm64 ;;
+            x86_64-unknown-linux-gnu) bash scripts/stage-onnxruntime.sh linux-x64 ;;
+            x86_64-pc-windows-msvc)   bash scripts/stage-onnxruntime.sh win-x64 ;;
             *) echo "::error::unmapped target ${{ matrix.target }}"; exit 1 ;;
           esac
-          PKG="onnxruntime-${A}-${ORT_VER}"
-          # Work entirely in the checkout with RELATIVE paths. Absolute paths on
-          # the Windows runner ($RUNNER_TEMP = D:\a\_temp) break two ways under
-          # git-bash: backslashes get eaten, and tar reads the `D:` drive letter
-          # as a remote host:path ("Cannot connect to D:"). Relative paths dodge
-          # both. Downloads/extraction are scratch and removed before the build.
-          curl -fSL -o "ort.${EXT}" \
-            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/${PKG}.${EXT}"
-          # tgz: GNU tar (Linux) + bsdtar (macOS). zip: bsdtar (Windows/macOS).
-          # tgz: GNU tar (Linux) / bsdtar (macOS). zip (Windows only): git-bash's
-          # GNU tar can't read zip, so use PowerShell's built-in Expand-Archive.
-          if [ "$EXT" = zip ]; then
-            powershell -NoProfile -Command "Expand-Archive -Force -Path ort.zip -DestinationPath ."
-          else
-            tar -xzf "ort.${EXT}"
-          fi
-          mkdir -p src-tauri/onnxruntime
-          cp "${PKG}/lib/${IN}" "src-tauri/onnxruntime/${OUT}"
-          # Linux/Windows CPU builds ship a providers_shared lib next to the main
-          # one; copy it alongside (macOS has none). Harmless if unused, and it
-          # avoids a load failure if ort probes for it.
-          cp "${PKG}"/lib/*providers_shared* "src-tauri/onnxruntime/" 2>/dev/null || true
-          rm -rf "${PKG}" "ort.${EXT}"
-          echo "Staged ONNX Runtime ${ORT_VER} (${A}):"; ls -la src-tauri/onnxruntime/
 
       # Microsoft ships the macOS ONNX Runtime dylib ad-hoc-signed since v1.24
       # (1.23 was Developer ID + timestamped). tauri does not re-sign bundle
