@@ -30,7 +30,7 @@ const CLIS={
   flags:{'--permission-mode':1,'--model':1,'--fallback-model':1,'--add-dir':1,'--effort':1,'--dangerously-skip-permissions':0,'--allow-dangerously-skip-permissions':0},
   fallback:mode=>mode==='bypassPermissions'?['--dangerously-skip-permissions']:typeof mode==='string'&&/^[A-Za-z]{1,32}$/.test(mode)&&mode!=='default'?['--permission-mode',mode]:[],
   configDir:transcript=>{const at=transcript?.indexOf('/projects/');return at>0?transcript.slice(0,at):null;},
-  configEnv:'CLAUDE_CONFIG_DIR',defaultConfig:HOME+'/.claude',
+  configEnv:'CLAUDE_CONFIG_DIR',defaultConfig:'.claude',
   bin:'claude',pkg:'/node_modules/@anthropic-ai/claude-code/',
  },
  codex:{
@@ -39,7 +39,7 @@ const CLIS={
   flags:{'--model':1,'-m':1,'--sandbox':1,'-s':1,'--ask-for-approval':1,'-a':1,'--profile':1,'-p':1,'--full-auto':0,'--dangerously-bypass-approvals-and-sandbox':0,'--search':0},
   fallback:()=>[],
   configDir:transcript=>{const at=transcript?.indexOf('/sessions/');return at>0?transcript.slice(0,at):null;},
-  configEnv:'CODEX_HOME',defaultConfig:HOME+'/.codex',
+  configEnv:'CODEX_HOME',defaultConfig:'.codex',
   bin:'codex',pkg:'/node_modules/@openai/codex/',
  },
 };
@@ -70,8 +70,10 @@ export function keptFlags(agent,argv){
  return kept;
 }
 
-/** How an interrupted terminal comes back: a resume command, or why not. */
-export function resumePlan({live,agent,metadata,sharedProjects=new Set()}){
+/** How an interrupted terminal comes back: a resume command, or why not.
+ *  `root` and `home` are the workspace's layout: the image's by default, the
+ *  user's own folders on a process workspace. */
+export function resumePlan({live,agent,metadata,sharedProjects=new Set(),root=ROOT,home=HOME}){
  if(live.kind&&live.kind!=='terminal')return {interrupted:'build'};
  if(live.accountId)return {interrupted:'account-pool'};
  if(metadata?.projectId&&sharedProjects.has(metadata.projectId))return {interrupted:'shared-project'};
@@ -80,13 +82,13 @@ export function resumePlan({live,agent,metadata,sharedProjects=new Set()}){
  const cli=CLIS[agent.agent];
  if(!cli)return {interrupted:'not-resumable'};
  if(typeof agent.sessionId!=='string'||!SESSION_ID.test(agent.sessionId)||/-pty\d*$/.test(agent.sessionId))return {interrupted:'no-conversation'};
- const cwd=inside(agent.cwd,ROOT)?agent.cwd:inside(metadata?.cwd,ROOT)?metadata.cwd:null;
+ const cwd=inside(agent.cwd,root)?agent.cwd:inside(metadata?.cwd,root)?metadata.cwd:null;
  if(!cwd)return {interrupted:'no-directory'};
  const flags=keptFlags(agent.agent,agent.argv)??cli.fallback(agent.permissionMode);
  const argv=[...cli.resume(agent.sessionId),...flags];
  const env=[];
  const config=cli.configDir(agent.transcriptPath);
- if(config&&config!==cli.defaultConfig&&inside(config,HOME))env.push([cli.configEnv,config]);
+ if(config&&config!==home+'/'+cli.defaultConfig&&inside(config,home))env.push([cli.configEnv,config]);
  return {resume:{agent:agent.agent,sessionId:agent.sessionId,cwd,argv,env,command:argv.map(arg=>/^[A-Za-z0-9_./:=@%+-]+$/.test(arg)?arg:quote(arg)).join(' ')}};
 }
 
@@ -197,8 +199,18 @@ export function terminalDescription(agent,metadata){
 }
 
 export class SessionResume{
- constructor({directory,host,harness,config,fetch:fetchImpl=fetch,now=Date.now,log=message=>console.warn(message),intervalMs=15000,serviceWaitMs=300000}){
-  Object.assign(this,{directory,host,harness,config,fetch:fetchImpl,now,log,intervalMs,serviceWaitMs});
+ // A container host by default: the image's layout, `host.inspectRuntime` for
+ // when the container started, `docker exec` for its process table. A process
+ // workspace (canopy-host on the user's own machine) passes its own: `root`
+ // (or root(workspace)), `home`, `inspect(workspace)` and `listProcesses(workspace)`.
+ constructor({directory,host,harness,config,fetch:fetchImpl=fetch,now=Date.now,log=message=>console.warn(message),intervalMs=15000,serviceWaitMs=300000,root=ROOT,home=HOME,inspect=null,listProcesses=null}){
+  Object.assign(this,{directory,host,harness,config,fetch:fetchImpl,now,log,intervalMs,serviceWaitMs,root,home,inspect,listProcesses});
+ }
+ rootOf(workspace){return typeof this.root==='function'?this.root(workspace):this.root;}
+ processTable(workspace){
+  if(this.listProcesses)return this.listProcesses(workspace);
+  if(!this.host.docker)return null;
+  return this.host.docker(['exec','-u','1000:1000',`canopy-ws-${workspace.id}`,'/bin/sh','-c',PROCESS_SCRIPT]).then(result=>result.stdout);
  }
  file(id){return join(this.directory,id+'.json');}
  async load(id){
@@ -265,9 +277,9 @@ export class SessionResume{
  }
  async observeArgv(workspace,state,sessions){
   const wanted=sessions.filter(s=>s.exitCode==null&&Number.isSafeInteger(s.pid)&&state.agents[s.id]&&!state.agents[s.id].ended&&CLIS[state.agents[s.id].agent]&&!state.agents[s.id].argv);
-  if(!wanted.length||!this.host.docker)return;
-  const result=await this.host.docker(['exec','-u','1000:1000',`canopy-ws-${workspace.id}`,'/bin/sh','-c',PROCESS_SCRIPT]);
-  const processes=parseProcesses(result.stdout);
+  if(!wanted.length)return;
+  const table=this.processTable(workspace);if(!table)return;
+  const processes=parseProcesses(await table);
   for(const session of wanted){const argv=agentArgv(processes,session.pid,state.agents[session.id].agent);if(argv)state.agents[session.id].argv=argv;}
  }
  serviceReady(workspace,runtime){
@@ -305,7 +317,7 @@ export class SessionResume{
    const current=sessions.find(s=>s.id===id);
    // Still running, or finished with a real exit code: nothing was interrupted.
    if(current&&current.exitCode!==-1)continue;
-   let plan=resumePlan({live,agent:pending.agents[key],metadata:old,sharedProjects});
+   let plan=resumePlan({live,agent:pending.agents[key],metadata:old,sharedProjects,root:this.rootOf(workspace),home:this.home});
    if(plan.resume&&pending.serviceUnavailable)plan={interrupted:'service-unavailable'};
    if(plan.resume){
     const requestId=`resume-${id}-${pending.epoch}`;
@@ -325,7 +337,7 @@ export class SessionResume{
  }
  async observe(workspace,runtime){
   if(!this.eligible(workspace))return 'ineligible';
-  const inspected=await this.host.inspectRuntime(workspace);
+  const inspected=await (this.inspect?this.inspect(workspace):this.host.inspectRuntime(workspace));
   if(!inspected?.State?.Running||inspected.State.Paused||inspected.State.Restarting)return 'stopped';
   const startedAt=inspected.State.StartedAt;
   if(typeof startedAt!=='string'||!startedAt)return 'unknown';

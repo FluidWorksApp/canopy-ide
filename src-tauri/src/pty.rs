@@ -51,6 +51,43 @@ const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
 const INPUT_HIGH_WATER: usize = 1024 * 1024;
 /// How often the writer thread re-checks for teardown while its queue is empty.
 const WRITER_POLL: Duration = Duration::from_millis(250);
+
+/// Input longer than this is typed in pieces of at most this size, `PACE_GAP`
+/// apart. An agent TUI (Claude Code) reads a long burst as several pastes, one
+/// per kernel read, and on submit kept only the typed tail: an eight-answer
+/// reply reached the agent as its last 222 characters. Pieces this size,
+/// spaced, read as typing and arrive whole.
+const PACE_BYTES: usize = 512;
+const PACE_GAP: Duration = Duration::from_millis(30);
+/// After a paced write, the next input (the submitting return, sent a beat
+/// later) waits this long, so it never joins the burst.
+const PACE_SETTLE: Duration = Duration::from_millis(150);
+
+/// Where to cut `bytes` into typed pieces: one piece when short or already a
+/// bracketed paste (the app reads that as one paste however it is read),
+/// otherwise pieces of at most `PACE_BYTES`, never inside a UTF-8 character.
+fn paced_pieces(bytes: &[u8]) -> Vec<&[u8]> {
+    if bytes.len() <= PACE_BYTES || bytes.starts_with(b"\x1b[200~") {
+        return vec![bytes];
+    }
+    let mut pieces = Vec::new();
+    let mut rest = bytes;
+    while rest.len() > PACE_BYTES {
+        let mut cut = PACE_BYTES;
+        while cut > 0 && (rest[cut] & 0xC0) == 0x80 {
+            cut -= 1;
+        }
+        if cut == 0 {
+            cut = PACE_BYTES;
+        }
+        pieces.push(&rest[..cut]);
+        rest = &rest[cut..];
+    }
+    if !rest.is_empty() {
+        pieces.push(rest);
+    }
+    pieces
+}
 /// Replay retained while no desktop or remote viewer is attached.
 const SCROLLBACK_CAP: usize = 4 * 1024 * 1024;
 /// How long the output clock ignores the repaint a redraw nudge provokes.
@@ -2999,8 +3036,26 @@ impl PtyManager {
                         }
                         std::mem::take(&mut *queue)
                     };
-                    if writer.write_all(&chunk).is_err() {
+                    let pieces = paced_pieces(&chunk);
+                    let paced = pieces.len() > 1;
+                    let mut failed = false;
+                    for (i, piece) in pieces.into_iter().enumerate() {
+                        if i > 0 {
+                            if session.shutdown.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            thread::sleep(PACE_GAP);
+                        }
+                        if writer.write_all(piece).is_err() {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if failed {
                         break;
+                    }
+                    if paced {
+                        thread::sleep(PACE_SETTLE);
                     }
                 })
                 .expect("spawn pty writer thread");
@@ -3766,6 +3821,20 @@ impl canopy_core::terminals::Terminals for PtyManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_input_is_typed_in_paced_pieces_whole() {
+        let short = b"hello\r";
+        assert_eq!(super::paced_pieces(short), vec![&short[..]]);
+        let pasted = [b"\x1b[200~".as_slice(), &[b'a'; 3000], b"\x1b[201~"].concat();
+        assert_eq!(super::paced_pieces(&pasted).len(), 1);
+        let text = "é".repeat(1500);
+        let pieces = super::paced_pieces(text.as_bytes());
+        assert!(pieces.len() > 1);
+        assert!(pieces.iter().all(|p| p.len() <= super::PACE_BYTES));
+        assert!(pieces.iter().all(|p| std::str::from_utf8(p).is_ok()));
+        assert_eq!(pieces.concat(), text.as_bytes());
+    }
+
     use super::*;
 
     #[test]

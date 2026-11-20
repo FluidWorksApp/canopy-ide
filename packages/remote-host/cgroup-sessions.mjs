@@ -18,8 +18,11 @@ const read=file=>readFile(file,'utf8');
 const RECREATE='recreate the workspace to enable per-terminal limits';
 
 export class SessionCgroups{
- constructor({root=DELEGATED_ROOT,statusFile=STATUS_FILE,procRoot='/proc',cgroupFs='/sys/fs/cgroup'}={}){
-  Object.assign(this,{root,statusFile,procRoot,cgroupFs});
+ // A container's tree by default (cgroup-delegate.mjs); canopy-host on the
+ // user's own machine hands its delegated service cgroup through CANOPY_CGROUP_*
+ // (host-cgroup.mjs), where /proc/<pid>/cgroup reads the full path, `cgroupPath`.
+ constructor({root=process.env.CANOPY_CGROUP_ROOT||DELEGATED_ROOT,statusFile=process.env.CANOPY_CGROUP_STATUS||STATUS_FILE,cgroupPath=process.env.CANOPY_CGROUP_PATH||'',procRoot='/proc',cgroupFs='/sys/fs/cgroup'}={}){
+  Object.assign(this,{root,statusFile,procRoot,cgroupFs,cgroupPath:cgroupPath==='/'?'':cgroupPath.replace(/\/+$/,'')});
   this.sessions=path.join(root,'sessions');
   this.state={active:false,detail:'not checked yet'};this.checkedAt=0;
   this.applied=new Map();
@@ -36,7 +39,7 @@ export class SessionCgroups{
    this.state={active:false,detail:v2?`the workspace's cgroup was never delegated to it; ${RECREATE}`:'this kernel does not offer cgroup v2'};
    return this.state;
   }
-  if(!status.ok){this.state={active:false,detail:`the kernel refused to ${status.step}: ${status.error}`};return this.state;}
+  if(!status.ok){this.state={active:false,detail:status.detail??`the kernel refused to ${status.step}: ${status.error}`};return this.state;}
   try{
    const enabled=(await read(path.join(this.sessions,'cgroup.subtree_control'))).split(/\s+/);
    if(!enabled.includes('memory'))throw Error('the memory controller is not enabled for terminals');
@@ -50,7 +53,7 @@ export class SessionCgroups{
   *  born there. A process that already exited is skipped. */
  async place(id,pids){
   const dir=this.dir(id);await mkdir(dir,{recursive:true});
-  const want=`0::/sessions/${id}`;
+  const want=`0::${this.cgroupPath}/sessions/${id}`;
   for(const pid of pids){
    if(!Number.isSafeInteger(pid)||pid<=1)continue;
    const current=(await read(path.join(this.procRoot,String(pid),'cgroup')).catch(()=>'')).trim();

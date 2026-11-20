@@ -165,7 +165,13 @@ pub async fn run_check(
     cmd.env("CI", "1")
         .env("NO_COLOR", "1")
         .env("FORCE_COLOR", "0")
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // pnpm 10+ installs before `pnpm run` when it thinks dependencies are
+        // stale; in an isolated copy node_modules are links to the live
+        // checkout's, so that install would rewrite them under the agent.
+        // pnpm 11 reads pnpm_config_*, pnpm 10 npm_config_*.
+        .env("pnpm_config_verify_deps_before_run", "false")
+        .env("npm_config_verify_deps_before_run", "false");
     // What the isolated copy asks for (a build cache shared with the live
     // checkout). Never a CANOPY* key: the scrub above is the point.
     for (key, value) in env {
@@ -563,6 +569,25 @@ mod tests {
         assert_eq!(run.stderr.trim(), "err");
         assert!(!run.timed_out);
         assert!(run.spawn_error.is_none());
+    }
+
+    #[test]
+    fn a_check_never_lets_pnpm_install_into_linked_node_modules() {
+        let run = rt()
+            .block_on(run_check(
+                "/",
+                &argv(&[
+                    "/bin/sh",
+                    "-c",
+                    "echo \"$pnpm_config_verify_deps_before_run|$npm_config_verify_deps_before_run\"",
+                ]),
+                Some(10_000),
+                None,
+                false,
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(run.stdout.trim(), "false|false");
     }
 
     #[test]
