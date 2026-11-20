@@ -407,8 +407,8 @@ jobs:
           # Windows: NSIS only. `targets: "all"` would also attempt an MSI via
           # WiX, whose light.exe fails on the runner — and NSIS is the format
           # the updater is configured for (installMode: passive) anyway.
-          # Unsigned for now — SmartScreen warns until an Authenticode
-          # certificate is added.
+          # Signed with SSL.com eSigner when the ES_* secrets are set (the
+          # "Windows signing" step below), else unsigned and SmartScreen warns.
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: "--target x86_64-pc-windows-msvc --bundles nsis --features desk-native"
@@ -587,6 +587,50 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `body<<CANOPY_RELEASE_NOTES\n${body}\nCANOPY_RELEASE_NOTES\n`);
           NODE
 
+      # Windows Authenticode signing with SSL.com eSigner (the OV certificate,
+      # publisher "CAUSE CONNECT PTE. LTD."). Repo secrets ES_USERNAME,
+      # ES_PASSWORD, ES_TOTP_SECRET, and ES_CREDENTIAL_ID (needed only with more
+      # than one eSigner certificate); without them the installer is unsigned.
+      # Tauri's sign command runs scripts/esigner-sign.ps1 on each executable:
+      # the app, its two sidecars, the installer and its uninstaller, so 5 paid
+      # signings per release. It skips DLLs and anything already signed and
+      # never retries. Pull requests (windows-packaging.yml) never sign.
+      - name: Windows signing (SSL.com eSigner, when its secrets are set)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+          CODESIGNTOOL_VERSION: v1.3.2
+          # SSL.com publishes no checksum for it; once a release has printed the hash below, pin it here.
+          CODESIGNTOOL_SHA256: ""
+        run: |
+          $missing = "ES_USERNAME","ES_PASSWORD","ES_TOTP_SECRET" | Where-Object { -not [Environment]::GetEnvironmentVariable($_) }
+          if ($missing) {
+            Write-Host "::warning::Windows signing is not configured (missing: $($missing -join ', ')): the installer is unsigned and SmartScreen will warn"
+            exit 0
+          }
+          $zip = Join-Path $env:RUNNER_TEMP "CodeSignTool.zip"
+          $url = "https://github.com/SSLcom/CodeSignTool/releases/download/$env:CODESIGNTOOL_VERSION/CodeSignTool-$env:CODESIGNTOOL_VERSION-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          Write-Host "CodeSignTool $env:CODESIGNTOOL_VERSION sha256 $hash"
+          if ($env:CODESIGNTOOL_SHA256 -and $hash -ne $env:CODESIGNTOOL_SHA256.ToLower()) { throw "CodeSignTool's checksum changed" }
+          $dir = Join-Path $env:RUNNER_TEMP "CodeSignTool"
+          Expand-Archive -Path $zip -DestinationPath $dir
+          $bat = Get-ChildItem -Path $dir -Recurse -Filter "CodeSignTool.bat" | Select-Object -First 1
+          if (-not $bat) { throw "CodeSignTool.bat is not in the download" }
+          "CODESIGNTOOL_DIR=$($bat.DirectoryName)" >> $env:GITHUB_ENV
+          # Forward slashes: the path is written into the NSIS script for the uninstaller, where a backslash could escape.
+          $script = "$($env:GITHUB_WORKSPACE -replace '\\', '/')/scripts/esigner-sign.ps1"
+          if (-not (Test-Path $script)) { throw "scripts/esigner-sign.ps1 is missing" }
+          # The object form of the sign command, so a path with a space stays one argument.
+          $conf = @{ bundle = @{ windows = @{ signCommand = @{ cmd = "pwsh"; args = @("-NoProfile", "-NonInteractive", "-File", $script, "%1") } } } }
+          $confPath = (Join-Path $env:RUNNER_TEMP "tauri.windows-sign.conf.json") -replace '\\', '/'
+          $conf | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8NoBOM $confPath
+          "WINDOWS_SIGN_ARGS= --config $confPath" >> $env:GITHUB_ENV
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -605,6 +649,11 @@ jobs:
           APPLE_ID: ${{ !inputs.skip_notarization && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ !inputs.skip_notarization && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # For scripts/esigner-sign.ps1 (Windows only; read only when the step above set up signing).
+          ES_USERNAME: ${{ matrix.platform == 'windows-latest' && secrets.ES_USERNAME || '' }}
+          ES_PASSWORD: ${{ matrix.platform == 'windows-latest' && secrets.ES_PASSWORD || '' }}
+          ES_TOTP_SECRET: ${{ matrix.platform == 'windows-latest' && secrets.ES_TOTP_SECRET || '' }}
+          ES_CREDENTIAL_ID: ${{ matrix.platform == 'windows-latest' && secrets.ES_CREDENTIAL_ID || '' }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: "Canopy __VERSION__"
@@ -615,7 +664,7 @@ jobs:
           prerelease: false
           # Writes latest.json, which plugins.updater.endpoints points at.
           includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }}${{ env.WINDOWS_SIGN_ARGS }}
 
       # tauri-bundler signs every externalBin entry with the app's entitlements
       # (one set for all, no per-binary setting), which would hand the PTY host
@@ -632,6 +681,19 @@ jobs:
       # run without it); then a missing identity, a missing host, or any
       # entitlement on the host fails the job. It runs after tauri-action has
       # uploaded to the draft release, which stays a draft until published.
+      - name: Verify the Windows signatures (when signing was set up)
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGN_ARGS != ''
+        shell: pwsh
+        run: |
+          $root = 'src-tauri/target/x86_64-pc-windows-msvc/release'
+          $files = @(Get-ChildItem "$root/*.exe") + @(Get-ChildItem "$root/bundle/nsis/*-setup.exe")
+          if (-not $files) { throw "no Windows executables found under $root" }
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host "$($f.Name): $($sig.Status) $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "$($f.Name) is not validly signed" }
+          }
+
       - name: Verify the PTY host sidecar is signed (macOS)
         if: startsWith(matrix.platform, 'macos')
         shell: bash
