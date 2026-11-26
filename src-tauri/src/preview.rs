@@ -29,6 +29,15 @@
 //! The proxy has no cookie jar of its own. The iframe's browser profile owns
 //! the session at the stable proxy origin; Set-Cookie is rewritten to that
 //! host, and the reserved reset document clears only that project's origin.
+//!
+//! Web Storage is the exception that needs the proxy's help. The proxy origin
+//! is a third-party frame under the app's own origin, and WebKit keeps a
+//! third-party frame's localStorage in memory only: it survives reloads but not
+//! an app restart, so every token-in-localStorage login (most SPAs) was lost
+//! on relaunch. An inline script injected ahead of the page's own mirrors
+//! localStorage to a per-project+origin file (`/__canopy__/storage`) and, when
+//! a fresh process starts the page with an empty store, puts it back before
+//! the app reads it. Reset deletes the saved copy with everything else.
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -44,10 +53,18 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PICKER_JS: &str = include_str!("preview_picker.js");
+const STORAGE_JS: &str = include_str!("preview_storage.js");
 /// Path the injected <script> tag loads from — reserved, never proxied.
 const PICKER_PATH: &str = "/__canopy__/picker.js";
 /// Loading this document clears browser-owned state for this proxy origin.
 pub const RESET_PATH: &str = "/__canopy__/reset";
+/// The page's saved localStorage: GET reads it, POST replaces it whole.
+const STORAGE_PATH: &str = "/__canopy__/storage";
+/// Header every storage request must carry. A cross-origin page can only send
+/// a custom header after a CORS preflight, which this path never grants.
+const STORAGE_HEADER: &str = "x-canopy-storage";
+/// Browsers cap localStorage near 5 MB per origin; leave room for JSON escaping.
+const MAX_STORAGE_SNAPSHOT: usize = 12 * 1024 * 1024;
 /// Request bodies and injectable HTML are the only proxy payloads buffered in
 /// native memory. Keep them below a useful development upload/document size;
 /// non-HTML responses continue to stream without this retention.
@@ -95,6 +112,10 @@ struct ProxyCtx {
     /// Cookie name + effective path observed in Set-Cookie. The reset document
     /// expires each one, including HttpOnly cookies JavaScript cannot see.
     cookies: Arc<Mutex<HashSet<CookieKey>>>,
+    /// Where this project+origin's localStorage is kept between app runs.
+    /// None when no home directory is available: pages still work, logins
+    /// just don't outlive the process.
+    storage: Option<PathBuf>,
 }
 
 impl ProxyCtx {
@@ -236,12 +257,16 @@ pub struct PreviewInfo {
 /// The project id is already opaque, but hashing it again keeps even its shape
 /// out of DNS and gives the label a fixed safe alphabet and length.
 fn isolated_host(project_id: &str) -> String {
+    format!("p-{:016x}.localhost", fnv64(project_id))
+}
+
+fn fnv64(text: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in project_id.as_bytes() {
+    for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("p-{hash:016x}.localhost")
+    hash
 }
 
 /// Resolve before advertising the hostname. RFC 6761 makes localhost special,
@@ -286,6 +311,68 @@ fn port_store_path() -> Result<PathBuf, String> {
     let dir = PathBuf::from(home).join(".canopy");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("preview-ports.json"))
+}
+
+/// The saved localStorage file for one project+target, beside the port leases.
+/// The name is a hash: neither the project id nor the site lands in a filename.
+fn storage_store_path(project_id: &str, origin: &str) -> Result<PathBuf, String> {
+    let leases = port_store_path()?;
+    let dir = leases
+        .parent()
+        .ok_or("preview: no directory for saved storage")?;
+    Ok(storage_file_in(dir, project_id, origin))
+}
+
+fn storage_file_in(dir: &Path, project_id: &str, origin: &str) -> PathBuf {
+    dir.join("preview-storage").join(format!(
+        "{:016x}.json",
+        fnv64(&port_lease_key(project_id, origin))
+    ))
+}
+
+fn read_saved_storage(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok().filter(|bytes| !bytes.is_empty())
+}
+
+/// Replace the saved copy whole. It holds session tokens, so it is readable by
+/// this user only, and written through a temp file so a crash never leaves
+/// half a snapshot. An empty store removes the file instead.
+fn write_saved_storage(
+    path: &Path,
+    snapshot: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if snapshot.is_empty() {
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        };
+    }
+    let dir = path
+        .parent()
+        .ok_or("preview: no directory for saved storage")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(snapshot).map_err(|e| e.to_string())?;
+    // Two tabs on one origin share this file and may save at once; each write
+    // gets its own temp name so neither renames the other's half-written file.
+    static NEXT_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 fn load_port_leases(path: &Path) -> Result<PortLeases, String> {
@@ -441,6 +528,9 @@ pub async fn preview_start(
         client,
         log: log.clone(),
         cookies: cookies.clone(),
+        storage: storage_store_path(&project_id, &origin)
+            .map_err(|e| log::warn!(target: "preview", "{e}; logins won't outlive this run"))
+            .ok(),
     });
 
     let router = Router::new().fallback(proxy_handler).with_state(ctx);
@@ -534,6 +624,9 @@ async fn proxy_handler(State(ctx): State<Arc<ProxyCtx>>, req: Request) -> Respon
     if req.uri().path() == RESET_PATH {
         return reset_page(&ctx);
     }
+    if req.uri().path() == STORAGE_PATH {
+        return storage_endpoint(&ctx, req).await;
+    }
     let method = req.method().to_string();
     let path = req
         .uri()
@@ -622,6 +715,86 @@ fn rewrite_set_cookie(value: &HeaderValue, request_path: &str) -> Option<(Header
     ))
 }
 
+/// The saved store holds live session tokens and the proxy is an open loopback
+/// port, so only the previewed page itself may read or replace it: the custom
+/// header rules out a cross-origin page (it would need a preflight this path
+/// never answers), and Host rules out DNS rebinding onto the port.
+fn storage_request_allowed(ctx: &ProxyCtx, headers: &HeaderMap) -> bool {
+    let is_proxy = |authority: &str| {
+        let host = authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host);
+        host.eq_ignore_ascii_case(&ctx.proxy_host)
+    };
+    let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    get(STORAGE_HEADER) == Some("1")
+        && get("host").is_some_and(is_proxy)
+        && get("sec-fetch-site").is_none_or(|site| site == "same-origin")
+        && get("origin").is_none_or(|origin| origin.split("://").nth(1).is_some_and(is_proxy))
+}
+
+async fn storage_endpoint(ctx: &ProxyCtx, req: Request) -> Response {
+    if !storage_request_allowed(ctx, req.headers()) {
+        return plain(
+            StatusCode::FORBIDDEN,
+            "Canopy preview: saved storage is only for the previewed page".into(),
+        );
+    }
+    let Some(path) = ctx.storage.as_deref() else {
+        return plain(
+            StatusCode::NOT_FOUND,
+            "Canopy preview: no saved storage".into(),
+        );
+    };
+    let json = |status: StatusCode, body: Vec<u8>| {
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    match *req.method() {
+        Method::GET => json(
+            StatusCode::OK,
+            read_saved_storage(path).unwrap_or_else(|| b"{}".to_vec()),
+        ),
+        Method::POST => {
+            let Ok(bytes) = axum::body::to_bytes(req.into_body(), MAX_STORAGE_SNAPSHOT).await
+            else {
+                return plain(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Canopy preview: storage too large".into(),
+                );
+            };
+            let snapshot =
+                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
+                    .ok()
+                    .filter(|map| map.values().all(serde_json::Value::is_string));
+            let Some(snapshot) = snapshot else {
+                return plain(
+                    StatusCode::BAD_REQUEST,
+                    "Canopy preview: storage must be an object of strings".into(),
+                );
+            };
+            match write_saved_storage(path, &snapshot) {
+                Ok(()) => json(StatusCode::NO_CONTENT, Vec::new()),
+                Err(e) => {
+                    log::warn!(target: "preview", "save preview storage: {e}");
+                    plain(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Canopy preview: {e}"),
+                    )
+                }
+            }
+        }
+        _ => plain(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Canopy preview: GET or POST".into(),
+        ),
+    }
+}
+
 /// A document at the project's own proxy origin is the only actor that can
 /// clear its Web Storage without touching another project. Response headers
 /// expire every cookie the proxy observed, including HttpOnly ones; the page
@@ -635,6 +808,15 @@ fn reset_page(ctx: &ProxyCtx) -> Response {
         // Useful to the caller completing a reset, and keeps the response
         // explicit about which isolated origin it acted on.
         .header("x-canopy-preview-host", ctx.proxy_host.as_str());
+    // The page clears its live storage below; the saved copy would otherwise
+    // put it all back on the next app run.
+    if let Some(path) = ctx.storage.as_deref() {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(target: "preview", "reset: remove saved storage: {e}");
+            }
+        }
+    }
     let mut cookies: Vec<CookieKey> = ctx.cookies.lock().unwrap().iter().cloned().collect();
     cookies.sort_by(|a, b| (&a.name, &a.path).cmp(&(&b.name, &b.path)));
     for cookie in cookies {
@@ -887,7 +1069,8 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
                 ));
             }
         }
-        let html = inject_picker(&bytes);
+        let storage = ctx.storage.as_deref().map(Path::exists);
+        let html = inject_picker(&bytes, storage);
         return builder.body(Body::from(html)).map_err(|e| e.to_string());
     }
     builder
@@ -939,8 +1122,18 @@ fn retarget_page(url: &str) -> Response {
 /// its console capture is ahead of the app's own (deferred/module) scripts in
 /// the execution order; else before </head> / </body>, else appended (fragment
 /// responses).
-fn inject_picker(bytes: &[u8]) -> Vec<u8> {
-    let tag = format!(r#"<script src="{PICKER_PATH}" defer></script>"#);
+/// Inject the picker, and with `storage` the storage keeper ahead of it.
+/// `storage` is None when there is nowhere to save, else whether a saved copy
+/// exists for the page to restore.
+fn inject_picker(bytes: &[u8], storage: Option<bool>) -> Vec<u8> {
+    let mut tag = String::new();
+    if let Some(saved) = storage {
+        // Inline and not deferred, so it runs before any script the page has.
+        tag.push_str("<script>");
+        tag.push_str(&STORAGE_JS.replace("__CANOPY_SAVED__", if saved { "true" } else { "false" }));
+        tag.push_str("</script>");
+    }
+    tag.push_str(&format!(r#"<script src="{PICKER_PATH}" defer></script>"#));
     let html = String::from_utf8_lossy(bytes);
     let lower = html.to_lowercase();
     // After the `>` of the opening <head ...> tag, if there is one.
@@ -1138,30 +1331,204 @@ mod tests {
     #[test]
     fn inject_prefers_head_start_then_body_then_appends() {
         // At the top of <head>: the console hook must beat the app's scripts.
-        let head = inject_picker(b"<html><head><title>t</title></head><body></body></html>");
+        let head = inject_picker(
+            b"<html><head><title>t</title></head><body></body></html>",
+            None,
+        );
         let head = String::from_utf8(head).unwrap();
         assert!(head.contains(&format!(
             r#"<head><script src="{PICKER_PATH}" defer></script><title>"#
         )));
 
-        let attrs = inject_picker(b"<html><head data-x=\"1\"><script>app()</script></head></html>");
+        let attrs = inject_picker(
+            b"<html><head data-x=\"1\"><script>app()</script></head></html>",
+            None,
+        );
         let attrs = String::from_utf8(attrs).unwrap();
         assert!(attrs.contains(&format!(
             r#"<head data-x="1"><script src="{PICKER_PATH}" defer></script><script>app()"#
         )));
 
-        let body = inject_picker(b"<html><body>hi</body></html>");
+        let body = inject_picker(b"<html><body>hi</body></html>", None);
         let body = String::from_utf8(body).unwrap();
         assert!(body.contains(r#"defer></script></body>"#));
 
         // <header> alone must not fool the head-open matcher.
-        let hdr = String::from_utf8(inject_picker(b"<header>x</header>")).unwrap();
+        let hdr = String::from_utf8(inject_picker(b"<header>x</header>", None)).unwrap();
         assert!(hdr.starts_with("<header>x</header>"));
         assert!(hdr.ends_with("</script>"));
 
-        let frag = String::from_utf8(inject_picker(b"<div>x</div>")).unwrap();
+        let frag = String::from_utf8(inject_picker(b"<div>x</div>", None)).unwrap();
         assert!(frag.ends_with("</script>"));
         assert!(frag.starts_with("<div>"));
+    }
+
+    /// The keeper must run before the app's first script reads localStorage,
+    /// so it is inline, undeferred, and ahead of everything in <head>.
+    #[test]
+    fn storage_keeper_is_inlined_first_and_told_whether_a_copy_exists() {
+        let page = b"<html><head><script>app()</script></head></html>";
+        for (saved, literal) in [
+            (true, "var hasSaved = true;"),
+            (false, "var hasSaved = false;"),
+        ] {
+            let html = String::from_utf8(inject_picker(page, Some(saved))).unwrap();
+            let keeper = html.find("<head><script>").expect("keeper opens <head>");
+            let picker = html.find(PICKER_PATH).unwrap();
+            let app = html.find("app()").unwrap();
+            assert!(keeper < picker && picker < app);
+            assert!(html.contains(literal));
+            assert!(!html.contains("__CANOPY_SAVED__"));
+        }
+        // The inlined source must not be able to close its own <script>.
+        assert!(!STORAGE_JS.to_ascii_lowercase().contains("</script"));
+    }
+
+    fn storage_request(method: Method, host: &str, extra: &[(&str, &str)], body: &str) -> Request {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(STORAGE_PATH)
+            .header(header::HOST, host);
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn scratch_storage_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "canopy-preview-storage-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("saved.json")
+    }
+
+    #[tokio::test]
+    async fn saved_storage_round_trips_only_for_the_previewed_page() {
+        let mut ctx = test_ctx("p-a.localhost", &[]);
+        let file = scratch_storage_file("round-trip");
+        ctx.storage = Some(file.clone());
+        let host = "p-a.localhost:55087";
+        let ok = [(STORAGE_HEADER, "1"), ("sec-fetch-site", "same-origin")];
+
+        // Nothing saved yet reads as an empty store.
+        let empty = storage_endpoint(&ctx, storage_request(Method::GET, host, &ok, "")).await;
+        assert_eq!(empty.status(), StatusCode::OK);
+        assert_eq!(body_text(empty).await, "{}");
+
+        let token = r#"{"accessToken":"abc","coraa_current_org_id":"o1"}"#;
+        let saved = storage_endpoint(&ctx, storage_request(Method::POST, host, &ok, token)).await;
+        assert_eq!(saved.status(), StatusCode::NO_CONTENT);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "tokens readable by this user only");
+        }
+        let read = storage_endpoint(&ctx, storage_request(Method::GET, host, &ok, "")).await;
+        let read: serde_json::Value = serde_json::from_str(&body_text(read).await).unwrap();
+        assert_eq!(read["accessToken"], "abc");
+
+        // Anyone else is refused: no custom header (a plain cross-site form or
+        // <img>), a cross-site fetch, another Origin, or a rebound Host.
+        let refusals: [(&str, Vec<(&str, &str)>); 4] = [
+            (host, vec![("sec-fetch-site", "same-origin")]),
+            (
+                host,
+                vec![(STORAGE_HEADER, "1"), ("sec-fetch-site", "cross-site")],
+            ),
+            (
+                host,
+                vec![(STORAGE_HEADER, "1"), ("origin", "https://evil.example")],
+            ),
+            ("evil.example:55087", ok.to_vec()),
+        ];
+        for (refused_host, headers) in refusals {
+            let get = storage_endpoint(
+                &ctx,
+                storage_request(Method::GET, refused_host, &headers, ""),
+            )
+            .await;
+            assert_eq!(
+                get.status(),
+                StatusCode::FORBIDDEN,
+                "{refused_host} {headers:?}"
+            );
+            let post = storage_endpoint(
+                &ctx,
+                storage_request(Method::POST, refused_host, &headers, "{}"),
+            )
+            .await;
+            assert_eq!(post.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(
+            file.exists(),
+            "a refused write must not touch the saved copy"
+        );
+
+        // The page's own Origin is accepted on writes.
+        let own = [
+            (STORAGE_HEADER, "1"),
+            ("origin", "http://p-a.localhost:55087"),
+        ];
+        let bad = storage_endpoint(
+            &ctx,
+            storage_request(Method::POST, host, &own, r#"{"n":1}"#),
+        )
+        .await;
+        assert_eq!(
+            bad.status(),
+            StatusCode::BAD_REQUEST,
+            "values must be strings"
+        );
+
+        // Logging out empties the store, and the saved copy goes with it.
+        let cleared = storage_endpoint(&ctx, storage_request(Method::POST, host, &own, "{}")).await;
+        assert_eq!(cleared.status(), StatusCode::NO_CONTENT);
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn reset_deletes_the_saved_storage() {
+        let mut ctx = test_ctx("p-a.localhost", &[]);
+        let file = scratch_storage_file("reset");
+        ctx.storage = Some(file.clone());
+        let mut snapshot = serde_json::Map::new();
+        snapshot.insert("accessToken".into(), "abc".into());
+        write_saved_storage(&file, &snapshot).unwrap();
+        assert!(file.exists());
+        let _ = reset_page(&ctx);
+        assert!(
+            !file.exists(),
+            "reset must not let the next run restore the old login"
+        );
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn each_project_and_origin_saves_to_its_own_file() {
+        let a = storage_store_path("p_1", "https://studio.coraa.ai").unwrap();
+        let b = storage_store_path("p_2", "https://studio.coraa.ai").unwrap();
+        let c = storage_store_path("p_1", "http://localhost:3000").unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(
+            a,
+            storage_store_path("p_1", "https://studio.coraa.ai").unwrap()
+        );
+        assert!(
+            !a.to_string_lossy().contains("coraa"),
+            "the site stays out of the filename"
+        );
     }
 
     #[test]
@@ -1196,6 +1563,7 @@ mod tests {
             client: reqwest::Client::new(),
             log: NetLog::default(),
             cookies: Arc::default(),
+            storage: None,
         });
         let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1369,6 +1737,7 @@ mod tests {
                     })
                     .collect(),
             )),
+            storage: None,
         }
     }
 
@@ -1437,6 +1806,7 @@ mod tests {
             client: reqwest::Client::new(),
             log: NetLog::default(),
             cookies: Arc::default(),
+            storage: None,
         });
         let net_log = ctx.log.clone();
         let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1531,6 +1901,7 @@ mod tests {
                 .unwrap(),
             log: NetLog::default(),
             cookies: Arc::default(),
+            storage: None,
         });
         let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await

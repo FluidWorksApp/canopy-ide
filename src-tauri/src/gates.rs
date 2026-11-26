@@ -1980,6 +1980,16 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
             // A generic deploy: a deploy verb aimed at production, through any
             // wrapper (`npm run deploy -- --prod`, `make deploy-prod`, `sls
             // deploy --stage production`).
+            //
+            // `gh` is judged by its verb: opening or editing a pull request or
+            // issue only mentions a branch or title, it deploys nothing.
+            if v == "gh"
+                && !["workflow", "release", "api", "run"]
+                    .iter()
+                    .any(|s| args.first() == Some(s))
+            {
+                return None;
+            }
             let all: Vec<String> = words.iter().map(|w| w.to_ascii_lowercase()).collect();
             let deploys = all.iter().any(|w| w.contains("deploy") || w == "release");
             let prod = all.iter().any(|w| {
@@ -2992,6 +3002,7 @@ mod tests {
             "rm -f /tmp/x",
             "rm -rf build/*",
             "rm -rf \"$TMPDIR/cache\"",
+            "gh pr create --base production --head develop --title 'Production Deploy'",
             "git push",
             "git push origin feature",
             "git push --force origin feature/x",
