@@ -11847,6 +11847,45 @@ const ProjectViewBody = memo(function ProjectViewBody({
     onNoticeRef.current(`${cli.name} stayed on its account: no other account could open this conversation`, "error");
   }, [agentStarted, moveAgent]);
 
+  /** The same move a usage limit makes, but to an account the person picked,
+   *  for this one tab. The app-wide profile is left where it is. */
+  const moveTabToProfile = useCallback(async (tabId: string, to: string) => {
+    const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
+    const target = agentTargetsRef.current.find(a => a.tabId === tabId);
+    const cli = target && agentCliFor(target.agentId);
+    if (!tab || !cli) return;
+    const label = profilesRef.current.find(p => p.id === to)?.label ?? to;
+    const signedIn = await ipc.profileAccounts(to)
+      .then(list => list.find(a => a.agent === cli.id)?.state === "in")
+      .catch(() => false);
+    if (!signedIn) {
+      onNoticeRef.current(`${label} isn't signed in to ${cli.name}. Sign in from the profile menu first`, "error");
+      return;
+    }
+    onNoticeRef.current(`Moving ${cli.name} to ${label}…`, "info");
+    const result = await moveAgent(tabId, to);
+    if (!result) {
+      onNoticeRef.current(`${cli.name} is already changing account`, "error");
+      return;
+    }
+    if (result.outcome === "moved") {
+      waitingTabs.current.delete(tabId);
+      const started = await agentStarted(liveSessionByPtyRef.current.get(tab.ptyId ?? -1) || tab.rememberedSessionId, to);
+      onNoticeRef.current(started
+        ? `Continuing conversation on ${label}`
+        : `${cli.name} moved to ${label} and is waiting for an answer in its terminal`, started ? "info" : "error");
+    } else if (result.outcome === "started-fresh") {
+      waitingTabs.current.delete(tabId);
+      onNoticeRef.current(`${cli.name} started on ${label}; it had no saved conversation to carry`, "info");
+    } else if (result.outcome === "failed") {
+      onNoticeRef.current(`${cli.name} could not change account: ${result.reason}`, "error");
+    } else {
+      onNoticeRef.current(`${cli.name} stayed on its account: ${label} could not open this conversation (${result.reason})`, "error");
+    }
+  }, [agentStarted, moveAgent]);
+  const moveTabToProfileRef = useRef(moveTabToProfile);
+  moveTabToProfileRef.current = moveTabToProfile;
+
   const onAccountLimit = useCallback(async (tabId: string, limit: { message: string; sessionId?: string }) => {
     if (isRemoteHost() || !canHandOver() || !getSettings().accountRotation || movingTabs.current.has(tabId)) return;
     const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
@@ -13645,6 +13684,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
               },
             ]
           : []),
+        // The move a usage limit makes on its own, chosen by hand for this tab.
+        ...(() => {
+          if (tab.type !== "terminal" || tab.ptyId == null || isRemoteHost() || !canHandOver()) return [];
+          const cli = agentCliFor(agentTargetsRef.current.find((a) => a.tabId === tab.id)?.agentId ?? "");
+          if (!cli?.capabilities?.conversationTransfer || !supportsProfiles(cli.id)) return [];
+          const current = tab.profile || DEFAULT_PROFILE;
+          const others = profilesRef.current.filter((p) => p.id !== current);
+          if (!others.length) return [];
+          const limits = getSettings().accountLimits ?? {};
+          const now = Date.now();
+          return [
+            {
+              label: "Move to profile",
+              submenu: profilesRef.current.map((p) => ({
+                label: p.label,
+                ...(p.id === current
+                  ? { disabled: true, hint: "current" }
+                  : {
+                      // Still movable: the person may know the limit has reset.
+                      ...((limits[limitKey(cli.id, p.id)]?.until ?? 0) > now ? { hint: "at limit" } : {}),
+                      onClick: () => void moveTabToProfileRef.current(tab.id, p.id),
+                    }),
+              })),
+            },
+          ];
+        })(),
         ...(tab.type === "terminal" && teleportCandidateRef.current(tab)
           ? [
               {
