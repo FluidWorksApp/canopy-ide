@@ -41,7 +41,7 @@ export const QUIET_READY_MS = 5_000;
 /** After a delivery the agent's state still reads idle until its turn is
  *  seen starting; nothing more is typed into it for this long. */
 export const DELIVERY_GAP_MS = 15_000;
-/** A message nobody could deliver is dropped after this long. */
+/** A message nobody could deliver is dropped this long after it was written. */
 export const QUEUE_TTL_MS = 6 * 3_600_000;
 
 /** Whether an agent may be typed into now. "waiting" means a question or a
@@ -90,9 +90,12 @@ export function createAgentInbox(deps: AgentInboxDeps) {
     handled.add(item.message.id);
     if (handled.size > 2000) handled.delete(handled.values().next().value!);
     if (agentRunTooLong(item.messages, item.message)) return tell(item, name, "paused");
+    if (now() - item.message.created > QUEUE_TTL_MS) return tell(item, name, "gone");
     const agent = (await deps.agents()).find((a) => a.name.trim().toLowerCase() === name.toLowerCase());
     if (!agent) return tell(item, name, "missing");
-    const q = { item, agent, at: now() };
+    // From when it was written: a message that arrives days late (backfill)
+    // is not typed into an agent as if it were new.
+    const q = { item, agent, at: Math.min(now(), item.message.created) };
     if (free(agent.ptyId) && !queue.some((w) => w.agent.ptyId === agent.ptyId)) {
       try {
         return await deliver(q);
@@ -115,7 +118,7 @@ export function createAgentInbox(deps: AgentInboxDeps) {
         const gone = !running.has(q.agent.ptyId), stale = now() - q.at > QUEUE_TTL_MS;
         if (gone || stale) {
           queue.splice(queue.indexOf(q), 1);
-          tell(q.item, q.agent.name, "missing");
+          tell(q.item, q.agent.name, "gone");
           continue;
         }
         // One message per agent per turn: the next waits for this one's answer.

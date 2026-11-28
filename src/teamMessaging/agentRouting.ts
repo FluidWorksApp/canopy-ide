@@ -31,10 +31,11 @@ export function agentAddressee(m: ChatMessage, user: string): string | null {
  *  in its thread (or, outside threads, its conversation). */
 export function agentRunTooLong(messages: readonly ChatMessage[], m: ChatMessage): boolean {
   const find = (id: string) => messages.find((x) => x.id === id);
-  const root = threadRoot(m, find) ?? m.id;
+  const root = threadRoot(m, find);
   const sameConversation = (x: ChatMessage) =>
     m.recipient === null ? x.recipient === null : x.recipient !== null && [x.sender, x.recipient].sort().join("\0") === [m.sender, m.recipient].sort().join("\0");
-  const inThread = (x: ChatMessage) => x.id === root || threadRoot(x, find) === root;
+  // In a thread: its root and replies. Outside one: the conversation's top-level messages.
+  const inThread = (x: ChatMessage) => (root ? x.id === root || threadRoot(x, find) === root : !threadRoot(x, find));
   const line = messages.filter((x) => x.created <= m.created && x.id !== m.id && sameConversation(x) && inThread(x));
   let run = agentTagOf(m)?.from ? 1 : 0;
   if (!run) return false;
@@ -103,7 +104,7 @@ export type AgentDelivery = { agent: string; state: AgentDeliveryState; by: stri
 
 /** A device without the agent says `missing` while the one running it says
  *  `queued` and then `delivered`; the more informative answer wins. */
-const RANK: Record<AgentDeliveryState, number> = { missing: 0, paused: 1, queued: 2, delivered: 3 };
+const RANK: Record<AgentDeliveryState, number> = { missing: 0, paused: 1, queued: 2, gone: 3, delivered: 4 };
 
 const KEY = "canopy.agentDelivery";
 const MAX = 500;
@@ -145,6 +146,7 @@ export function agentDeliveryText(d: AgentDelivery, ownerName: string | null): s
   const whose = ownerName ? `${ownerName}'s ${d.agent}` : d.agent;
   if (d.state === "delivered") return `Delivered to ${whose}`;
   if (d.state === "queued") return `${whose} gets this when it finishes its turn`;
+  if (d.state === "gone") return `Not delivered: ${whose} stopped before it could take it`;
   if (d.state === "paused") return `Not passed to ${whose}: ${AGENT_RUN_LIMIT} agent messages in a row. Reply yourself to carry on.`;
   return ownerName ? `${whose} isn't running` : `${d.agent} isn't running on this machine`;
 }

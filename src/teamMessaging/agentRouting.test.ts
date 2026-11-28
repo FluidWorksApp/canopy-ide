@@ -48,6 +48,15 @@ describe('agent routing',()=>{
   const person=msg({sender:'vijay',thread:{root:root.id}}),next=msg({sender:'vijay',thread:{root:root.id},agent:{from:'Yarrow 6'}});
   expect(agentRunTooLong([...line,person,next],next)).toBe(false);
  });
+ it('stops agents answering each other with new messages, not only in a thread',()=>{
+  const line:ChatMessage[]=[];
+  for(let i=0;i<AGENT_RUN_LIMIT;i++)line.push(msg({sender:i%2?'me':'vijay',recipient:i%2?'vijay':'me',agent:{from:i%2?'Niffler 4':'Yarrow 6'}}));
+  expect(agentRunTooLong(line,line.at(-1)!)).toBe(true);
+  // Another conversation's messages do not count towards this one.
+  const elsewhere=line.map(m=>({...m,id:id(),sender:'ana',recipient:'me'}));
+  const fresh=msg({agent:{from:'Yarrow 6'}});
+  expect(agentRunTooLong([...elsewhere,fresh],fresh)).toBe(false);
+ });
  it('shows an agent message without its footer',()=>{
   expect(withoutAgentFooter(`Done.\n\n${agentFooter('Yarrow 6')}`)).toBe('Done.');
   expect(withoutAgentFooter(`Done.\n\n${agentFooter(null)}`)).toBe('Done.');
@@ -119,8 +128,10 @@ describe('agent inbox',()=>{
   const s=setup({},[]);
   await s.inbox.receive(s.item());expect(s.report.mock.calls.at(-1)?.[5]).toBe('missing');
   const agents=[{ptyId:7,name:'Niffler 4'}],t=setup({7:{state:'working',quietMs:0}},agents);
-  await t.inbox.receive(t.item());agents.length=0;await t.inbox.flush();
-  expect(t.report.mock.calls.at(-1)?.[5]).toBe('missing');expect(t.inbox.pending()).toBe(0);
+  const waiting=t.item();await t.inbox.receive(waiting);agents.length=0;await t.inbox.flush();
+  expect(t.report.mock.calls.at(-1)?.[5]).toBe('gone');expect(t.inbox.pending()).toBe(0);
+  // "Waiting" on the record turns into "stopped", not stuck at waiting.
+  expect(agentDeliveries()[waiting.message.id].state).toBe('gone');
  });
  it('never delivers one message twice, or a message for someone else',async()=>{
   const s=setup({7:{state:'idle',quietMs:0}});

@@ -212,3 +212,24 @@ describe('threads and unread',()=>{
   expect(session.getSnapshot().messages.find(m=>m.id===again.id)).toMatchObject({text:'me too',thread:{root:root.id},mentions:['ada']});
  });
 });
+
+describe('agents in a conversation (v5)',()=>{
+ it('sends a message marked for a teammate\'s agent, and refuses one for an agent outside the conversation',async()=>{
+  const {session}=await open();
+  void session.send('Run the audit','ada',[],{agent:{from:'Niffler 4',to:{name:'Yarrow 6',owner:'ada'}}}).catch(()=>{});
+  expect(session.getSnapshot().messages.at(-1)).toMatchObject({recipient:'ada',agent:{from:'Niffler 4',to:{name:'Yarrow 6',owner:'ada'}}});
+  await expect(session.send('x','ada',[],{agent:{to:{name:'Wren',owner:'sam'}}})).rejects.toThrow(/not in this conversation/);
+  await expect(session.send('x','ada',[],{agent:{to:{name:'Mine',owner:'me'}}})).rejects.toThrow(/not in this conversation/);
+  await expect(session.send('x','ada',[],{agent:{from:'x'.repeat(61)}})).rejects.toThrow(/short single line/);
+ });
+ it('passes a delivery status to its listeners without adding a message or an unread',async()=>{
+  const {session,events}=await open();
+  const {subscribeAgentStatus}=await import('./session');
+  const heard:unknown[]=[];const off=subscribeAgentStatus(e=>heard.push(e));
+  const target=uuid();
+  events.message(message({sender:'ada',recipient:'me',text:'Delivered to Yarrow 6',event:{type:'agent-status',target,agent:'Yarrow 6',state:'delivered'}}));
+  off();
+  expect(heard).toEqual([expect.objectContaining({sender:'ada',event:{type:'agent-status',target,agent:'Yarrow 6',state:'delivered'}})]);
+  expect(session.getSnapshot().messages).toEqual([]);expect(session.getSnapshot().unreadIds).toEqual([]);
+ });
+});

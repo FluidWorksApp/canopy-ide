@@ -34,10 +34,11 @@ export type DeleteEvent={type:'delete';target:string};
 /** What happened to a message written for an agent (`target`), told to its
  *  sender by the agent owner's Canopy: `queued` (the agent is mid-turn and
  *  gets it when it finishes), `delivered` (typed into its terminal),
- *  `missing` (no agent by that name is running there), `paused` (too many
- *  agent messages in a row in that thread, so a person has to step in). */
+ *  `missing` (no agent by that name is running there), `gone` (it was
+ *  queued, but the agent stopped, or never finished, before taking it),
+ *  `paused` (too many agent messages in a row, so a person has to step in). */
 export type AgentStatusEvent={type:'agent-status';target:string;agent:string;state:AgentDeliveryState};
-export type AgentDeliveryState='queued'|'delivered'|'missing'|'paused';
+export type AgentDeliveryState='queued'|'delivered'|'missing'|'gone'|'paused';
 export type ChatEvent=ReactionEvent|EditEvent|DeleteEvent|LiveEvent|LayerEvent|AgentStatusEvent;
 /** A reply in a thread: `root` is the first message of the thread. */
 export type ThreadRef={root:string};
@@ -101,7 +102,7 @@ export function parseEvent(value:unknown):ChatEvent|undefined{
  if(e.type==='agent-status')return validTarget(e.target)&&validAgentName(e.agent)&&AGENT_STATES.includes(e.state as AgentDeliveryState)&&exact(e,['type','target','agent','state'])?{type:'agent-status',target:e.target,agent:e.agent,state:e.state as AgentDeliveryState}:undefined;
  return undefined;
 }
-const AGENT_STATES:readonly AgentDeliveryState[]=['queued','delivered','missing','paused'];
+const AGENT_STATES:readonly AgentDeliveryState[]=['queued','delivered','missing','gone','paused'];
 /** An agent's display name: short, one line, nothing that renders as something else. */
 export const validAgentName=(value:unknown):value is string=>typeof value==='string'&&value.trim().length>0&&value.length<=60&&value===value.trim()&&!hasControl(value)&&!hasBidi(value);
 /** The `agent` field of a message, or undefined when it is malformed. */

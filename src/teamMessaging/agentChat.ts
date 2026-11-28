@@ -16,7 +16,7 @@
 /** The slice of a TeamSession this module uses. */
 import type { ChatMessage } from "./client";
 import type { MessageExtensions } from "./messageSchema";
-import { agentTagOf } from "./chatEvents";
+import { agentTagOf, validAgentName } from "./chatEvents";
 import { threadRoot } from "./unread";
 
 export interface ChatSession {
@@ -163,7 +163,10 @@ export function createAgentChat(deps: AgentChatDeps) {
       if (owner === null) throw new Error("To reach a teammate's agent, message that teammate directly (to: their name), not the channel.");
       target = { name: req.toAgent.trim(), owner };
     }
-    const from = req.agent?.trim() || undefined;
+    // A session name that is not a valid tag (too long, odd characters) is
+    // still in the footer; the message must not fail over a label.
+    const name = req.agent?.trim();
+    const from = name && validAgentName(name) ? name : undefined;
     const tag = from || target ? { agent: { ...(from ? { from } : {}), ...(target ? { to: target } : {}) } } : {};
     const sent = await session.send(`${text}\n\n${agentFooter(req.agent)}`, who.peer, { ...tag, ...(thread ? { thread: { root: thread } } : {}) });
     const state = sent.delivery?.state;

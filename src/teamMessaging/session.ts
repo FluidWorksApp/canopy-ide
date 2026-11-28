@@ -258,7 +258,7 @@ export class TeamSession {
  async sendAgentStatus(peer:string,target:string,agent:string,state:AgentDeliveryState):Promise<number>{
   if(this.invalid||peer===this.user)return 0;
   const event:AgentStatusEvent={type:'agent-status',target,agent,state};
-  const text=state==='delivered'?`Delivered to ${agent}`:state==='queued'?`${agent} gets this when it finishes its turn`:state==='paused'?`Not passed to ${agent}: too many agent messages in a row`:`${agent} isn't running`;
+  const text=state==='delivered'?`Delivered to ${agent}`:state==='queued'?`${agent} gets this when it finishes its turn`:state==='paused'?`Not passed to ${agent}: too many agent messages in a row`:state==='gone'?`Not delivered: ${agent} stopped before it could take it`:`${agent} isn't running`;
   const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient:peer,text,created:Date.now(),v:CHAT_VERSION,event};
   await this.ready.catch(()=>{});if(this.invalid)return 0;
   return (await this.client.sendToCapable(AGENT_VERSION,message)).devices;
