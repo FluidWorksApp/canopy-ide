@@ -472,10 +472,55 @@ fn js_log(level: String, message: String) {
         return;
     }
     match level.as_str() {
-        "error" => log::error!(target: "webview", "{message}"),
-        "warn" => log::warn!(target: "webview", "{message}"),
+        "error" => log::error!(target: "webview", "{}", error_line(&message)),
+        "warn" => log::warn!(target: "webview", "{}", error_line(&message)),
         _ => log::info!(target: "webview", "{message}"),
     }
+}
+
+/// Longest line the error log keeps from the webview.
+const ERROR_LINE_MAX: usize = 600;
+
+/// A webview warning or error as the error log keeps it: one line, cut short,
+/// the home folder written as `~` and URL query strings (where tokens travel)
+/// dropped. The log stays on this machine; this keeps it readable and keeps
+/// secrets out of it when someone attaches it to a report.
+fn error_line(message: &str) -> String {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    error_line_with_home(message, &home)
+}
+
+fn error_line_with_home(message: &str, home: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for word in message.split_whitespace() {
+        let mut word = word.to_string();
+        if word.contains("://") {
+            if let Some(at) = word.find(|c| c == '?' || c == '#') {
+                word.truncate(at);
+                word.push_str("?…");
+            }
+        }
+        if home.len() > 1 {
+            word = word.replace(home, "~");
+        }
+        words.push(word);
+    }
+    let line = words.join(" ");
+    if line.chars().count() <= ERROR_LINE_MAX {
+        return line;
+    }
+    let mut cut: String = line.chars().take(ERROR_LINE_MAX).collect();
+    cut.push('…');
+    cut
+}
+
+/// Which log lines go in the release error log: warnings and errors from the
+/// webview only. Those pass through `error_line` first; native `log::warn!`
+/// lines are written as they are, so they stay out.
+fn error_log_keeps(metadata: &log::Metadata) -> bool {
+    metadata.level() <= log::Level::Warn && metadata.target() == "webview"
 }
 
 /// Apps started by launchd inherit macOS's 256-descriptor soft limit. Canopy
@@ -709,6 +754,7 @@ pub fn run() {
                 // across renderer and native-host exits. Do not widen this
                 // filter: ordinary application logs may contain paths, URLs or
                 // user-authored text that do not belong in incident telemetry.
+                // Warnings and errors go to a separate errors.log instead.
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
@@ -720,6 +766,14 @@ pub fn run() {
                                 file_name: Some("resilience".into()),
                             })
                             .filter(|metadata| metadata.target().contains("watchdog")),
+                        )
+                        // Warnings and errors, so a failure leaves a trace a
+                        // person can read back (errors.log, same folder).
+                        .target(
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                                file_name: Some("errors".into()),
+                            })
+                            .filter(error_log_keeps),
                         )
                         .build(),
                 )?;
@@ -1334,4 +1388,42 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod error_log_tests {
+    use super::*;
+
+    #[test]
+    fn error_line_keeps_one_short_clean_line() {
+        let line = error_line_with_home(
+            "fetch failed\n  https://h.example/api?token=abc#x at /Users/pat/code/app.ts:3",
+            "/Users/pat",
+        );
+        assert_eq!(
+            line,
+            "fetch failed https://h.example/api?… at ~/code/app.ts:3"
+        );
+        let long = error_line_with_home(&"y".repeat(5000), "/Users/pat");
+        assert_eq!(long.chars().count(), ERROR_LINE_MAX + 1);
+    }
+
+    #[test]
+    fn error_log_keeps_webview_warnings_only() {
+        fn meta(level: log::Level, target: &str) -> log::Metadata<'_> {
+            log::Metadata::builder().level(level).target(target).build()
+        }
+        assert!(error_log_keeps(&meta(log::Level::Error, "webview")));
+        assert!(error_log_keeps(&meta(log::Level::Warn, "webview")));
+        assert!(!error_log_keeps(&meta(log::Level::Warn, "app_lib::pty")));
+        assert!(!error_log_keeps(&meta(log::Level::Info, "webview")));
+        assert!(!error_log_keeps(&meta(
+            log::Level::Warn,
+            "reqwest::connect"
+        )));
+        assert!(!error_log_keeps(&meta(
+            log::Level::Warn,
+            "canopy::watchdog::pty_host"
+        )));
+    }
 }
