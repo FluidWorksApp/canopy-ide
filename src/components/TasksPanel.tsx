@@ -420,7 +420,7 @@ export function TasksPanel({
           <Button icon
             title="New task — saved to this project"
             onClick={openNewTask}>
-            ＋
+            +
           </Button>
         </div>
         {draft && (

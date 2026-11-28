@@ -184,7 +184,7 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
   },
   {
     id: "cli-menu",
-    label: "Launcher menu (＋▾)",
+    label: "Launcher menu (+▾)",
     selector: ".cli-menu",
     kind: "persistent",
     covers: "center",

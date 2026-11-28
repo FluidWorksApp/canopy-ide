@@ -51,7 +51,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "agents", name: "Use ACP", desc: "Run these agents over the Agent Client Protocol. Off uses the agent's built-in runner.", keywords: ["acp", "agent client protocol", "protocol", "runner"] },
   { tab: "agents", name: "Skip permission prompts", desc: "Run every agent in its CLI's bypass mode.", keywords: ["yolo", "dangerously", "auto approve", "permissions"] },
   { tab: "agents", name: "CLI commands", desc: "Leave blank unless renamed or off your PATH.", keywords: ["launch", "flags", "arguments"] },
-  { tab: "agents", name: "Accounts", desc: "Several logins per CLI. Pick one from the ＋ menu.", keywords: ["logins","sign in","cli accounts","profiles"] },
+  { tab: "agents", name: "Accounts", desc: "Several logins per CLI. Pick one from the + menu.", keywords: ["logins","sign in","cli accounts","profiles"] },
   { tab: "agents", name: "ACP providers", desc: "Add any ACP agent, from presets or the registry.", keywords: ["acp", "agent client protocol", "registry", "gemini", "goose", "provider"], panel: true },
   { tab: "agents", name: "Other CLIs", desc: "Add agents Canopy doesn't list.", keywords: ["custom agent", "add cli", "binary"] },
   { tab: "agents", name: "Tools available", desc: "What agents can do through Canopy. Off hides it.", keywords: ["detect", "installed", "path", "binaries"] },

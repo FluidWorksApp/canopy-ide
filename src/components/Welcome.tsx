@@ -23,7 +23,7 @@ export function Welcome({ projects, hibernated, onOpen, onNew, onDelete }: Welco
         agents work, review the diffs.
       </p>
       <Button variant="accent" className="welcome-new" onClick={onNew}>
-        ＋ New project
+        + New project
       </Button>
       {projects.length > 0 && (
         <div className="welcome-list">

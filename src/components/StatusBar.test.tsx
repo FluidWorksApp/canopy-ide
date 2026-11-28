@@ -518,7 +518,7 @@ describe("the tray's branch chip", () => {
 
   it("switches through the one funnel when a branch is picked", async () => {
     inProvider(<StatusBar {...base} events={[]} modelSwitch={null} />);
-    fireEvent.click(await screen.findByText(/⎇ main/));
+    fireEvent.click(await screen.findByText(/⑂ main/));
     // Only somewhere else to go is offered — the branch you're on is the chip.
     expect(screen.queryByText("main")).toBeNull();
     fireEvent.click(screen.getByText("feat/x"));
@@ -527,7 +527,7 @@ describe("the tray's branch chip", () => {
 
   it("keeps a short list plain — no box to read past on a small repo", async () => {
     inProvider(<StatusBar {...base} events={[]} modelSwitch={null} />);
-    fireEvent.click(await screen.findByText(/⎇ main/));
+    fireEvent.click(await screen.findByText(/⑂ main/));
     expect(screen.queryByPlaceholderText("Search branches…")).toBeNull();
   });
 
@@ -543,7 +543,7 @@ describe("the tray's branch chip", () => {
       ),
     ]);
     inProvider(<StatusBar {...base} events={[]} modelSwitch={null} />);
-    fireEvent.click(await screen.findByText(/⎇ main/));
+    fireEvent.click(await screen.findByText(/⑂ main/));
     // Not a wall of 152 rows: the shortcut is still the shortcut.
     expect(screen.queryByText("fix/thing-140")).toBeNull();
     expect(screen.getByText("140 more branches — type to search")).toBeTruthy();
@@ -556,7 +556,7 @@ describe("the tray's branch chip", () => {
 
   it("says what it means without a git noun", async () => {
     render(<StatusBar {...base} events={[]} modelSwitch={null} />);
-    const chip = await screen.findByText(/⎇ main/);
+    const chip = await screen.findByText(/⑂ main/);
     const tip = chip.getAttribute("title") ?? "";
     expect(tip).toBe("On main · 0 changed files. Click to switch.");
     for (const noun of ["git", "worktree", "detached", "stash", "HEAD"])

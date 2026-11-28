@@ -20,7 +20,7 @@ it('separates new workspace setup and scopes controls to the selected workspace 
  fireEvent.click(screen.getByRole('tab',{name:'Local workspace'}));
  expect(screen.queryByRole('button',{name:'Copy accounts'})).toBeNull();
  expect(screen.getByRole('button',{name:'Use this workspace'})).toBeInTheDocument();
- fireEvent.click(screen.getByRole('button',{name:'＋ Add a workspace'}));
+ fireEvent.click(screen.getByRole('button',{name:'+ Add a workspace'}));
  expect(screen.getByRole('dialog',{name:'Add a workspace'})).toBeInTheDocument();
  expect(screen.getByRole('radio',{name:'Canopy cloud'})).toHaveAttribute('aria-checked','true');
  expect(screen.getByLabelText('Name')).toBeInTheDocument();expect(screen.queryByText(/T3/)).toBeNull();

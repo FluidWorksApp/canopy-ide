@@ -69,7 +69,7 @@
   border: 1px solid var(--border);
   border-radius: 50%;
   color: var(--fg-dim);
-  font: 600 10px var(--mono, monospace);
+  font: 600 10px var(--mono, monospace), var(--glyph-fallback);
 }
 .prs-dashboard-title,
 .prs-dashboard-meta,

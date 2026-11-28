@@ -21,7 +21,7 @@ it('keeps startup focused on one workspace with an elapsed timer',async()=>{
  setup();render(<ManagedWorkspaces/>);await act(async()=>{});
  fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
  expect(screen.getAllByText('My workspace')).toHaveLength(1);
- expect(screen.queryByRole('button',{name:'＋ Create workspace'})).toBeNull();
+ expect(screen.queryByRole('button',{name:'+ Create workspace'})).toBeNull();
  await act(async()=>{await vi.advanceTimersByTimeAsync(6000);});
  expect(screen.getByText('0m 6s elapsed')).toBeTruthy();
  expect(screen.getByText(/First setup takes a few minutes/)).toBeTruthy();

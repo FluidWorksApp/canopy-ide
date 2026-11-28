@@ -17,6 +17,7 @@ import "@fontsource-variable/jetbrains-mono/index.css";
 // src/skins/pixel.css.
 import "@fontsource/vt323/index.css";
 import "./index.css";
+import { loadGlyphFallback } from "./glyphFallback";
 import { monacoReady } from "./monaco-setup";
 import { applyTheme, getSettings, watchSystemTheme } from "./settings";
 import { ghosttyFailure, preloadTerminalEngine } from "./terminalEngine";
@@ -33,6 +34,9 @@ import {
   selftestConfig,
 } from "./ipc";
 import { setSelftestMode } from "./selftest/mode";
+
+// On Linux, bundled fonts for the symbols no system font may have (glyphFallback.ts).
+loadGlyphFallback();
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);

@@ -891,7 +891,7 @@ function PaneBarImpl({
               if (!cliMenuOpen) { onRefreshInstalled(); onRefreshUpdates(); }
               setCliMenuOpen(!cliMenuOpen);
             }}>
-            ＋ ▾
+            + ▾
           </Button>
           {cliMenuOpen && (
             <div className="cli-menu cli-launcher-menu" onMouseLeave={() => setCliMenuOpen(false)}>

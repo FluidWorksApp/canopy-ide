@@ -20,7 +20,7 @@
 .plan-why{display:block;font-size:11.5px;color:var(--text-muted)}
 .plan-answer{margin:0;font-size:12.5px}
 .plan-check-row{display:flex;gap:4px;align-items:center;margin-bottom:3px}
-.plan-touches{margin:0;font-family:var(--font-mono,monospace);font-size:11.5px;color:var(--text-muted);overflow-wrap:anywhere}
+.plan-touches{margin:0;font-family:var(--font-mono,monospace), var(--glyph-fallback);font-size:11.5px;color:var(--text-muted);overflow-wrap:anywhere}
 .plan-card-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 
 .plan-gate-dialog{width:min(600px,calc(100vw - 32px));max-width:min(600px,calc(100vw - 32px));max-height:var(--dialog-max-h);overflow:auto}
@@ -58,7 +58,7 @@
 .intent-risk{display:flex;flex-direction:column;gap:2px}
 .intent-risk-row{display:flex;align-items:baseline;gap:8px;width:100%;padding:3px 4px;border:0;border-radius:var(--r-sm);background:none;color:inherit;font:inherit;font-size:12.5px;text-align:left;cursor:pointer}
 .intent-risk-row:hover,.intent-risk-row:focus-visible{background:var(--bg-hover,rgba(127,127,127,.12))}
-.intent-risk-path{font-family:var(--font-mono,monospace);font-size:11.5px;overflow-wrap:anywhere;flex:0 1 auto}
+.intent-risk-path{font-family:var(--font-mono,monospace), var(--glyph-fallback);font-size:11.5px;overflow-wrap:anywhere;flex:0 1 auto}
 .intent-risk-why{flex:1;min-width:0;color:var(--text-muted);font-size:11.5px}
 .intent-risk-lines{color:var(--text-muted);font-size:11px;white-space:nowrap}
 .intent-banner{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--warn,#c90);border-radius:var(--r-sm);font-size:12.5px}

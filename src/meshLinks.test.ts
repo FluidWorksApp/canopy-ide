@@ -215,7 +215,7 @@ describe("node identity", () => {
       branch: "feat/login",
     });
     expect(primary).toBe("Claude Code #7");
-    expect(detail).toBe("fix login · ⎇ feat/login");
+    expect(detail).toBe("fix login · ⑂ feat/login");
   });
 
   it("a substrate name, once it exists, replaces the composite whole", () => {

@@ -386,7 +386,7 @@ function TitleBarImpl({
         })}
       </div>
         <Button icon title="New project" onClick={onNewProject}>
-          ＋
+          +
         </Button>
       </div>
       )}

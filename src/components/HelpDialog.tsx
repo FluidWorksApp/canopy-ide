@@ -52,7 +52,7 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
             A <strong>project</strong> is one or more directories (frontend,
             backend, …) opened together. Create one with{" "}
             <code>{format("new-project")}</code>, then launch a
-            shell or an agent CLI from the ＋ menu, the empty-state grid, or by
+            shell or an agent CLI from the + menu, the empty-state grid, or by
             right-clicking a directory in the sidebar. Terminals keep running
             when you switch projects.
           </p>

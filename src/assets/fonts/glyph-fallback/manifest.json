@@ -1,0 +1,224 @@
+{
+ "generatedBy": "scripts/glyph-fallback/build.py",
+ "faces": [
+  {
+   "file": "symbols-2-0.woff2",
+   "family": "Canopy Symbols",
+   "source": "@fontsource/noto-sans-symbols-2@5.3.0",
+   "unicodes": [
+    10303
+   ]
+  },
+  {
+   "file": "symbols-2-1.woff2",
+   "family": "Canopy Symbols",
+   "source": "@fontsource/noto-sans-symbols-2@5.3.0",
+   "unicodes": [
+    9655,
+    9665
+   ]
+  },
+  {
+   "file": "symbols-2-2.woff2",
+   "family": "Canopy Symbols",
+   "source": "@fontsource/noto-sans-symbols-2@5.3.0",
+   "unicodes": [
+    8679,
+    8984,
+    8997,
+    8998,
+    9000,
+    9003,
+    9166,
+    9201,
+    9251,
+    9282,
+    9283,
+    9633,
+    9634,
+    9636,
+    9638,
+    9649,
+    9652,
+    9654,
+    9656,
+    9662,
+    9670,
+    9671,
+    9672,
+    9673,
+    9675,
+    9677,
+    9678,
+    9679,
+    9680,
+    9703,
+    9707,
+    9728,
+    9729,
+    9744,
+    9745,
+    9888,
+    9889,
+    9940,
+    9998,
+    10003,
+    10004,
+    10005,
+    10007,
+    10022,
+    10035,
+    10052,
+    10084,
+    10095,
+    10140,
+    11014,
+    11015,
+    127897,
+    127918,
+    128077,
+    128176,
+    128202,
+    128230,
+    128274,
+    128421,
+    128465,
+    128736
+   ]
+  },
+  {
+   "file": "math-3.woff2",
+   "family": "Canopy Symbols",
+   "source": "@fontsource/noto-sans-math@5.3.0",
+   "unicodes": [
+    8592,
+    8594,
+    8598,
+    8599,
+    8600,
+    8615,
+    8617,
+    8629,
+    8634,
+    8635,
+    8644,
+    8645,
+    8648,
+    8670,
+    8671,
+    8673,
+    8677,
+    8776,
+    8805,
+    8942,
+    8943,
+    8962,
+    9004,
+    9472,
+    9492,
+    10216,
+    10217,
+    10515,
+    10529,
+    10530,
+    10548,
+    10697,
+    120143
+   ]
+  },
+  {
+   "file": "symbols-4.woff2",
+   "family": "Canopy Symbols",
+   "source": "@fontsource/noto-sans-symbols@5.3.0",
+   "unicodes": [
+    8961,
+    8963,
+    8964,
+    8981,
+    9099,
+    9786,
+    9874,
+    9881,
+    9960
+   ]
+  },
+  {
+   "file": "emoji-5.woff2",
+   "family": "Canopy Emoji",
+   "source": "@fontsource/noto-emoji@5.3.2",
+   "unicodes": [
+    9989,
+    127760,
+    128172,
+    128257,
+    128277
+   ]
+  },
+  {
+   "file": "emoji-6.woff2",
+   "family": "Canopy Emoji",
+   "source": "@fontsource/noto-emoji@5.3.2",
+   "unicodes": [
+    128161,
+    128189,
+    128206,
+    128221,
+    128241,
+    128276,
+    128279,
+    129514
+   ]
+  },
+  {
+   "file": "emoji-7.woff2",
+   "family": "Canopy Emoji",
+   "source": "@fontsource/noto-emoji@5.3.2",
+   "unicodes": [
+    127881,
+    127912
+   ]
+  },
+  {
+   "file": "emoji-8.woff2",
+   "family": "Canopy Emoji",
+   "source": "@fontsource/noto-emoji@5.3.2",
+   "unicodes": [
+    128640
+   ]
+  },
+  {
+   "file": "emoji-9.woff2",
+   "family": "Canopy Emoji",
+   "source": "@fontsource/noto-emoji@5.3.2",
+   "unicodes": [
+    127794,
+    128293
+   ]
+  },
+  {
+   "file": "emoji-10.woff2",
+   "family": "Canopy Emoji",
+   "source": "@fontsource/noto-emoji@5.3.2",
+   "unicodes": [
+    128064,
+    128514,
+    129302
+   ]
+  }
+ ],
+ "uncovered": [
+  "U+2502",
+  "U+256D",
+  "U+256E",
+  "U+256F",
+  "U+2570",
+  "U+306E",
+  "U+30AD",
+  "U+30B9",
+  "U+30C6",
+  "U+30C8",
+  "U+65E5",
+  "U+672C",
+  "U+8A9E"
+ ]
+}

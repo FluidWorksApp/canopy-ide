@@ -825,7 +825,7 @@ export function InstructionsView({
                             className="instr-add-item"
                             onClick={() => patchSection(s.id, { items: [...(s.items ?? []), ""] })}
                           >
-                            ＋ Add item
+                            + Add item
                           </button>
                         </div>
                       ) : (
@@ -841,7 +841,7 @@ export function InstructionsView({
                   ))}
 
                   <button className="instr-add-section" onClick={addSection}>
-                    ＋ Add section
+                    + Add section
                   </button>
                 </div>
               )

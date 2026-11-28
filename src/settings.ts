@@ -389,7 +389,7 @@ export interface Settings {
    *
    *  One switch rather than one per CLI: "who am I working as" is a single
    *  question. A CLI the account has no login for still launches and asks you
-   *  to sign in, which the switcher and ＋ menu say up front. "default" exports
+   *  to sign in, which the switcher and + menu say up front. "default" exports
    *  no environment at all. */
   activeProfile: string;
   /** Move a session to the next signed-in account when it reaches a limit. */

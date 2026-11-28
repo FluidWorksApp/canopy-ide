@@ -40,8 +40,14 @@
   --sp-6: 32px;
   --sp-7: 40px;
   --sp-8: 48px;
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "SF Mono", Menlo, Monaco, "JetBrains Mono", "Fira Code", monospace;
+  /* The end of every font stack: the symbols no system font may have. Set on
+     Linux by src/glyphFallback.ts, where these families are loaded; elsewhere
+     (and in the portal) the names match no font and change nothing. A stack
+     without it draws a box on Linux for any symbol its fonts lack
+     (src/glyphFallback.test.ts). */
+  --glyph-fallback: "Canopy Symbols", "Canopy Emoji";
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif, var(--glyph-fallback);
+  --font-mono: "SF Mono", Menlo, Monaco, "JetBrains Mono", "Fira Code", monospace, var(--glyph-fallback);
   --fs-xs: 11px;
   --fs-sm: 12px;
   --fs-md: 13px;

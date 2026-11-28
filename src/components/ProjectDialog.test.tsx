@@ -110,7 +110,7 @@ describe("ProjectDialog project structure identity", () => {
     fireEvent.change(screen.getByLabelText("Run command"), {
       target: { value: "run-dev" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "＋ Add command" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add command" }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     const saved = onSave.mock.calls[0][0] as Project;

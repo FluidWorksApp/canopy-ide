@@ -55,8 +55,8 @@
   --r-md: 0px;
   --r-lg: 0px;
 
-  --font-ui: "VT323", ui-monospace, Menlo, Monaco, monospace;
-  --font-mono: "VT323", "SF Mono", Menlo, Monaco, monospace;
+  --font-ui: "VT323", ui-monospace, Menlo, Monaco, monospace, var(--glyph-fallback);
+  --font-mono: "VT323", "SF Mono", Menlo, Monaco, monospace, var(--glyph-fallback);
 
   /* The scale, moved to VT323's metrics. Ratios held so the ramp still steps
      the way every other skin's does. */

@@ -114,6 +114,18 @@ const BUNDLED_BINARIES = [
       "build has no compatible release and ships without it.",
     url: "https://github.com/microsoft/onnxruntime",
   },
+  {
+    name: "Noto Sans Symbols, Noto Sans Symbols 2, Noto Sans Math, Noto Emoji (subsets)",
+    version: "@fontsource 5.3",
+    license: "OFL-1.1",
+    copyright: "Copyright 2022 The Noto Project Authors (https://github.com/notofonts)",
+    note:
+      "Subsets of only the symbols the UI draws (`src/assets/fonts/glyph-fallback/`, " +
+      "made by `scripts/glyph-fallback/build.py`), loaded on Linux so a machine " +
+      "without such fonts does not draw boxes. No Reserved Font Name, so " +
+      "subsetting needs no rename.",
+    url: "https://github.com/notofonts",
+  },
 ];
 
 // Speech models the user opts into downloading at runtime. Canopy does not

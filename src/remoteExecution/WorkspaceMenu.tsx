@@ -47,7 +47,7 @@ export function WorkspaceMenu({anchor,rows,busyId,error,onPick,allActive,onAllWo
   {linkWorkspaceId&&<button type="button" role="menuitem" className="workspace-menu-action" onClick={copyLink}><span aria-hidden="true">⧉</span>Copy workspace link</button>}
   {linkState&&<p className={linkState.error?'workspace-menu-error':'workspace-menu-note'} role={linkState.error?'alert':'status'}>{linkState.text}</p>}
   <div className="workspace-menu-sep" role="separator"/>
-  <button type="button" role="menuitem" className="workspace-menu-action" onClick={onNew}><span aria-hidden="true">＋</span>New workspace…</button>
+  <button type="button" role="menuitem" className="workspace-menu-action" onClick={onNew}><span aria-hidden="true">+</span>New workspace…</button>
   <button type="button" role="menuitem" className="workspace-menu-action" onClick={onManage}><span aria-hidden="true">⚙</span>Manage workspaces…</button>
  </div>,document.body);
 }

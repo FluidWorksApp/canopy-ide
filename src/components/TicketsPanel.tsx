@@ -304,7 +304,7 @@ export function TicketsPanel({
           title="Connect a tracker (Settings → Integrations)"
           onClick={onOpenIntegrations}
         >
-          ＋
+          +
         </button>
       </div>
 

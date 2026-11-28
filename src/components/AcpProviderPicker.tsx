@@ -113,7 +113,7 @@ export function AcpProviderPicker({
         aria-expanded={open}
         onClick={toggle}
       >
-        ＋ Add an ACP connector ▾
+        + Add an ACP connector ▾
       </button>
       {open && (
         <ul className="acp-menu" role="menu" aria-label="ACP connectors">
@@ -178,7 +178,7 @@ export function AcpProviderPicker({
               title={`${l.needsInstall ? `Needs ${l.command} installed on your PATH. ` : ""}Runs ${l.command} ${l.args.join(" ")} when you start it`}
               onClick={() => stage(choosing, l)}
             >
-              ＋ {l.kind}
+              + {l.kind}
             </button>
           ))}
           <button type="button" className="agent-chip" onClick={() => setChoosing(null)}>

@@ -1,6 +1,6 @@
 /* Startup launcher: one centred column with a single left edge. Spacing uses
    one scale (8 / 12 / 16 / 24 / 32) so every group keeps the same rhythm. */
-.startup-launcher{box-sizing:border-box;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:48px 24px;background:var(--bg);color:var(--text);font-family:"Archivo Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5}
+.startup-launcher{box-sizing:border-box;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:48px 24px;background:var(--bg);color:var(--text);font-family:"Archivo Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif, var(--glyph-fallback);line-height:1.5}
 .startup-launcher *{box-sizing:border-box}
 .startup-launcher-content{width:100%;max-width:480px;margin:0 auto}
 /* The mark's viewBox is cropped to its drawn bounds so it sits flush with the text edge. */
@@ -8,7 +8,7 @@
 .startup-launcher-brand svg{width:24px;height:24px;color:var(--accent);flex-shrink:0}
 .startup-launcher h1{margin:0;font-size:32px;line-height:1.18;font-weight:650;letter-spacing:-.7px}
 .startup-launcher-intro{margin:12px 0 0;color:var(--text-dim);font-size:15px}
-.startup-launcher .btn{font:550 14px/1.3 "Archivo Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:40px;padding:10px 16px}
+.startup-launcher .btn{font:550 14px/1.3 "Archivo Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif, var(--glyph-fallback);min-height:40px;padding:10px 16px}
 
 /* Waiting: status, progress and action as one group between dividers. */
 .startup-launcher-wait{display:flex;flex-direction:column;align-items:stretch;margin-top:32px;padding:24px 0;border-top:1px solid var(--border)}
