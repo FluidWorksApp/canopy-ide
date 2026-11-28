@@ -79,8 +79,12 @@ interface Pos {
 }
 
 interface ActiveLink {
+  /** First row, and the column it starts in. */
   line: number;
   from: number;
+  /** Last row (the same as `line` unless the link runs onto further rows),
+   *  and the column after its last character there. */
+  endLine: number;
   to: number;
   text: string;
   activate(event: MouseEvent): void;
@@ -1183,6 +1187,7 @@ export class GhosttyTerminal {
       current &&
       found &&
       current.line === found.line &&
+      current.endLine === found.endLine &&
       current.from === found.from &&
       current.to === found.to &&
       current.text === found.text
@@ -1224,6 +1229,7 @@ export class GhosttyTerminal {
         return {
           line: at.line,
           from,
+          endLine: at.line,
           to,
           text: uri,
           activate: (e) => handler.activate(e, uri, range),
@@ -1241,12 +1247,20 @@ export class GhosttyTerminal {
     if (provided === undefined) {
       this.requestProvidedLinks(at.line, ev);
     } else if (provided) {
+      // A link may run across rows (a long path the program wrapped), so the
+      // pointer is inside it anywhere between its start and end in reading order.
+      const x = at.col + 1;
+      const y = at.line + 1;
       for (const link of provided) {
-        if (at.col + 1 >= link.range.start.x && at.col + 1 <= link.range.end.x) {
+        const { start, end } = link.range;
+        const afterStart = y > start.y || (y === start.y && x >= start.x);
+        const beforeEnd = y < end.y || (y === end.y && x <= end.x);
+        if (afterStart && beforeEnd) {
           return {
-            line: at.line,
-            from: link.range.start.x - 1,
-            to: link.range.end.x,
+            line: start.y - 1,
+            from: start.x - 1,
+            endLine: end.y - 1,
+            to: end.x,
             text: link.text,
             activate: (e) => link.activate(e, link.text),
             hover: (e) => link.hover?.(e, link.text),
@@ -1270,6 +1284,7 @@ export class GhosttyTerminal {
         return {
           line: at.line,
           from,
+          endLine: at.line,
           to,
           text: uri,
           activate: (e) => web.activate(e, uri),
@@ -1778,7 +1793,17 @@ export class GhosttyTerminal {
         const to = index === bounds[1].line ? bounds[1].col : this.cols;
         return to > from ? [from, to] : null;
       },
-      link: (row) => (link && link.line === view + row ? [link.from, link.to] : null),
+      link: (row) => {
+        const index = view + row;
+        if (!link || index < link.line || index > link.endLine) return null;
+        if (link.line === link.endLine) return [link.from, link.to];
+        // A row in the middle or at the end of a link that runs on: underline
+        // its text, not the indentation a wrapping program put before it.
+        const text = lineText(this.bufferLine(index), true);
+        const from = index === link.line ? link.from : text.length - text.trimStart().length;
+        const to = index === link.endLine ? link.to : Math.max(from, text.length);
+        return to > from ? [from, to] : null;
+      },
     };
     const drawn = renderer.paint(source, dirty, this.palette, this.options.minimumContrastRatio);
     this.needsFull = false;
