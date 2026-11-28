@@ -1,4 +1,4 @@
-// The keyboard route into the ＋ menu (Cmd/Ctrl+N): shell and every agent CLI
+// The keyboard route into the + menu (Cmd/Ctrl+N): shell and every agent CLI
 // as a type-to-filter list, so opening a new tab
 // never has to go through the mouse. Same overlay shape as Quick Open, on
 // purpose: two palettes that look alike are one thing to learn.

@@ -343,7 +343,7 @@ export function WorkflowCanvas({ definition, run, projectRoot, onChange }: Workf
         </section>
         <section>
           <strong>Events</strong>
-          <button onClick={() => patch({ triggers: [...definition.triggers, { kind: "issue.opened" }] })}>＋ Add event trigger</button>
+          <button onClick={() => patch({ triggers: [...definition.triggers, { kind: "issue.opened" }] })}>+ Add event trigger</button>
         </section>
       </aside>
 
@@ -422,7 +422,7 @@ export function WorkflowCanvas({ definition, run, projectRoot, onChange }: Workf
         </div>
         {linking && <svg className="workflow-live-wire" aria-hidden><path d={`M ${linking.startX} ${linking.startY} C ${linking.startX + 80} ${linking.startY}, ${linking.x - 80} ${linking.y}, ${linking.x} ${linking.y}`} /></svg>}
         <div className="workflow-canvas-controls">
-          <button onClick={() => patchCanvas(nodes, { ...viewport, zoom: Math.min(2, viewport.zoom * 1.15) })}>＋</button>
+          <button onClick={() => patchCanvas(nodes, { ...viewport, zoom: Math.min(2, viewport.zoom * 1.15) })}>+</button>
           <button onClick={() => patchCanvas(nodes, { ...viewport, zoom: Math.max(.35, viewport.zoom / 1.15) })}>−</button>
           <button onClick={() => patchCanvas(nodes, { x: 0, y: 0, zoom: 1 })}>1:1</button>
         </div>

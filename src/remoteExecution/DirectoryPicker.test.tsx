@@ -13,7 +13,7 @@ describe('remote directory selection',()=>{
  it('creates and selects a folder in the remote workspace',async()=>{
   mocks.invoke.mockResolvedValue([]);const select=vi.fn();render(<DirectoryPicker onSelect={select} onCancel={()=>{}}/>);
   await waitFor(()=>expect(screen.getByRole('button',{name:'Use this folder'})).toBeEnabled());
-  fireEvent.click(screen.getByRole('button',{name:'＋ New folder'}));
+  fireEvent.click(screen.getByRole('button',{name:'+ New folder'}));
   fireEvent.change(screen.getByLabelText('New folder'),{target:{value:'project'}});fireEvent.click(screen.getByRole('button',{name:'Create folder'}));
   await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith('fs_create_dir',{path:'/workspace/project'}));
   await screen.findByText('/workspace/project');await waitFor(()=>expect(screen.getByRole('button',{name:'Use this folder'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Use this folder'}));expect(select).toHaveBeenCalledWith(['/workspace/project']);

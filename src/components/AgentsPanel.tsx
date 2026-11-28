@@ -1325,7 +1325,7 @@ export function AgentsPanel({
         ))}
         {items.length === 0 && (
           <div className="ap2-empty">
-            {query !== "" ? `Nothing matches “${filter.trim()}”.` : "No agents. Start one from ＋."}
+            {query !== "" ? `Nothing matches “${filter.trim()}”.` : "No agents. Start one from +."}
           </div>
         )}
       </div>

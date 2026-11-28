@@ -255,14 +255,14 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
                   </div>
                 ))}
                 <Button size="sm" variant="ghost" onClick={() => addCommand(i)}>
-                  ＋ Add command
+                  + Add command
                 </Button>
               </div>
             </div>
           ))}
           <div className="pd-add-row">
             <Button className="pd-add-choice" onClick={() => void addComponent()}>
-              ＋ Add directory…
+              + Add directory…
             </Button>
             {!cloneOpen && (
               <Button className="pd-add-choice"

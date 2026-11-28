@@ -1302,7 +1302,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, []);
 
 
-  /** What the ＋ menu says about the account it launches into. Null on the
+  /** What the + menu says about the account it launches into. Null on the
    *  default one. `missing` is the footgun: an account holding a Claude login
    *  but no Codex one is legitimate, and a surprise login prompt isn't. */
   const accountBanner = useMemo(() => {
@@ -1331,7 +1331,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
-  /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
+  /** The ⌘N launcher — the + menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
   const nativeTermAvailable = useNativeTermAvailable();
   // Which terminals can move to a native window, and which are in one. Read
@@ -5966,8 +5966,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const quickOpen = () => setPalette("files");
     const findInFiles = () => setPalette("search");
     const spotSearch = () => setSpotOpen(true);
-    // ⌘N: the ＋ menu without the mouse. Re-probe on open for the same reason
-    // the ＋ menu does — a stale "install" hint sends you to an installer for a
+    // ⌘N: the + menu without the mouse. Re-probe on open for the same reason
+    // the + menu does — a stale "install" hint sends you to an installer for a
     // CLI you already have.
     const newLauncher = (where?: "workspace") => {
       refreshInstalled();
@@ -10620,7 +10620,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   /** The launcher list — shell plus every agent CLI — for a given directory.
-   *  Shared by the ＋ menu, the empty-state grid and the component right-click
+   *  Shared by the + menu, the empty-state grid and the component right-click
    *  menu so the three can't drift apart. */
   const upload = useRemoteUpload(onNotice,()=>setTreeRefreshRevision(v=>v+1));
   const uploadItems = (dir:string,chooseDestination=false):MenuItem[] => upload.startUpload ? [
@@ -10638,7 +10638,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ...listedForLaunch(AGENT_CLIS, installed).map((cli) => ({
       label: cli.name,
       icon: <AgentIcon id={cli.id} size={15} />,
-      // Informational: a context-menu row has one click target, and the ＋
+      // Informational: a context-menu row has one click target, and the +
       // menu carries the clickable badge. The account is the status bar's job.
       hint:
         installed[cli.bin] === false
@@ -15494,7 +15494,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 </div>
               </div>
             )}
-            {/* Same launchers as the ＋ menu, surfaced where the eye already is. */}
+            {/* Same launchers as the + menu, surfaced where the eye already is. */}
             <div className="launch-grid">
               <button
                 className="launch-card"

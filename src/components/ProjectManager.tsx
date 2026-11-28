@@ -44,7 +44,7 @@ export function ProjectManager({
         <div className="side-panel-head">
           <span>Projects</span>
           <Button variant="accent" onClick={onNew}>
-            ＋ New
+            + New
           </Button>
         </div>
         {projects.length === 0 && (

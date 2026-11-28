@@ -831,7 +831,7 @@ function AgentBinaries({
               if (id) setRevealed((r) => new Set([...r, id]));
             }}
           >
-            <option value="">＋ Add an agent CLI…</option>
+            <option value="">+ Add an agent CLI…</option>
             {hidden.map((def) => (
               <option key={def.id} value={def.id}>
                 {def.name}
@@ -1221,7 +1221,7 @@ function CustomClis({
               <input
                 className="cli-bin-input"
                 placeholder="Name"
-                title="What to call it — in the launcher, the ＋ menu and its terminal tab"
+                title="What to call it — in the launcher, the + menu and its terminal tab"
                 spellCheck={false}
                 value={c.name}
                 onChange={(e) => edit(i, { name: e.target.value })}
@@ -1337,7 +1337,7 @@ function CustomClis({
       )}
       <Button
         onClick={() => commit([...rows, { id: "", name: "", bin: "" }])}>
-        ＋ Add a CLI
+        + Add a CLI
       </Button>
       <AcpProviderPicker
         onAdd={(choice) => {
@@ -1811,7 +1811,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Accounts"
-                  desc="Several logins per CLI. Pick one from the ＋ menu."
+                  desc="Several logins per CLI. Pick one from the + menu."
                 >
                   <AgentAccounts
                     onRunInTerminal={(command, title, env, profile) =>

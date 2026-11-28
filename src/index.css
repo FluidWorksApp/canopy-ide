@@ -7834,7 +7834,7 @@ body.dragging-tab * {
   margin-bottom: 4px;
 }
 
-/* Empty project = the launcher. Same set as the ＋ menu, where the eye is. */
+/* Empty project = the launcher. Same set as the + menu, where the eye is. */
 .launch-grid {
   display: flex;
   flex-wrap: wrap;
@@ -13112,7 +13112,7 @@ input[type="radio"]:disabled {
 }
 
 /* ⌘N launcher rows: same palette shell, but each row leads with the launcher's
-   mark, so the list reads like the ＋ menu it stands in for. */
+   mark, so the list reads like the + menu it stands in for. */
 .launch-row {
   align-items: center;
 }

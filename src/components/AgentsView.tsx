@@ -629,7 +629,7 @@ export function AgentsView({
               <Mascot state="sleeping" size={72} />
               <p>
                 Nothing running here. Launch <code>claude</code>, <code>codex</code> or any other
-                CLI from the ＋ menu, or by right-clicking a component.
+                CLI from the + menu, or by right-clicking a component.
               </p>
             </div>
           ) : (
