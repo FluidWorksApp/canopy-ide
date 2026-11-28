@@ -1,4 +1,5 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
+import { publishAgentLives, type AgentLifeEntry } from "../../agentLifeRegistry";
 import { TELEPORT_CLI_ID } from "../../../shared/agentCliIdentity";
 import { effectivePreference } from "../../placement/balancer";
 import { getAgentPreference, getGlobalPreference, getProjectPreference } from "../../placement/preferences";
@@ -10906,6 +10907,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     }
     return views;
   }, [attentionFor, isAgentTab, lifeForPty, liveSessionByPty, tabs]);
+  // This project's agents' states, for window-wide code that must not type
+  // into an agent mid-turn (the Teams agent inbox).
+  useEffect(() => {
+    const lives = new Map<number, AgentLifeEntry>();
+    for (const view of watchdogViews)
+      lives.set(view.ptyId, { state: view.life.state, quietMs: statsByPty.get(view.ptyId)?.quiet_ms ?? null });
+    publishAgentLives(project.id, lives);
+  }, [watchdogViews, statsByPty, project.id]);
+  useEffect(() => () => publishAgentLives(project.id, new Map()), [project.id]);
   const watchdogTargets = useMemo(() => {
     const targets = new Map<number, AgentWatchdogTarget>();
     const lives = new Map(watchdogViews.map((view) => [view.ptyId, view.life]));

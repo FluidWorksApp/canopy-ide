@@ -13,8 +13,13 @@ import {LAYER_VERSION,parseLayerEvent,type LayerEvent} from './layerEvents';
  *   read receipts and backfill. Edits and deletes go only to v3 devices.
  * - v4 (0.5.0): live session events (liveEvents.ts) — joining someone's
  *   running agent session — and layer ownership events (layerEvents.ts).
- *   They go only to v4 devices. */
-export const CHAT_VERSION=4;
+ *   They go only to v4 devices.
+ * - v5 (0.5.24): `agent` on a message (written by an agent, or for one: see
+ *   agentTag below) and the `agent-status` event telling the sender whether
+ *   the agent it was for got it. Status events go only to v5 devices. */
+export const CHAT_VERSION=5;
+/** Lowest version that understands agent delivery status. */
+export const AGENT_VERSION=5;
 /** Lowest version that understands reactions. */
 export const REACTIONS_VERSION=2;
 /** Lowest version that understands edits, deletes, read receipts and backfill. */
@@ -26,18 +31,30 @@ export const EDITS_VERSION=3;
 export type ReactionEvent={type:'reaction';target:string;emoji:string;op:'add'|'remove'};
 export type EditEvent={type:'edit';target:string;text:string;mentions?:string[]};
 export type DeleteEvent={type:'delete';target:string};
-export type ChatEvent=ReactionEvent|EditEvent|DeleteEvent|LiveEvent|LayerEvent;
+/** What happened to a message written for an agent (`target`), told to its
+ *  sender by the agent owner's Canopy: `queued` (the agent is mid-turn and
+ *  gets it when it finishes), `delivered` (typed into its terminal),
+ *  `missing` (no agent by that name is running there), `paused` (too many
+ *  agent messages in a row in that thread, so a person has to step in). */
+export type AgentStatusEvent={type:'agent-status';target:string;agent:string;state:AgentDeliveryState};
+export type AgentDeliveryState='queued'|'delivered'|'missing'|'paused';
+export type ChatEvent=ReactionEvent|EditEvent|DeleteEvent|LiveEvent|LayerEvent|AgentStatusEvent;
 /** A reply in a thread: `root` is the first message of the thread. */
 export type ThreadRef={root:string};
+/** Agents in a message (v5): `from` names the sender's agent that wrote it;
+ *  `to` names the agent it is for and whose (`owner`, an account id). Names
+ *  are the ones Canopy shows for an agent session ("Yarrow 6"). */
+export type AgentTag={from?:string;to?:{name:string;owner:string}};
 /** The fields v2 and v3 add to a chat message. */
-export type ChatExtensions={v?:number;event?:ChatEvent;thread?:ThreadRef;mentions?:string[];mentionsAll?:true;card?:Card};
+export type ChatExtensions={v?:number;event?:ChatEvent;thread?:ThreadRef;mentions?:string[];mentionsAll?:true;card?:Card;agent?:AgentTag};
 /** The lowest chat version a device needs to receive an event of this type. */
-export const eventVersion=(event:ChatEvent)=>event.type==='reaction'?REACTIONS_VERSION:event.type==='live'?LIVE_VERSION:event.type==='layer'?LAYER_VERSION:EDITS_VERSION;
+export const eventVersion=(event:ChatEvent)=>event.type==='reaction'?REACTIONS_VERSION:event.type==='live'?LIVE_VERSION:event.type==='layer'?LAYER_VERSION:event.type==='agent-status'?AGENT_VERSION:EDITS_VERSION;
 /** A live session event: traffic between a session's owner and the teammates
  *  watching it, never a change to a message (session.ts routes it apart). */
 export const isLiveEvent=(event:ChatEvent|undefined):event is LiveEvent=>event?.type==='live';
 /** A layer ownership event: team-wide state, routed to lensClaimSync.ts, never
  *  a change to a message. */
+export const isAgentStatusEvent=(event:ChatEvent|undefined):event is AgentStatusEvent=>event?.type==='agent-status';
 export const isLayerEvent=(event:ChatEvent|undefined):event is LayerEvent=>event?.type==='layer';
 
 /** How far back an author may backfill a message, and how far ahead of its
@@ -81,7 +98,23 @@ export function parseEvent(value:unknown):ChatEvent|undefined{
  if(e.type==='delete')return validTarget(e.target)&&exact(e,['type','target'])?{type:'delete',target:e.target}:undefined;
  if(e.type==='live')return parseLiveEvent(e);
  if(e.type==='layer')return parseLayerEvent(e);
+ if(e.type==='agent-status')return validTarget(e.target)&&validAgentName(e.agent)&&AGENT_STATES.includes(e.state as AgentDeliveryState)&&exact(e,['type','target','agent','state'])?{type:'agent-status',target:e.target,agent:e.agent,state:e.state as AgentDeliveryState}:undefined;
  return undefined;
+}
+const AGENT_STATES:readonly AgentDeliveryState[]=['queued','delivered','missing','paused'];
+/** An agent's display name: short, one line, nothing that renders as something else. */
+export const validAgentName=(value:unknown):value is string=>typeof value==='string'&&value.trim().length>0&&value.length<=60&&value===value.trim()&&!hasControl(value)&&!hasBidi(value);
+/** The `agent` field of a message, or undefined when it is malformed. */
+export function parseAgentTag(value:unknown):AgentTag|undefined{
+ if(!plain(value)||!exact(value,['from','to']))return undefined;
+ const out:AgentTag={};
+ if(value.from!==undefined){if(!validAgentName(value.from))return undefined;out.from=value.from;}
+ if(value.to!==undefined){
+  const to=value.to;
+  if(!plain(to)||!exact(to,['name','owner'])||!validAgentName(to.name)||!validUserId(to.owner))return undefined;
+  out.to={name:to.name,owner:to.owner};
+ }
+ return out.from||out.to?out:undefined;
 }
 export function parseThread(value:unknown):ThreadRef|undefined{
  return plain(value)&&validTarget(value.root)&&exact(value,['root'])?{root:value.root}:undefined;
@@ -103,10 +136,12 @@ export function parseExtensions(m:ChatMessage):ChatExtensions{
  if(mentions)out.mentions=mentions;
  if(m.mentionsAll===true&&m.recipient===null)out.mentionsAll=true;
  const card=m.card===undefined?undefined:parseCard(m.card);if(card)out.card=card;
+ const agent=m.agent===undefined?undefined:parseAgentTag(m.agent);if(agent)out.agent=agent;
  return out;
 }
 export const eventOf=(m:ChatMessage)=>parseExtensions(m).event;
 export const threadOf=(m:ChatMessage)=>parseExtensions(m).thread;
+export const agentTagOf=(m:ChatMessage)=>parseExtensions(m).agent;
 /** Carries an extension the message has but this client does not understand. */
 export const unknownExtension=(m:ChatMessage)=>m.event!==undefined&&!eventOf(m);
 /** Same conversation: both in the channel, or both between the same two people. */

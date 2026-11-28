@@ -8,10 +8,29 @@ import {LinkifiedText} from './LinkifiedText';
 import {isSendKey} from './chatComposerKeys';
 import {Button} from './ui';
 import {SendIcon} from './icons';
+import {agentTagOf} from '../teamMessaging/chatEvents';
+import {agentDeliveries,agentDeliveryText,shownText,subscribeAgentDeliveries,threadAgentTarget} from '../teamMessaging/agentRouting';
 import './chatThread.css';
 
 const time=(t:number)=>new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
 const stamp=(t:number)=>new Date(t).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+/** Which agent wrote a message, and which agent it is for, beside its sender. */
+export function AgentTags({message,userId,name}:{message:ChatMessage;userId:string;name:(id:string)=>string}){
+ const tag=agentTagOf(message);if(!tag)return null;
+ const to=tag.to&&(tag.to.owner===userId?`to your ${tag.to.name}`:`to ${name(tag.to.owner)}'s ${tag.to.name}`);
+ return <>{tag.from&&<span className="chat-agent-tag" title="Written by an agent">{message.sender===userId?`your ${tag.from}`:tag.from}</span>}{to&&<span className="chat-agent-tag is-to">{to}</span>}</>;
+}
+/** What happened to a message written for an agent: delivered, waiting for the
+ *  agent's turn to end, not running, or paused. From the agent owner's Canopy. */
+export function AgentDeliveryNote({message,userId,name}:{message:ChatMessage;userId:string;name:(id:string)=>string}){
+ const records=useSyncExternalStore(subscribeAgentDeliveries,agentDeliveries);
+ const to=agentTagOf(message)?.to,d=records[message.id];
+ if(!to||!d||d.agent.toLowerCase()!==to.name.toLowerCase())return null;
+ // The sender trusts only the owner's word; the owner only its own devices'.
+ const mine=to.owner===userId;
+ if(d.by!==to.owner)return null;
+ return <small className={`chat-agent-delivery is-${d.state}`} role="status">{agentDeliveryText(d,mine?null:name(to.owner))}</small>;
+}
 export function MentionList({id,suggestions,active,onPick}:{id:string;suggestions:Suggestion[];active:number;onPick:(s:Suggestion)=>void}){
  if(!suggestions.length)return null;
  return <ul id={id} className="chat-mention-list" role="listbox" aria-label="Mention someone">
@@ -94,6 +113,11 @@ export function ChatThreadPane({session,root,peer,userId,name,active,onClose,ren
  const rootMessage=find(root);
  const replies=messages.filter(m=>threadRoot(m,find)===root);
  const [draft,setDraft]=useState(''),[error,setError]=useState('');
+ // A reply in a thread a teammate's agent is in speaks to that agent, unless
+ // the person turns it off for this reply.
+ const agent=threadAgentTarget(messages,root,userId),agentKey=agent?`${agent.owner}\0${agent.name}`:'';
+ const [toAgent,setToAgent]=useState(true);
+ useEffect(()=>setToAgent(true),[agentKey]);
  const input=useRef<HTMLTextAreaElement>(null),listId=useId();
  const mention=useMentionSuggestions(draft,setDraft,input,members,userId,peer);
  useEffect(()=>{input.current?.focus({preventScroll:true});},[root]);
@@ -104,11 +128,13 @@ export function ChatThreadPane({session,root,peer,userId,name,active,onClose,ren
  const send=()=>{
   const text=draft;if(!text.trim())return;setDraft('');setError('');
   const {mentions,mentionsAll}=mentionsFor(text,members,userId,peer);
-  session.send(text,peer,[],{thread:{root},...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})}).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);});
+  const addressed=agent&&toAgent?{agent:{to:agent}}:{};
+  session.send(text,peer,[],{thread:{root},...addressed,...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})}).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);});
  };
  const show=(m:ChatMessage)=>renderMessage?renderMessage(m):<article key={m.id} className={`account-chat-msg${m.sender===userId?' own':''}`} data-message={m.id}>
-  <header><strong>{name(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>
-  <MessageText text={edits[m.id]?.text??m.text} deleted={!!deleted[m.id]} editedAt={edits[m.id]?.created} mentionsMe={mentionsUser(m,userId)}/>
+  <header><strong>{name(m.sender)}</strong><AgentTags message={m} userId={userId} name={name}/><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>
+  <MessageText text={shownText(m,edits[m.id]?.text??m.text)} deleted={!!deleted[m.id]} editedAt={edits[m.id]?.created} mentionsMe={mentionsUser(m,userId)}/>
+  <AgentDeliveryNote message={m} userId={userId} name={name}/>
  </article>;
  return <aside className="chat-thread-pane" aria-label="Thread">
   <header className="chat-thread-head"><strong>Thread</strong><Button size="sm" variant="ghost" icon aria-label="Close thread" title="Close thread (Esc)" onClick={onClose}>×</Button></header>
@@ -120,8 +146,9 @@ export function ChatThreadPane({session,root,peer,userId,name,active,onClose,ren
   <form className="account-chat-composer chat-thread-composer" onSubmit={e=>{e.preventDefault();send();}}>
    {error&&<p role="alert">{error}</p>}
    <MentionList id={listId} {...mention} onPick={mention.pick}/>
+   {agent&&<label className="chat-agent-address"><input type="checkbox" checked={toAgent} onChange={e=>setToAgent(e.target.checked)}/>To {name(agent.owner)}'s {agent.name}{toAgent?<span> · typed into it when it finishes its turn</span>:null}</label>}
    <div className="account-chat-input">
-    <textarea ref={input} rows={1} aria-label="Reply" placeholder="Reply…" value={draft} maxLength={16000} aria-controls={mention.suggestions.length?listId:undefined}
+    <textarea ref={input} rows={1} aria-label="Reply" placeholder={agent&&toAgent?`Reply to ${agent.name}…`:'Reply…'} value={draft} maxLength={16000} aria-controls={mention.suggestions.length?listId:undefined}
      onChange={e=>{setDraft(e.target.value);mention.track();}} onSelect={mention.track}
      onKeyDown={e=>{if(mention.onKeyDown(e))return;if(e.key==='Escape'&&!draft){e.preventDefault();onClose();return;}if(isSendKey(e)){e.preventDefault();send();}}}/>
     <Button type="submit" variant="accent" icon aria-label="Send reply" title="Send (Enter)" disabled={!draft.trim()}><SendIcon size={14}/></Button>

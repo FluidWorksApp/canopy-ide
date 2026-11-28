@@ -1307,6 +1307,10 @@ pub fn context_mesh_job_update(
         // `job_id` is the chat message's id, so every forward of one message
         // lists together.
         Some("team-chat") => "team-chat",
+        // A teammate wrote this Teams message for this agent, and its owner
+        // let teammates reach their agents: `job_id` is the chat message's id,
+        // which the agent passes back as `replyTo` to answer in its thread.
+        Some("team-agent") => "team-agent",
         Some(other) => return Err(format!("unknown mesh update kind {other}")),
     };
     if instance != crate::pty::instance_token() {
@@ -1350,6 +1354,10 @@ pub fn context_mesh_job_update(
         ),
         "team-chat" => format!(
             "[canopy: from the user, via Teams chat] {}",
+            mesh_notice_for(&record)
+        ),
+        "team-agent" => format!(
+            "[canopy: a teammate's Teams message for you, id {job_id}] {}",
             mesh_notice_for(&record)
         ),
         "awareness" => format!(
@@ -5100,10 +5108,12 @@ async fn ui_op(
                     ),
                 );
             }
-            if op.member.as_deref().map_or(true, |m| m.trim().is_empty()) {
+            if op.member.as_deref().map_or(true, |m| m.trim().is_empty())
+                && op.reply_to.as_deref().map_or(true, |r| r.trim().is_empty())
+            {
                 return (
                     StatusCode::BAD_REQUEST,
-                    "team_send needs `to`: a teammate, or \"channel\"".into(),
+                    "team_send needs `to` (a teammate, or \"channel\") or `replyTo`".into(),
                 );
             }
             // The agent named in the message's footer is this terminal's.

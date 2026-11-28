@@ -748,6 +748,9 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         text: op.prompt ?? "",
         team: op.label,
         agent: op.ptyId != null ? await ctx.agentLabel?.(op.ptyId).catch(() => null) : null,
+        // The teammate's agent the message is for, and the chat message it answers.
+        toAgent: op.agent,
+        replyTo: op.replyTo,
       });
     case "pr_details":
       return prDetails(op, ctx);

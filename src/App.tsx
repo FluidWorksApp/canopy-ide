@@ -6,8 +6,10 @@ import {startBackgroundTeams} from "./teamMessaging/background";
 import {openReadableLink} from "./readableLinks";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
+import type {MessageExtensions} from "./teamMessaging/messageSchema";
 import {createAgentChat} from "./teamMessaging/agentChat";
 import {setChatHandoff} from "./teamMessaging/chatHandoff";
+import {startAgentInbox} from "./teamMessaging/startAgentInbox";
 import {teamName} from "./teamMessaging/unread";
 import {createMeshJobs,localIncomingJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "./meshJobs";
 import {peekWorkspaceList,refreshWorkspaceList,restoreWorkspaceList} from "./remoteExecution/workspaceListCache";
@@ -297,7 +299,15 @@ function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
 /** Agents posting in Teams chat (canopy_team_people / canopy_team_send).
  *  Window-wide like the team transports it sends through. */
 const agentChat = createAgentChat({
-  sessions: liveTeamSessions,
+  // The chat tab's sessions, seen through the slice agentChat uses.
+  sessions: () =>
+    liveTeamSessions().map((s) => ({
+      team: s.team,
+      user: s.user,
+      members: () => s.members(),
+      messages: () => s.getSnapshot().messages,
+      send: (text: string, peer: string | null, ext?: MessageExtensions) => s.send(text, peer, [], ext),
+    })),
   teamName,
   people: (teamId) => ipc.teamMembers(teamId),
 });
@@ -3942,6 +3952,9 @@ export default function App() {
   startSessionRef.current = startSession;
   // Live sessions this window opens to teammates hear joiners and turns.
   useEffect(() => startLiveRooms(), []);
+  // Teammates' Teams messages for this window's agents, typed in once each
+  // agent finishes its turn (teamMessaging/agentInbox.ts).
+  useEffect(() => startAgentInbox(), []);
   // Teams chat → agent: "Run as task" and "Send to agent" on a message
   // (teamMessaging/chatHandoff.ts). Everything is read at click time.
   useEffect(

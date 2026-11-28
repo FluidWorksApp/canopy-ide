@@ -15,13 +15,15 @@ import {handoffBrief,handoffLabel,useChatHandoff,type ChatHandoff,type HandoffAg
 import {AddReactionButton,MessageReactions,ReactionPicker} from './MessageReactions';
 import {reactionChips} from '../teamMessaging/reactions';
 import {ChatLinkCards} from './ChatLinkCards';
-import {ChatThreadPane,ConfirmDelete,DeliveryLine,InlineEditor,MentionList,MessageActions,MessageText,ThreadLine} from './ChatThreadPane';
+import {AgentDeliveryNote,AgentTags,ChatThreadPane,ConfirmDelete,DeliveryLine,InlineEditor,MentionList,MessageActions,MessageText,ThreadLine} from './ChatThreadPane';
+import {conversationAgents,shownText} from '../teamMessaging/agentRouting';
 import {mentionsFor,useMentionSuggestions} from './chatMessageHelpers';
 import {mentionsUser,threadRoot,threadSummaries} from '../teamMessaging/unread';
 import {isMuted,setMuted} from '../teamMessaging/notifications';
 import {getSettings,subscribeSettings} from '../settings';
 import {ChatCard} from './ChatCard';
 import {cardCaption,cardOf} from '../teamMessaging/cardSchema';
+import {agentTagOf} from '../teamMessaging/chatEvents';
 /** `focusMessage`: a message to bring into view, from a readable message link. */
 export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string;focusMessage?:string};
 /** Consecutive messages from one sender within this window share one header. */
@@ -149,6 +151,11 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  const saveEdit=(id:string,text:string)=>{setEditing(undefined);setError('');session.edit(id,text).catch((e:unknown)=>setError(e instanceof Error?e.message:String(e)));input.current?.focus();};
  const confirmDelete=(id:string)=>{setConfirming(undefined);setError('');session.remove(id).catch((e:unknown)=>setError(e instanceof Error?e.message:String(e)));};
  const mention=useMentionSuggestions(draft,setDraft,input,members,userId,peer),mentionListId=useId();
+ // In a direct message, the teammate's agents that have written here can be
+ // spoken to: the message goes in this conversation, marked for that agent.
+ const agents=peer?conversationAgents(conversationMessages,userId).filter(a=>a.owner===peer):[];
+ const [toAgent,setToAgent]=useState('');
+ const target=agents.find(a=>a.name===toAgent);
  const connected=status.startsWith('Connected');
  // Grow the composer with its content: one line at rest, capped at MAX_LINES.
  useLayoutEffect(()=>{
@@ -178,8 +185,8 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  function send(){
   const text=draft,attached=files;if(!text.trim()&&!attached.length)return;
   setDraft('');setFiles([]);setError('');input.current?.focus();
-  const {mentions,mentionsAll}=mentionsFor(text,members,userId,peer),options={...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})};
-  (mentions||mentionsAll?session.send(text,peer,attached,options):attached.length?session.send(text,peer,attached):session.send(text,peer)).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);setFiles(current=>current.length?current:attached);});
+  const {mentions,mentionsAll}=mentionsFor(text,members,userId,peer),options={...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{}),...(target?{agent:{to:target}}:{})};
+  (mentions||mentionsAll||target?session.send(text,peer,attached,options):attached.length?session.send(text,peer,attached):session.send(text,peer)).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);setFiles(current=>current.length?current:attached);});
  }
  const senderName=(id:string)=>id===userId?'You':members[id]||(peer?name:`Former member (${id.slice(0,8)})`);
  const menu=useContextMenu(),[copied,setCopied]=useState<string>(),copiedTimer=useRef<number>(undefined);
@@ -227,7 +234,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
     const prev=visible[i-1],own=m.sender===userId;
     const newDay=!prev||dayKey(prev.created)!==dayKey(m.created);
     const grouped=!newDay&&prev.sender===m.sender&&m.created-prev.created<GROUP_MS;
-    const isDeleted=!!deleted[m.id],text=isDeleted?'':edits[m.id]?.text??m.text,summary=threads[m.id],orphan=threadRoot(m,findMessage);
+    const isDeleted=!!deleted[m.id],text=isDeleted?'':shownText(m,edits[m.id]?.text??m.text),summary=threads[m.id],orphan=threadRoot(m,findMessage);
     const delivered=own&&!!receipts[m.id]?.length,state=own&&!delivered&&!isDeleted?delivery[m.id]?.state??(restoredIds?.includes(m.id)?'queued':'sent'):undefined;
     const failed=state==='failed'||state==='expired'||state==='waiting',pending=!!state&&!failed;
     const card=isDeleted?undefined:cardOf(m),caption=card?cardCaption(text,card):text;
@@ -235,7 +242,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
      {newDay&&<div className="account-chat-day" role="separator"><span>{dayLabel(m.created)}</span></div>}
      <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}${!isDeleted&&mentionsUser(m,userId)?' mentions-me':''}`} data-delivery={delivered?'delivered':state} data-message={m.id}>
       {text&&<button type="button" className={`account-chat-copy${copied===m.id?' is-copied':''}`} aria-label={copied===m.id?'Copied':'Copy message'} title={copied===m.id?'Copied':'Copy message'} onMouseDown={e=>e.preventDefault()} onClick={()=>copy(text,m.id)}>{copied===m.id?<><CheckIcon size={12}/>Copied</>:<CopyIcon size={12}/>}</button>}
-      {!grouped&&<header><strong>{senderName(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>}
+      {(!grouped||agentTagOf(m))&&<header><strong>{senderName(m.sender)}</strong><AgentTags message={m} userId={userId} name={senderName}/><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>}
       {orphan&&<button type="button" className="chat-orphan account-chat-action" onClick={()=>setThread(orphan)}>Reply to a message not on this device</button>}
       {editing===m.id?<InlineEditor initial={text} onSave={value=>saveEdit(m.id,value)} onCancel={()=>{setEditing(undefined);input.current?.focus();}}/>:<MessageText text={caption} deleted={isDeleted} editedAt={edits[m.id]?.created}/>}
       {!isDeleted&&<AddReactionButton open={reacting===m.id} controls={pickerId} className={text?'beside-copy':undefined} onToggle={()=>setReacting(current=>current===m.id?undefined:m.id)}/>}
@@ -246,6 +253,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
       {handoff&&!isDeleted&&!card&&text.trim()&&!pending&&<Handoff handoff={handoff} source={{id:m.id,sender:own?'You':senderName(m.sender),where:peer?`direct message with ${name}`:`#${name}`,text,files:m.attachments?.map(a=>a.name)}}/>}
       {!isDeleted&&<MessageReactions chips={reactionChips(reactions,m.id,userId)} undelivered={undeliveredReactions[m.id]} name={senderName} onToggle={emoji=>react(m.id,emoji)}
        picker={reacting===m.id?<ReactionPicker id={pickerId} onPick={emoji=>{closePicker(m.id);react(m.id,emoji);}} onClose={()=>closePicker(m.id)} onDismiss={()=>setReacting(undefined)}/>:undefined}/>}
+      {!isDeleted&&<AgentDeliveryNote message={m} userId={userId} name={senderName}/>}
       {summary&&<ThreadLine replies={summary.replies} last={summary.last} unread={summary.unread} onOpen={()=>setThread(m.id)}/>}
       {confirming===m.id&&<ConfirmDelete older={session.olderRecipients(peer).map(senderName)} onConfirm={()=>confirmDelete(m.id)} onCancel={()=>setConfirming(undefined)}/>}
       {own&&!isDeleted&&<DeliveryLine session={session} message={m} latest={m.id===lastOwn} state={state} detail={state?delivery[m.id]?.detail:undefined} delivered={delivered} name={senderName} dm={peer!==null}/>}
@@ -261,7 +269,11 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
    <div className="account-chat-input">
     <input ref={picker} type="file" multiple hidden aria-hidden="true" tabIndex={-1} onChange={e=>{addFiles([...(e.target.files??[])]);e.currentTarget.value='';}}/>
     <Button type="button" variant="ghost" icon className="account-chat-attach" aria-label="Attach files" title="Attach files · sent directly between devices, never uploaded" onClick={()=>picker.current?.click()}>📎</Button>
-    <textarea ref={input} rows={1} aria-label="Message" aria-describedby={hintId} placeholder={`Message ${name}…`} value={draft} onChange={e=>{setDraft(e.target.value);mention.track();}} onSelect={mention.track} aria-controls={mention.suggestions.length?mentionListId:undefined} onPaste={e=>{const pasted=[...(e.clipboardData?.files??[])];if(!pasted.length)return;e.preventDefault();addFiles(pasted);}}
+    {agents.length>0&&<Select size="sm" className="chat-agent-picker" aria-label="Send to" title="Send to the person, or to one of their agents that has written here" value={target?target.name:''} onChange={e=>setToAgent(e.target.value)}>
+     <option value="">{name}</option>
+     {agents.map(a=><option key={a.name} value={a.name}>{name}'s {a.name}</option>)}
+    </Select>}
+    <textarea ref={input} rows={1} aria-label="Message" aria-describedby={hintId} placeholder={target?`Message ${target.name} (typed in when it finishes its turn)…`:`Message ${name}…`} value={draft} onChange={e=>{setDraft(e.target.value);mention.track();}} onSelect={mention.track} aria-controls={mention.suggestions.length?mentionListId:undefined} onPaste={e=>{const pasted=[...(e.clipboardData?.files??[])];if(!pasted.length)return;e.preventDefault();addFiles(pasted);}}
      onKeyDown={e=>{if(mention.onKeyDown(e))return;
       // Up in an empty message box edits your last message.
       if(e.key==='ArrowUp'&&!draft&&!files.length&&!e.shiftKey&&!e.altKey&&!e.metaKey&&!e.ctrlKey&&lastOwn&&editable(visible.find(m=>m.id===lastOwn))){e.preventDefault();startEdit(lastOwn);return;}

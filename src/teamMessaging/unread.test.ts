@@ -16,6 +16,7 @@ const me=vi.hoisted(()=>({id:'me'}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>({user:{id:me.id}}))}));
 import {teamSession,clearTeamSessions,getTeamUnread,getUnreadSummary,subscribeTeamMessages} from './session';
 import {badgeLabel,countUnread,conversationKey,CHANNEL} from './unread';
+import {CHAT_VERSION} from './chatEvents';
 const flush=()=>new Promise(resolve=>setTimeout(resolve,0));
 let n=0;
 async function open(team:string,user='me'){
@@ -112,7 +113,7 @@ it('toggles your own reaction, sends it to the conversation and restores it afte
  await first.session.react(T1,'👍');
  const sent=mocks.sendEvent.mock.calls[0][0] as any;
  // A direct message's reaction goes to the other person, as a v2 event message.
- expect(sent).toMatchObject({sender:'me',recipient:'ada',v:4,event:{type:'reaction',target:T1,emoji:'👍',op:'add'}});
+ expect(sent).toMatchObject({sender:'me',recipient:'ada',v:CHAT_VERSION,event:{type:'reaction',target:T1,emoji:'👍',op:'add'}});
  expect(sent.text).toContain('👍');
  expect(first.session.getSnapshot().reactions[T1]).toBeDefined();
  await first.session.react(T1,'👍');

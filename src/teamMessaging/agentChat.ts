@@ -6,16 +6,26 @@
 // (the bridge checks), and every message carries a line naming the agent that
 // wrote it, so the person reading it knows a person did not.
 //
-// What happens next is the recipient's choice: from the chat they can hand the
-// message to one of their running agents or start a task on it
-// (AccountChatView). Nothing here runs anything on anyone's machine.
+// Every message also carries `agent.from` (chatEvents.ts AgentTag), so the chat
+// shows which agent spoke. `replyTo` answers in a message's thread, in that
+// message's conversation; `agent` (or replying to a teammate's agent) addresses
+// one of the recipient's agents, which their Canopy types into that agent's
+// terminal once it is idle (agentInbox.ts). Otherwise the recipient chooses:
+// hand it to one of their agents, or start a task on it (AccountChatView).
 
 /** The slice of a TeamSession this module uses. */
+import type { ChatMessage } from "./client";
+import type { MessageExtensions } from "./messageSchema";
+import { agentTagOf } from "./chatEvents";
+import { threadRoot } from "./unread";
+
 export interface ChatSession {
   readonly team: string;
   readonly user: string;
   members(): Record<string, string>;
-  send(text: string, peer: string | null): Promise<{ id: string; delivery?: { state: string; detail?: string } }>;
+  /** The messages this device has, for finding the one a reply answers. */
+  messages(): readonly ChatMessage[];
+  send(text: string, peer: string | null, ext?: MessageExtensions): Promise<{ id: string; delivery?: { state: string; detail?: string } }>;
 }
 
 export interface TeamPerson {
@@ -108,24 +118,68 @@ export function createAgentChat(deps: AgentChatDeps) {
     throw new Error(`Nobody called "${to}" in ${teamLabel}. People: ${list || "none yet"}. Or send to "channel".`);
   }
 
-  async function send(req: { to: string; text: string; team?: string | null; agent?: string | null }) {
+  /** The session and message `replyTo` names, among every team's. */
+  function replied(id: string, team: string | null | undefined): { session: ChatSession; message: ChatMessage } {
+    const sessions = team ? [pickSession(team)] : deps.sessions();
+    for (const session of sessions) {
+      const message = session.messages().find((m) => m.id === id);
+      if (message) return { session, message };
+    }
+    throw new Error(`No message ${id} in the Teams chat on this machine. Use the id from the message you were given.`);
+  }
+
+  async function send(req: {
+    to?: string | null;
+    text: string;
+    team?: string | null;
+    /** This agent's name, for the footer and the `agent.from` tag. */
+    agent?: string | null;
+    /** A chat message id: answer in its thread, in its conversation. */
+    replyTo?: string | null;
+    /** One of the recipient's agents, by name: it gets the message. */
+    toAgent?: string | null;
+  }) {
     const text = (req.text ?? "").trim();
     if (!text) throw new Error("A message needs text.");
-    if (!req.to?.trim()) throw new Error("Say who it is for: a teammate from canopy_team_people, or \"channel\".");
-    const session = pickSession(req.team);
-    const who = await recipient(session, req.to);
-    const sent = await session.send(`${text}\n\n${agentFooter(req.agent)}`, who.peer);
+    if (!req.to?.trim() && !req.replyTo?.trim()) throw new Error("Say who it is for: a teammate from canopy_team_people, or \"channel\" — or replyTo a message.");
+    let session: ChatSession, who: { peer: string | null; name: string }, thread: string | undefined, target: { name: string; owner: string } | undefined;
+    if (req.replyTo?.trim()) {
+      const found = replied(req.replyTo.trim(), req.team);
+      session = found.session;
+      const m = found.message;
+      const peer = m.recipient === null ? null : m.sender === session.user ? m.recipient : m.sender;
+      who = { peer, name: peer === null ? `#${deps.teamName(session.team) ?? session.team}` : session.members()[peer] ?? peer };
+      const find = (id: string) => session.messages().find((x) => x.id === id);
+      thread = threadRoot(m, find) ?? m.id;
+      // Answering a teammate's agent answers that agent.
+      const from = agentTagOf(m)?.from;
+      if (from && m.sender !== session.user) target = { name: from, owner: m.sender };
+    } else {
+      session = pickSession(req.team);
+      who = await recipient(session, req.to ?? "");
+    }
+    if (req.toAgent?.trim()) {
+      const owner = who.peer;
+      if (owner === null) throw new Error("To reach a teammate's agent, message that teammate directly (to: their name), not the channel.");
+      target = { name: req.toAgent.trim(), owner };
+    }
+    const from = req.agent?.trim() || undefined;
+    const tag = from || target ? { agent: { ...(from ? { from } : {}), ...(target ? { to: target } : {}) } } : {};
+    const sent = await session.send(`${text}\n\n${agentFooter(req.agent)}`, who.peer, { ...tag, ...(thread ? { thread: { root: thread } } : {}) });
     const state = sent.delivery?.state;
     return {
       messageId: sent.id,
-      to: who.name,
+      to: target ? `${target.name} (${session.members()[target.owner] ?? who.name}'s agent)` : who.name,
       team: deps.teamName(session.team) ?? session.team,
+      ...(thread ? { thread } : {}),
       status: state === "failed" ? "failed" : state === "waiting" ? "waiting-for-connection" : "sent",
       ...(sent.delivery?.detail ? { detail: sent.delivery.detail } : {}),
       note:
         state === "failed"
           ? "Not sent; the user can retry it from the chat."
-          : `Posted in Teams as the user, marked as written by an agent. ${who.peer ? `${who.name} sees it` : "Everyone in the team sees it"} in Canopy and can hand it to an agent or run it as a task from there. Replies come back to the user's chat, not to this terminal.`,
+          : target
+            ? `Posted in Teams as the user, for ${target.name}. Their Canopy types it into that agent's terminal once it finishes its turn; if it is not running, ${who.name} sees it in the chat. An answer that replies to this message arrives in this terminal.`
+            : `Posted in Teams as the user, marked as written by an agent. ${who.peer ? `${who.name} sees it` : "Everyone in the team sees it"} in Canopy. A reply in this message's thread addressed to you arrives in this terminal; anything else stays in the user's chat.`,
     };
   }
 

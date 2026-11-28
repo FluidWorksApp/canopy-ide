@@ -2,7 +2,7 @@ import {validChatMessage,UUID,MAX_ATTACHMENTS,type MessageExtensions} from './me
 import {chatFileStore,prepareFile,sha256,bytesOf,type FileStore,type FileRecord,type PreparedFile} from './files';
 import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
-import {BACKFILL_MS,BACKFILL_SKEW_MS,CHAT_VERSION,EDITS_VERSION,eventOf,eventVersion,parseMentions,parseThread,unknownExtension} from './chatEvents';
+import {BACKFILL_MS,BACKFILL_SKEW_MS,CHAT_VERSION,EDITS_VERSION,eventOf,eventVersion,parseAgentTag,parseMentions,parseThread,unknownExtension} from './chatEvents';
 import {PeerVersions,localVersionStore,type VersionStore} from './peerVersions';
 import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRoster,validRosterRequest,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus,type Roster,type RosterRequest} from './jobSchema';
 /** `last_seen_at` is bumped by every poll the device makes, so it is the
@@ -10,10 +10,10 @@ import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRos
 export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_seen_at?:string|null;kind?:'user'|'host';workspaceIds?:string[]};
 /** File metadata only: the bytes never ride in a message or through the relay. */
 export type Attachment={id:string;name:string;size:number;type:string;sha256:string};
-/** `v` and `event` (v2), `thread`, `mentions` and `mentionsAll` (v3) are chat
+/** `v` and `event` (v2), `thread`, `mentions` and `mentionsAll` (v3), `agent` (v5) are chat
  * protocol extensions (see chatEvents.ts): unchecked here, parsed leniently by
  * `parseExtensions`, ignored by older clients. */
-export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown;card?:unknown;mentions?:unknown;thread?:unknown;mentionsAll?:unknown};
+export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown;card?:unknown;mentions?:unknown;thread?:unknown;mentionsAll?:unknown;agent?:unknown};
 export type UnavailableReason='offline'|'expired'|'denied';
 /** `backfill` (v3): a message its author re-sends after the original delivery
  * expired, so it may be older than the usual five-minute window. `read` (v3):
@@ -249,7 +249,7 @@ export class PeerClient {
   if(!devices.length)throw Error('No recipient devices are registered yet. Ask your teammate to sign in to Canopy.');
   const prepared=await Promise.all(files.map(file=>'meta' in file?file:prepareFile(file)));
   // A thread, mentions and @channel must be well formed; a card is checked by its own schema.
-  if((ext?.thread!==undefined&&!parseThread(ext.thread))||(ext?.mentions!==undefined&&!parseMentions(ext.mentions))||(ext?.mentionsAll!==undefined&&(ext.mentionsAll!==true||recipient!==null)))throw Error('Invalid message');
+  if((ext?.thread!==undefined&&!parseThread(ext.thread))||(ext?.agent!==undefined&&!parseAgentTag(ext.agent))||(ext?.mentions!==undefined&&!parseMentions(ext.mentions))||(ext?.mentionsAll!==undefined&&(ext.mentionsAll!==true||recipient!==null)))throw Error('Invalid message');
   const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION,...ext};
   if(!validChatMessage(message))throw Error('Invalid message');
   if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This message is too large after encoding. Split it into smaller messages.');
