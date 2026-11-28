@@ -4,16 +4,14 @@ import { effectivePreference } from "../../placement/balancer";
 import { getAgentPreference, getGlobalPreference, getProjectPreference } from "../../placement/preferences";
 import { remoteComponentFor } from "../../environments/remoteLaunch";
 import { prepareRemoteWorkspace } from "../../environments/remoteWorkspace";
-import { connectedMachines, joinThisMac, leaveThisMac, liveEnvironments } from "../../environments/live";
+import { connectedMachines, liveEnvironments } from "../../environments/live";
 import { fetchMachineDigests } from "../../environments/remoteDigests";
 import { activeExecutionTarget, canLaunchOnActiveTarget, requestTargetTransition } from "../../placement/transitions";
 import { TELEPORT_TO_MAC, TeleportFlow } from "../TeleportFlow";
-import { useAllWorkspaces } from "../../remoteExecution/allMode";
+import type { ForeignSession } from "../../environments/allProjects";
 import { connectMachine } from "../../environments/live";
-import { closedKey, machineBadge, parseMachineSessions, rememberableTab, sessionsNeedingTabs, THIS_MAC_ENV, withoutClosed, workspacesToJoin } from "../../environments/allWorkspaceTabs";
+import { closedKey, rememberableTab, sessionsNeedingTabs, THIS_MAC_ENV, withoutClosed } from "../../environments/allWorkspaceTabs";
 import { routeOf } from "../../environments/ptyRoute";
-import { peekMachines, savedMachines } from "../../machines/inventory";
-import { repoResolver, reposOf, sessionsInRepos, type RepoMachine } from "../../machines/repoIdentity";
 import { setPendingLaunch, takePendingLaunch, type PendingLaunch } from "../../placement/pendingLaunch";
 import { canonicalProjectId } from "../../placement/identity";
 import type { DisplayTarget, Preference, Target } from "../../placement/types";
@@ -27,7 +25,7 @@ import {
   withoutLiveSessions,
 } from "../../terminalRecovery";
 import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
-import {invoke as hostInvoke,isReadOnlyHost,isRemoteHost,isWorkspaceHost} from "../../host";
+import {isReadOnlyHost,isRemoteHost} from "../../host";
 import { reconnectDiagnostic } from "../../reconnectDiagnostic";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
 import {AccountChatView,type AccountConversation} from "../AccountChatView";
@@ -753,7 +751,6 @@ import { Button } from "../ui";
 import { RemoteReconnect } from "../RemoteReconnect";
 import { NativeWindowHeld } from "../NativeWindowHeld";
 import { remoteTabReconnect, localTabReconnect, machineLabel } from "../../environments/remoteReconnect";
-import { nativeHost } from "../../host/native";
 import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
 import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
 import { armPlanTracking, expectRun } from "../../plans/planStore";
@@ -953,6 +950,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   restore,
   onRestoreStep,
   onRestored,
+  allSessions,
   useWorktreeRef,
 }: ProjectViewProps & { useWorktreeRef: UseWorktreeRef }) {
   // Every notice raised inside a project speaks for that project. Stamped here
@@ -1975,153 +1973,75 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // those tabs without touching the sessions.
   // The agent card docked beside the terminal: the terminal narrows to leave its column.
   const [cardDocked, setCardDocked] = useState(false);
-  const allWorkspaces = useAllWorkspaces();
-  // Sessions whose tab the person closed here. The refresh below must not add
+  // The tabs come from App's one plan (environments/useAllWorkspacesPlan.ts),
+  // which reads every running machine and decides which of their terminals
+  // belong to this project; this view only gives each one a tab and attaches it.
+  const allWorkspaces = allSessions !== undefined;
+  // Sessions whose tab the person closed here. The next plan must not add
   // them back while they keep running on their machine.
   const closedViaAllRef = useRef(new Set<string>());
-  const componentPathsRef = useRef<string[]>([]);
-  componentPathsRef.current = project.components.map((c) => c.path).filter(Boolean);
+  // Sessions being given a tab right now: a plan arriving before the next
+  // render must not add them a second time.
+  const joiningRef = useRef(new Set<string>());
   useEffect(() => {
-    if (!visible) return;
-    if (!allWorkspaces) {
-      closedViaAllRef.current.clear();
-      leaveThisMac();
-      setTabs((prev) => {
-        const kept = prev.filter((t) => !(t.type === "terminal" && t.viaAll));
-        if (kept.length === prev.length) return prev;
-        for (const t of prev) if (t.type === "terminal" && t.viaAll) pendingAllDetach.current.push(t);
-        return kept;
-      });
-      return;
-    }
-    let live = true;
-    // What joins this project's strip is decided by the git repository and
-    // nothing else (machines/repoIdentity.ts): a terminal on another machine
-    // belongs here when its folder is a checkout of a repository this project
-    // has a checkout of. Project names, ids and folder layouts differ from
-    // machine to machine; the origin does not. A terminal outside any
-    // repository belongs to no project and is left on its own machine.
-    const projectRepos = () => {
-      const here: RepoMachine = {
-        env: isRemoteHost() ? `remote:${activeWorkspace()?.connection.workspaceId ?? "active"}` : THIS_MAC_ENV,
-        invoke: hostInvoke,
-        desktop: !isRemoteHost(),
-      };
-      return reposOf(here, componentPathsRef.current);
-    };
-    // One machine's live terminals, each given a tab and attached right away:
-    // the person chose this mode, so nothing waits on a button.
-    const addFrom = async (
-      machine: { env: string; name: string; invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>; desktop?: boolean },
-      reconnect: (env: string, sessionId: number) => ReturnType<typeof remoteTabReconnect>,
-      repos: Awaited<ReturnType<typeof projectRepos>>,
-    ) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const raw = await Promise.race([
-        machine.invoke<unknown>("pty_stats"),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), 10_000); }),
-      ]).finally(() => clearTimeout(timer));
-      if (!live) return;
-      const candidates = sessionsNeedingTabs(
-        machine.env,
-        withoutClosed(machine.env, parseMachineSessions(raw), closedViaAllRef.current),
-        tabsRef.current,
-      );
-      if (candidates.length === 0) return;
-      const mine = await sessionsInRepos(candidates, repos, (dir) => repoResolver.repoOf(machine, dir));
-      if (!live) return;
-      // Asked again after the wait: a pass that overlapped this one may have
-      // given some of them a tab meanwhile.
-      const need = sessionsNeedingTabs(machine.env, mine, tabsRef.current);
-      if (need.length === 0) return;
-      const added = need.map((session) => ({
-        id: tabId(),
-        type: "terminal" as const,
-        cwd: session.cwd ?? "",
-        ptyId: null,
-        machine: machine.env,
-        machineName: machineBadge(machine.name),
-        viaAll: true,
-        command: undefined,
-        icon: undefined,
-        name: session.title || `terminal ${session.id}`,
-        reconnect: { sessionId: session.id },
-      }));
-      setTabs((prev) => [...prev, ...(added as unknown as SubTab[])]);
-      for (const tab of added) {
-        const result = await reconnect(machine.env, tab.reconnect.sessionId);
-        if (!live) return;
-        if (result.kind === "attached") {
-          setTabs((prev) =>
-            prev.map((t) =>
-              t.id === tab.id && t.type === "terminal"
-                ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: false, reconnect: undefined }
-                : t,
-            ),
-          );
-        } else if (result.kind === "gone") {
-          setTabs((prev) => prev.filter((t) => t.id !== tab.id));
+    if (allWorkspaces) return;
+    closedViaAllRef.current.clear();
+    setTabs((prev) => {
+      const kept = prev.filter((t) => !(t.type === "terminal" && t.viaAll));
+      if (kept.length === prev.length) return prev;
+      for (const t of prev) if (t.type === "terminal" && t.viaAll) pendingAllDetach.current.push(t);
+      return kept;
+    });
+  }, [allWorkspaces]);
+  useEffect(() => {
+    if (!visible || !allSessions?.length) return;
+    const byEnv = new Map<string, ForeignSession[]>();
+    for (const s of allSessions) byEnv.set(s.env, [...(byEnv.get(s.env) ?? []), s]);
+    void (async () => {
+      for (const [env, list] of byEnv) {
+        const sessions = withoutClosed(env, list.map((s) => s.session), closedViaAllRef.current);
+        const need = sessionsNeedingTabs(env, sessions, tabsRef.current).filter(
+          (session) => !joiningRef.current.has(closedKey(env, session.id)),
+        );
+        if (need.length === 0) continue;
+        const added = need.map((session) => ({
+          id: tabId(),
+          type: "terminal" as const,
+          cwd: session.cwd ?? "",
+          ptyId: null,
+          machine: env,
+          machineName: list[0].machineName,
+          viaAll: true,
+          command: undefined,
+          icon: undefined,
+          name: session.title || `terminal ${session.id}`,
+          reconnect: { sessionId: session.id },
+        }));
+        for (const session of need) joiningRef.current.add(closedKey(env, session.id));
+        setTabs((prev) => [...prev, ...(added as unknown as SubTab[])]);
+        for (const tab of added) {
+          const sessionId = tab.reconnect.sessionId;
+          const result = await (env === THIS_MAC_ENV
+            ? localTabReconnect(sessionId)
+            : remoteTabReconnect(env, sessionId)
+          ).finally(() => joiningRef.current.delete(closedKey(env, sessionId)));
+          if (result.kind === "attached") {
+            setTabs((prev) =>
+              prev.map((t) =>
+                t.id === tab.id && t.type === "terminal"
+                  ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: false, reconnect: undefined }
+                  : t,
+              ),
+            );
+          } else if (result.kind === "gone") {
+            setTabs((prev) => prev.filter((t) => t.id !== tab.id));
+          } else {
+            console.warn(`[all-workspaces] could not attach ${env}:${sessionId}: ${result.reason}`);
+          }
         }
       }
-    };
-    // A slow machine can keep one pass going past the next poll; a second pass
-    // would read the same tabs before the first has added its own and add them again.
-    let syncing = false;
-    const sync = async () => {
-      if (syncing) return;
-      syncing = true;
-      try {
-        await syncOnce();
-      } finally {
-        syncing = false;
-      }
-    };
-    // A machine that did not answer is left alone for a minute: the person's
-    // own machine may simply be off, and asking every pass would keep a
-    // connection attempt permanently in flight.
-    const unreachableUntil = new Map<string, number>();
-    const syncOnce = async () => {
-      const repos = await projectRepos().catch(() => []);
-      // A project that is no checkout of anything has nothing to be joined by.
-      if (!live || repos.length === 0) return;
-      // While a workspace is this window's own machine, this Mac is just
-      // another machine: its terminals join the strip like any other's.
-      if (isWorkspaceHost()) {
-        try {
-          joinThisMac();
-          await addFrom(
-            { env: THIS_MAC_ENV, name: "This Mac", invoke: (command, args) => nativeHost.invoke(command, args), desktop: true },
-            (_env, sessionId) => localTabReconnect(sessionId),
-            repos,
-          );
-        } catch {
-          /* This Mac could not be read; the strip stays as it is. */
-        }
-      }
-      // Cloud workspaces and the person's own machines alike (machines/inventory.ts).
-      await savedMachines();
-      if (!live) return;
-      const running = workspacesToJoin(peekMachines(), activeWorkspace()?.connection.workspaceId);
-      for (const workspace of running) {
-        if ((unreachableUntil.get(workspace.id) ?? 0) > Date.now()) continue;
-        try {
-          const machine = await connectMachine(workspace.id);
-          unreachableUntil.delete(workspace.id);
-          await addFrom(machine, (env, sessionId) => remoteTabReconnect(env, sessionId), repos);
-        } catch {
-          /* A machine that cannot be read adds nothing; the strip stays as it is. */
-          unreachableUntil.set(workspace.id, Date.now() + 60_000);
-        }
-        if (!live) return;
-      }
-    };
-    void sync();
-    const timer = setInterval(() => void sync(), 15_000);
-    return () => {
-      live = false;
-      clearInterval(timer);
-    };
-  }, [allWorkspaces, visible]);
+    })();
+  }, [allSessions, visible]);
   const pendingAllDetach = useRef<unknown[]>([]);
 
   const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference, resume: false | { label?: string; then?: PendingLaunch["then"] } = false,

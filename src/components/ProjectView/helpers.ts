@@ -549,6 +549,9 @@ export interface ProjectViewProps {
   /** Progress of that rebuild, so the wake screen can tick the steps off. */
   onRestoreStep?: (done: number, total: number, label: string) => void;
   onRestored?: () => void;
+  /** "All workspaces": the other machines' live terminals that belong to this
+   *  project (environments/allProjects.ts). Undefined while the mode is off. */
+  allSessions?: import("../../environments/allProjects").ForeignSession[];
 }
 
 export type VibeTargetResolution =

@@ -68,6 +68,11 @@ interface TitleBarProps {
   projects: Project[];
   openProjects: Project[];
   activeId: string | null;
+  /** "All workspaces": projects only other machines have, shown after this
+   *  machine's own. They can be looked at, not closed, pinned or edited here. */
+  visiting?: { id: string; name: string; machines: string[] }[];
+  /** Asleep here but running on another machine: not drawn frozen. */
+  liveElsewhere?: ReadonlySet<string>;
   /** Count of agent items blocked on the user for a project — drives the pill badge. */
   pendingCount: (p: Project) => number;
   /** True while a live collaboration session is active anywhere. */
@@ -243,6 +248,8 @@ function BuildBrowserControls({ projectId }: {
 function TitleBarImpl({
   projects,
   openProjects,
+  visiting = [],
+  liveElsewhere,
   activeId,
   pendingCount,
   collabActive,
@@ -309,6 +316,8 @@ function TitleBarImpl({
       <div className="titlebar-projects" data-tauri-drag-region><div ref={projectStrip} className="project-tabs" data-tauri-drag-region onWheel={event=>{if(Math.abs(event.deltaY)>Math.abs(event.deltaX)){event.currentTarget.scrollLeft+=event.deltaY;}}}>
         {openProjects.map((p, i) => {
           const asleep = p.id in hibernated;
+          // Drawn awake while another machine runs it; the menu still wakes it here.
+          const frozen = asleep && !liveElsewhere?.has(p.id);
           // Only the first nine are reachable by digit, so only they wear one.
           const hint = showHints && i < 9 ? i + 1 : null;
           return (
@@ -316,7 +325,7 @@ function TitleBarImpl({
             key={p.id}
             className={`project-tab ${p.id === activeId ? "project-tab-active" : ""} ${
               p.id === tabDragId ? "tab-dragging" : ""
-            } ${asleep ? "project-tab-asleep" : ""}`}
+            } ${frozen ? "project-tab-asleep" : ""}`}
             style={p.id === tabDragId && tabDragOffsetX !== 0 ? { transform: `translateX(${tabDragOffsetX}px)` } : undefined}
             {...tabDragItemProps(p.id)}
             onClick={() => onSelectProject(p.id)}
@@ -350,11 +359,11 @@ function TitleBarImpl({
               ])
             }
             title={
-              (asleep ? "Hibernating — open its tab to wake it\n\n" : "") +
+              (frozen ? "Hibernating — open its tab to wake it\n\n" : asleep ? "Asleep here, running on another machine\n\n" : "") +
               p.components.map((c) => c.path).join("\n")
             }
           >
-            {asleep && (
+            {frozen && (
               <span className="project-tab-frost" title="Hibernating — open its tab to wake it">
                 <FrostIcon size={12} />
               </span>
@@ -365,7 +374,7 @@ function TitleBarImpl({
             {/* Nothing is running in a sleeping project, so nothing there can
                 be waiting on you — its agents' last words are history, not a
                 queue. */}
-            {!asleep && pendingCount(p) > 0 && (
+            {!frozen && pendingCount(p) > 0 && (
               <span className="badge badge-urgent" title="agent needs your input">
                 {pendingCount(p)}
               </span>
@@ -384,6 +393,17 @@ function TitleBarImpl({
           </div>
           );
         })}
+        {visiting.map((v) => (
+          <div
+            key={v.id}
+            className={`project-tab project-tab-visiting ${v.id === activeId ? "project-tab-active" : ""}`}
+            onClick={() => onSelectProject(v.id)}
+            title={`${v.name}\nOn ${v.machines.join(", ")}. Not on this machine.`}
+          >
+            <span>{v.name}</span>
+            <span className="project-tab-machine">{v.machines.join(" · ")}</span>
+          </div>
+        ))}
       </div>
         <Button icon title="New project" onClick={onNewProject}>
           ＋

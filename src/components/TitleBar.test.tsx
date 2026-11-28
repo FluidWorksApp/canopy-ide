@@ -282,3 +282,68 @@ describe("TitleBar project icons", () => {
     expect(tab("Acme Widgets").querySelectorAll(":scope > span:not([class])")).toHaveLength(1);
   });
 });
+
+describe("TitleBar in All workspaces", () => {
+  const base = {
+    pendingCount: () => 0,
+    collabActive: false,
+    tabDragId: null,
+    tabDragOffsetX: 0,
+    tabDragItemProps: (id: string) => ({ "data-drag-id": id, onPointerDown: () => {} }),
+    showHints: false,
+    notifCount: 0,
+    notifUrgency: "low" as const,
+    onOpenNotifications: () => {},
+    onOpenProject: () => {},
+    onCloseProject: () => {},
+    onHibernateProject: () => {},
+    onTogglePinProject: () => {},
+    onWakeProject: () => {},
+    onToggleVibe: () => {},
+    onEditProject: () => {},
+    onStopCollab: () => {},
+    onNewProject: () => {},
+    onManageProjects: () => {},
+  };
+
+  it("shows another machine's project with its machine, and selects it", () => {
+    const own = project("own", "Own");
+    const onSelectProject = vi.fn();
+    const { unmount } = render(
+      <TitleBar
+        {...base}
+        projects={[own]}
+        openProjects={[own]}
+        activeId="own"
+        hibernated={{}}
+        visiting={[{ id: "all:x", name: "Elsewhere", machines: ["This Mac"] }]}
+        onSelectProject={onSelectProject}
+      />,
+    );
+    const pill = screen.getByText("Elsewhere").closest(".project-tab")!;
+    expect(pill.textContent).toContain("This Mac");
+    expect(pill.querySelector(".tab-close")).toBeNull();
+    fireEvent.click(pill);
+    expect(onSelectProject).toHaveBeenCalledWith("all:x");
+    unmount();
+  });
+
+  it("does not draw a project frozen while another machine runs it", () => {
+    const asleep = project("zz", "Sleeper");
+    const { unmount } = render(
+      <TitleBar
+        {...base}
+        projects={[asleep]}
+        openProjects={[asleep]}
+        activeId={null}
+        hibernated={{ zz: {} }}
+        liveElsewhere={new Set(["zz"])}
+        onSelectProject={() => {}}
+      />,
+    );
+    const pill = screen.getByText("Sleeper").closest(".project-tab")!;
+    expect(pill.className).not.toContain("project-tab-asleep");
+    expect(pill.querySelector(".project-tab-frost")).toBeNull();
+    unmount();
+  });
+});
