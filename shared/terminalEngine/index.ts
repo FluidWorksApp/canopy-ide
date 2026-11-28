@@ -50,7 +50,7 @@ export interface TermLike {
       readonly length: number;
       readonly viewportY: number;
       readonly baseY: number;
-      getLine(index: number): { translateToString(trimRight?: boolean): string } | undefined;
+      getLine(index: number): { translateToString(trimRight?: boolean): string; readonly isWrapped: boolean } | undefined;
     };
     readonly normal: { readonly length: number };
     readonly alternate: { readonly length: number };
