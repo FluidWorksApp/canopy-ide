@@ -10,6 +10,7 @@ vi.mock("../ipc", () => ({
     ),
   ),
   gitPrContext: vi.fn(async () => ({ commit_count: 0 })),
+  gitWorktrees: vi.fn(async () => []),
   gitStatus: vi.fn(async () => ({
     is_repo: true,
     branch: "feat/x",
@@ -105,6 +106,7 @@ vi.mock("../remoteExecution/workspace", () => ({
 }));
 
 import { AgentDetailsCard, prStatusLabel } from "./AgentDetailsCard";
+import { workingCheckout } from "../agentCheckout";
 import { liveEnvironments } from "../environments/live";
 import * as ipc from "../ipc";
 import * as links from "../links";
@@ -226,6 +228,26 @@ describe("file assets of an agent on another machine", () => {
     });
     window.removeEventListener("canopy:open-remote-file", seen);
     liveEnvironments.unregister("remote:w1");
+  });
+});
+
+describe("workingCheckout", () => {
+  const trees = [{ path: "/code/app" }, { path: "/code/app-wt-gpu" }, { path: "/code/app-wt-docs" }];
+  it("is the worktree of the newest edit outside where the agent started", () => {
+    expect(
+      workingCheckout("/code/app", ["/tmp/x.py", "/code/app-wt-gpu/a.py", "/tmp/y.ts", "/home/me/notes.md"], trees),
+    ).toBe("/code/app-wt-gpu");
+  });
+  it("goes back to where the agent started when its newest edit is there", () => {
+    expect(workingCheckout("/code/app", ["/code/app-wt-gpu/a.py", "src/b.ts"], trees)).toBe("/code/app");
+  });
+  it("stays where the agent started without edits in another worktree", () => {
+    expect(workingCheckout("/code/app/sub", ["/tmp/x.py"], trees)).toBe("/code/app/sub");
+    expect(workingCheckout("/code/app/sub", ["/code/app/README.md"], trees)).toBe("/code/app/sub");
+    expect(workingCheckout("/code/app", undefined, [])).toBe("/code/app");
+  });
+  it("does not take a folder that only shares a worktree's name as a prefix", () => {
+    expect(workingCheckout("/code/app", ["/code/app-wt-gpu-old/a.py"], trees)).toBe("/code/app");
   });
 });
 
@@ -388,6 +410,29 @@ describe("AgentDetailsCard", () => {
       expect(screen.getByRole("button", { name: "Stop localhost:5173" })).toBeDisabled(),
     );
     void onNotice;
+  });
+
+  it("reads and commits in the worktree the agent is editing, not where it started", async () => {
+    vi.mocked(ipc.gitWorktrees).mockResolvedValue([
+      { path: "/main", branch: "feat/main-work" },
+      { path: "/main-wt-gpu", branch: "feat/gpu" },
+    ] as never);
+    vi.mocked(ipc.gitStatus).mockImplementation((async (path: string) => ({
+      is_repo: true,
+      branch: path === "/main-wt-gpu" ? "feat/gpu" : "feat/main-work",
+      entries: path === "/main-wt-gpu" ? [{}, {}] : Array(1838).fill({}),
+    })) as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([] as never);
+    setup({
+      repo: "/main",
+      cwd: "/main",
+      digest: { ...digest, files: ["/main-wt-gpu/worker/engine.py"] },
+    });
+    expect(await screen.findByText("2 uncommitted")).toBeTruthy();
+    expect(screen.getByText("feat/gpu")).toBeTruthy();
+    expect(screen.getByText("main-wt-gpu")).toBeTruthy();
+    expect(ipc.gitStatus).toHaveBeenLastCalledWith("/main-wt-gpu");
+    vi.mocked(ipc.gitWorktrees).mockResolvedValue([] as never);
   });
 
   it("offers Commit & push for uncommitted work on a branch that has its PR", async () => {

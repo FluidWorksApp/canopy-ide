@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  crossesHardJoin,
+  logicalLine,
+  logicalRange,
+  rangeTouchesRow,
+  terminalUrls,
   createLinkHint,
   opensLink,
   LINK_CHORD,
@@ -201,5 +206,62 @@ describe("paths with spaces", () => {
     const t = "error in /src/app.ts:10 and more.md";
     const [link] = await extendSpacedLinks(t, terminalFileLinks(t), async () => true);
     expect(link).toMatchObject({ path: "/src/app.ts", line: 10 });
+  });
+});
+
+describe("links that run onto the next row", () => {
+  const COLS = 40;
+  const rowsOf = (rows: { text: string; wrapped?: boolean }[]) => (y: number) => {
+    const row = rows[y];
+    return row ? { text: row.text.padEnd(COLS, " "), wrapped: !!row.wrapped } : undefined;
+  };
+
+  it("joins a path Claude Code wrapped itself, dropping the indent it added", () => {
+    // Exactly what a TUI draws: the path fills row 0 to the edge, breaks mid-word,
+    // and carries on indented on row 1. Neither row is marked as wrapped.
+    const rows = rowsOf([
+      { text: "  the sheet is at /private/tmp/claude-5" },
+      { text: "  01/scratchpad/contrast.png." },
+      { text: "" },
+    ]);
+    for (const y of [0, 1]) {
+      const line = logicalLine(rows, y, COLS);
+      expect(line.text).toBe("  the sheet is at /private/tmp/claude-501/scratchpad/contrast.png.");
+      const [link] = terminalFileLinks(line.text);
+      expect(link.path).toBe("/private/tmp/claude-501/scratchpad/contrast.png");
+      const range = logicalRange(line, link.start, link.end);
+      expect(range.start).toEqual({ x: 19, y: 1 });
+      // Ends on row 2, after the two-space indent: "01/scratchpad/contrast.png" is 26 long.
+      expect(range.end).toEqual({ x: 2 + 26, y: 2 });
+      expect(rangeTouchesRow(range, y + 1)).toBe(true);
+      expect(crossesHardJoin(line, link.start, link.end)).toBe(true);
+    }
+  });
+
+  it("joins a row the terminal wrapped, keeping every cell", () => {
+    const rows = rowsOf([
+      { text: "see https://github.com/FluidWorksApp/can" },
+      { text: "opy-ide/pull/888 now", wrapped: true },
+    ]);
+    const line = logicalLine(rows, 1, COLS);
+    const [url] = terminalUrls(line.text);
+    expect(url.url).toBe("https://github.com/FluidWorksApp/canopy-ide/pull/888");
+    const range = logicalRange(line, url.start, url.end);
+    expect(range.start.y).toBe(1);
+    expect(range.end).toEqual({ x: 16, y: 2 });
+    expect(crossesHardJoin(line, url.start, url.end)).toBe(false);
+  });
+
+  it("leaves a sentence wrapped at a space as separate rows", () => {
+    // Stops short of the edge: the program wrapped between words.
+    const rows = rowsOf([{ text: "a short line ending /tmp/a.txt" }, { text: "next sentence here" }]);
+    expect(logicalLine(rows, 0, COLS).text).toBe("a short line ending /tmp/a.txt");
+    expect(logicalLine(rows, 1, COLS).text).toBe("next sentence here");
+  });
+
+  it("does not join a full row onto a blank one", () => {
+    const full = "x".repeat(COLS);
+    const rows = rowsOf([{ text: full }, { text: "" }]);
+    expect(logicalLine(rows, 0, COLS).text).toBe(full);
   });
 });

@@ -23,14 +23,15 @@ import { openFileLink, openLink } from "../links";
  *  for a few seconds, so moving across it does not ask the file system again
  *  for each step (each ask is a round trip on a remote workspace). */
 const spacedLinkCache = new Map<string, { at: number; links: ReturnType<typeof terminalFileLinks> | Promise<ReturnType<typeof terminalFileLinks>> }>();
+/** On another machine the path is that machine's: ask it, not this Mac. */
+const fileExists = (candidate: string, env?: string) =>
+  env ? remoteFileExists(env, candidate) : ipc.fsStat(candidate).then((s) => !s.is_dir, () => false);
+
 async function cachedSpacedLinks(text: string, cwd: string, env?: string) {
   const key = `${env ?? ""}\n${cwd}\n${text}`;
   const hit = spacedLinkCache.get(key);
   if (hit && Date.now() - hit.at < 5000) return hit.links;
-  const pending = extendSpacedLinks(text, terminalFileLinks(text), (candidate) =>
-    // On another machine the path is that machine's: ask it, not this Mac.
-    env ? remoteFileExists(env, candidate) : ipc.fsStat(candidate).then((s) => !s.is_dir, () => false),
-  );
+  const pending = extendSpacedLinks(text, terminalFileLinks(text), (candidate) => fileExists(candidate, env));
   spacedLinkCache.set(key, { at: Date.now(), links: pending });
   if (spacedLinkCache.size > 200) spacedLinkCache.delete(spacedLinkCache.keys().next().value as string);
   return pending;
@@ -46,9 +47,14 @@ import { getSettings, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import {
   createLinkHint,
+  crossesHardJoin,
   opensLink,
   extendSpacedLinks,
+  logicalLine,
+  logicalRange,
+  rangeTouchesRow,
   terminalFileLinks,
+  terminalUrls,
 } from "../terminalLinks";
 import { matches, matchesChord, resolve } from "../shortcuts";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
@@ -443,18 +449,44 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     };
     const fileLinkProvider = term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
-        const text = term.buffer.active
-          .getLine(bufferLineNumber - 1)
-          ?.translateToString(true);
-        if (!text) return callback(undefined);
+        // The whole line, not just this row: a path or URL longer than the
+        // terminal is wide runs onto the next row, wrapped either by the
+        // terminal or by the program itself (Claude Code wraps its own text).
+        const buffer = term.buffer.active;
+        const line = logicalLine((y) => {
+          const row = buffer.getLine(y);
+          return row ? { text: row.translateToString(false), wrapped: row.isWrapped } : undefined;
+        }, bufferLineNumber - 1, term.cols);
+        const text = line.text;
+        if (!text.trim()) return callback(undefined);
         // A path with spaces in it is found by asking the file system where it
         // ends (extendSpacedLinks), so the answer arrives a moment later.
-        void cachedSpacedLinks(text, cwd ?? "", machine).then((files) => {
-          const links = files.map((file) => ({
-            range: {
-              start: { x: file.start + 1, y: bufferLineNumber },
-              end: { x: file.end, y: bufferLineNumber },
-            },
+        void cachedSpacedLinks(text, cwd ?? "", machine).then(async (all) => {
+          const touching = all
+            .map((file) => ({ file, range: logicalRange(line, file.start, file.end) }))
+            .filter(({ range }) => rangeTouchesRow(range, bufferLineNumber));
+          // A join across rows that was guessed from the row's shape is only
+          // trusted when the joined path really is a file.
+          const checked = await Promise.all(touching.map(async (entry) =>
+            !crossesHardJoin(line, entry.file.start, entry.file.end) || (await fileExists(entry.file.path, machine)) ? entry : null));
+          const files = checked.filter((entry): entry is (typeof touching)[number] => entry != null);
+          const urls = terminalUrls(text)
+            .map((found) => ({ found, range: logicalRange(line, found.start, found.end) }))
+            // A URL on one row is the engine's own; only one that runs on is ours.
+            .filter(({ range }) => range.start.y !== range.end.y && rangeTouchesRow(range, bufferLineNumber))
+            .map(({ found, range }) => ({
+              range,
+              text: found.url,
+              activate: (event: MouseEvent) => {
+                if (!opensLink(event, term.hasSelection())) return;
+                linkHint.hide();
+                openLink(found.url, matchesModifierClick(event, "open-external"));
+              },
+              hover: (event: MouseEvent) => linkHint.show(event),
+              leave: () => linkHint.hide(),
+            }));
+          const links = files.map(({ file, range }) => ({
+            range,
             text: file.path,
             activate: (event: MouseEvent) => {
               if (!opensLink(event, term.hasSelection())) return;
@@ -476,6 +508,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             hover: (event: MouseEvent) => linkHint.show(event, "file"),
             leave: () => linkHint.hide(),
           }));
+          links.push(...urls);
           try {
             callback(links.length ? links : undefined);
           } catch {

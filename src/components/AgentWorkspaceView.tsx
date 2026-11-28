@@ -12,6 +12,7 @@ import { createTwoFilesPatch } from "diff";
 import { basename } from "../paths";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
+import { useWorkingCheckout } from "../agentCheckout";
 import type { Notify } from "../types";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
@@ -789,12 +790,14 @@ export function AgentWorkspaceView({
       void sub.then((fn) => fn());
     };
   }, [repo, ws?.workdir]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The worktree the agent is editing, which is not always where it started.
+  const checkout = useWorkingCheckout(repo, cwd, digest?.files);
   useEffect(() => {
     let live = true;
     setWsErr(null);
     if (!repo) return;
     void ipc
-      .agentWorkspaceAt(repo, cwd, agent, sessionId)
+      .agentWorkspaceAt(repo, checkout, agent, sessionId)
       .then((w) => {
         if (!live) return;
         // Only when it actually changed. An unconditional set hands down a new
@@ -806,7 +809,7 @@ export function AgentWorkspaceView({
     return () => {
       live = false;
     };
-  }, [repo, cwd, agent, sessionId, digest?.updated, tick, gitTick]);
+  }, [repo, checkout, agent, sessionId, digest?.updated, tick, gitTick]);
 
   // Open on this agent's own edits when we have them — that's the per-agent
   // view the shared-checkout tree can't give. Otherwise fall back to whichever

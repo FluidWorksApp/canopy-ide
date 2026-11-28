@@ -31,6 +31,7 @@ import { fmtSpan, subagentSpan, useSessionActivity } from "../sessionActivity";
 import { liveEnvironments } from "../environments/live";
 import { openRemoteFile } from "../environments/remoteFiles";
 import { collectAssets, previewAssets, type Asset } from "../agentAssets";
+import { useWorkingCheckout } from "../agentCheckout";
 import { AssetPreview } from "./AssetPreview";
 import { requestTasksFor, subscribeRequestTasks } from "../requestTasks";
 import { WaitingOnYou } from "./WaitingOnYou";
@@ -423,6 +424,8 @@ export function AgentDetailsCard({
     anchor: DOMRect;
   } | null>(null);
   const [branch, setBranch] = useState<string | null>(digest?.branch ?? null);
+  /** Where git is read and committed: the worktree the agent is editing. */
+  const checkout = useWorkingCheckout(remoteMachine ? null : repo, cwd, digest?.files);
   const [changed, setChanged] = useState<number | null>(null);
   const [pr, setPr] = useState<ipc.PrInfo | null>(null);
   /** Every PR this agent raised, newest first; shown on hover. */
@@ -471,7 +474,7 @@ export function AgentDetailsCard({
   // previous branch can run after the form has just been opened on the new
   // one, and it used to throw that new draft away (the submit then went ahead
   // without waiting for it).
-  const draftKey = `${cwd ?? ""}\n${repo ?? ""}\n${branch ?? ""}`;
+  const draftKey = `${checkout ?? ""}\n${repo ?? ""}\n${branch ?? ""}`;
   useEffect(() => {
     const slot = draftRef.current;
     if (slot && slot.key !== draftKey) {
@@ -524,16 +527,16 @@ export function AgentDetailsCard({
     }
   };
 
-  // Branch and uncommitted changes, from the checkout the agent is in.
+  // Branch and uncommitted changes, from the checkout the agent is changing.
   useEffect(() => {
-    if (collapsed || !cwd) return;
+    if (collapsed || !checkout) return;
     let stale = false;
     const status = remoteMachine
       ? (liveEnvironments
           .get(remoteMachine.env)
-          ?.host.invoke<ipc.GitStatusResult>("git_status", { path: cwd }) ??
+          ?.host.invoke<ipc.GitStatusResult>("git_status", { path: checkout }) ??
         Promise.reject(new Error("not connected")))
-      : ipc.gitStatus(cwd);
+      : ipc.gitStatus(checkout);
     status
       .then((s) => {
         if (stale) return;
@@ -546,7 +549,7 @@ export function AgentDetailsCard({
     return () => {
       stale = true;
     };
-  }, [collapsed, cwd, digest?.branch, digest?.updated, remoteMachine?.env]);
+  }, [collapsed, checkout, digest?.branch, digest?.updated, remoteMachine?.env]);
 
   // The PR for that branch, when `gh` knows one.
   useEffect(() => {
@@ -593,7 +596,7 @@ export function AgentDetailsCard({
     if (
       collapsed ||
       pr ||
-      !cwd ||
+      !checkout ||
       !branch ||
       remoteMachine ||
       DEFAULT_BRANCHES.has(branch) ||
@@ -602,7 +605,7 @@ export function AgentDetailsCard({
       return;
     let stale = false;
     ipc
-      .gitPrContext(cwd, "")
+      .gitPrContext(checkout, "")
       .then((ctx) => {
         if (!stale) setAhead(ctx.commit_count);
       })
@@ -610,7 +613,7 @@ export function AgentDetailsCard({
     return () => {
       stale = true;
     };
-  }, [collapsed, pr, cwd, branch, changed, remoteMachine, prEpoch]);
+  }, [collapsed, pr, checkout, branch, changed, remoteMachine, prEpoch]);
 
   // The sub-agents, read from the session's transcript, polled faster while the
   // agent is working.
@@ -849,9 +852,12 @@ export function AgentDetailsCard({
 
       <div className="agent-card-section">
       {branch && (
-        <div className="agent-card-row" title={branch}>
+        <div className="agent-card-row" title={checkout === cwd ? branch : `${branch} · ${checkout}`}>
           <GitBranchIcon size={14} />
           <span className="agent-card-grow agent-card-ellipsis">{branch}</span>
+          {checkout !== cwd && (
+            <span className="agent-card-dim agent-card-ellipsis">{checkout.slice(checkout.lastIndexOf("/") + 1)}</span>
+          )}
         </div>
       )}
 
@@ -1193,7 +1199,7 @@ export function AgentDetailsCard({
                         draft && typed === slot!.seed ? draft.title : typed;
                       if (raising.mode === "push")
                         return runCommitPushPr({
-                          repo: cwd || repo!,
+                          repo: checkout || repo!,
                           // Untouched (the seed, or the draft's own first
                           // line): send the draft's whole message.
                           message:
@@ -1204,7 +1210,7 @@ export function AgentDetailsCard({
                           openPr: false,
                         });
                       return runCommitPushPr({
-                        repo: cwd || repo!,
+                        repo: checkout || repo!,
                         message:
                           draft && title === draft.title ? draft.message : title,
                         title,
@@ -1271,7 +1277,7 @@ export function AgentDetailsCard({
                 // The form is usable now; the brain's title fills in if it
                 // answers before the person has typed their own.
                 slot.pending = draftPrWithBrain({
-                  repo: cwd || repo!,
+                  repo: checkout || repo!,
                   signal: ctl.signal,
                 }).then((d) => {
                   if (!d || draftRef.current !== slot || ctl.signal.aborted)

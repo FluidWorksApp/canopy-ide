@@ -69,6 +69,99 @@ export function terminalFileLinks(text: string): TerminalFileLink[] {
   return found.sort((a, b) => a.start - b.start);
 }
 
+/** One terminal row as a link scanner needs it: its full text (not trimmed)
+ *  and whether the terminal itself wrapped the row above onto it. */
+export interface TerminalRow {
+  text: string;
+  wrapped: boolean;
+}
+
+export interface LogicalLine {
+  text: string;
+  /** Where each row's piece starts in `text`, and in which column on screen.
+   *  `hard` marks a piece joined by the guess below rather than by the terminal. */
+  pieces: { row: number; offset: number; col: number; hard: boolean }[];
+}
+
+/** Rows joined in each direction at most: a link longer than this is not one. */
+const MAX_JOINED_ROWS = 12;
+
+/** How the row `y` runs on into the next one, if it does.
+ *
+ *  "soft": the terminal wrapped it (the row below is marked as wrapped).
+ *  "hard": the program drew its own wrapping, as Claude Code and most TUIs do,
+ *  so the terminal only sees separate rows. That is guessed from the shape: the
+ *  row is filled to the last column with no space at the end, and the next row
+ *  has text. A word broken at the edge looks exactly like that; a sentence the
+ *  program wrapped at a space does not, because it stops short of the edge. */
+function joinKind(row: (y: number) => TerminalRow | undefined, y: number, cols: number): "soft" | "hard" | null {
+  const next = row(y + 1);
+  if (!next) return null;
+  if (next.wrapped) return "soft";
+  const current = row(y)?.text.trimEnd() ?? "";
+  if (current.length < cols - 1) return null;
+  return next.text.trim() ? "hard" : null;
+}
+
+/** The whole line row `y` belongs to, so a path or URL that runs past the edge
+ *  of the terminal is read in one piece instead of one row at a time. A program
+ *  that wraps its own text usually indents what follows, so a hard-joined row
+ *  drops its leading spaces and the pieces remember the column they start at. */
+export function logicalLine(row: (y: number) => TerminalRow | undefined, y: number, cols: number): LogicalLine {
+  let first = y;
+  while (first > 0 && y - first < MAX_JOINED_ROWS && joinKind(row, first - 1, cols)) first--;
+  let last = y;
+  while (last - y < MAX_JOINED_ROWS && joinKind(row, last, cols)) last++;
+
+  let text = "";
+  const pieces: LogicalLine["pieces"] = [];
+  for (let r = first; r <= last; r++) {
+    const raw = row(r)?.text ?? "";
+    const hard = r > first && joinKind(row, r - 1, cols) === "hard";
+    const col = hard ? raw.length - raw.trimStart().length : 0;
+    // A piece followed by a hard join loses its trailing padding; the last
+    // piece too. A soft-wrapped row keeps every cell, spaces included.
+    const trimEnd = r === last || joinKind(row, r, cols) === "hard";
+    let piece = raw.slice(col);
+    if (trimEnd) piece = piece.trimEnd();
+    pieces.push({ row: r, offset: text.length, col, hard });
+    text += piece;
+  }
+  return { text, pieces };
+}
+
+/** The xterm-style range (1-based columns and rows, end inclusive) of the
+ *  characters [start, end) of a logical line. */
+export function logicalRange(line: LogicalLine, start: number, end: number) {
+  const at = (offset: number) => {
+    let piece = line.pieces[0];
+    for (const p of line.pieces) if (p.offset <= offset) piece = p;
+    return { x: piece.col + (offset - piece.offset) + 1, y: piece.row + 1 };
+  };
+  return { start: at(start), end: at(Math.max(start, end - 1)) };
+}
+
+/** Does [start, end) run across a join that was guessed rather than known? */
+export function crossesHardJoin(line: LogicalLine, start: number, end: number): boolean {
+  return line.pieces.some((p) => p.hard && p.offset > start && p.offset < end);
+}
+
+/** Does the range include buffer row `y` (1-based, as link providers count)? */
+export function rangeTouchesRow(range: ReturnType<typeof logicalRange>, y: number): boolean {
+  return range.start.y <= y && range.end.y >= y;
+}
+
+/** URLs written out in the text, for the ones that run onto another row: the
+ *  engines find single-row URLs themselves. */
+export function terminalUrls(text: string): { url: string; start: number; end: number }[] {
+  const out: { url: string; start: number; end: number }[] = [];
+  for (const m of text.matchAll(/(?:https?|ftp):\/\/[^\s"'<>`\u0000-\u001f]*[^\s"'<>`\u0000-\u001f.,;:!?)\]}]/gi)) {
+    const start = m.index ?? 0;
+    out.push({ url: m[0], start, end: start + m[0].length });
+  }
+  return out;
+}
+
 const TRAILING_PUNCT = /[.,;!?)\]}]+$/;
 /** A word that could end a file name: it carries an extension. */
 const ENDS_LIKE_A_FILE = /\.[A-Za-z0-9]{1,8}(?::\d+(?::\d+)?)?[.,;!?)\]}]*$/;
