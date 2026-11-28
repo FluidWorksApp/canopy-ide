@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "canopy-term-app"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "canopy-pty-host",
  "canopy-term-session",
