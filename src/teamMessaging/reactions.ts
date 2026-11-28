@@ -35,7 +35,7 @@ function reduce(overlay:EventOverlay,event:ChatMessage,target:ChatMessage):Event
  const e=eventOf(event);
  // The event must belong to its target's conversation, so nobody can mark a
  // direct conversation they are not part of by naming one of its message ids.
- if(!e||e.type==='live'||e.type==='layer'||e.target!==target.id||!sameConversation(event,target))return overlay;
+ if(!e||e.type==='live'||e.type==='layer'||e.type==='agent-status'||e.target!==target.id||!sameConversation(event,target))return overlay;
  if(e.type==='reaction'){const reactions=reduceReaction(overlay.reactions,event,target);return reactions===overlay.reactions?overlay:{...overlay,reactions};}
  // Only a message's author edits or deletes it. `sender` was bound to the
  // envelope's authenticated signing account on receipt, never taken on trust.
@@ -46,7 +46,7 @@ function reduce(overlay:EventOverlay,event:ChatMessage,target:ChatMessage):Event
   const {[target.id]:_edit,...edits}=overlay.edits;
   return {...overlay,edits:_edit?edits:overlay.edits,deleted:{...overlay.deleted,[target.id]:{created:event.created,id:event.id}}};
  }
- if(overlay.deleted[target.id])return overlay;
+ if(overlay.deleted[target.id]||e.type!=='edit')return overlay;
  const entry:EditEntry={text:e.text,...(e.mentions?{mentions:e.mentions}:{}),created:event.created,id:event.id};
  if(!newer(entry,overlay.edits[target.id]))return overlay;
  return {...overlay,edits:{...overlay.edits,[target.id]:entry}};

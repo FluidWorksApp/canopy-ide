@@ -1077,6 +1077,11 @@ export const teamMembers = (teamId: string) =>
  *  mesh message id. */
 export const forwardToAgent = (ptyId: number, instance: string, messageId: string, text: string) =>
   invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "team-chat" });
+/** A teammate's Teams message written for this agent, typed in once it is
+ *  idle (teamMessaging/agentInbox.ts). Its notice carries the message id the
+ *  agent answers with. */
+export const deliverTeamAgentMessage = (ptyId: number, instance: string, messageId: string, text: string) =>
+  invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "team-agent" });
 
 /** The workspace telling an agent what another agent just changed
  *  (src/awareness): kept on the mesh under ref {kind: "awareness", id} and

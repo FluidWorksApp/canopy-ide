@@ -1,5 +1,5 @@
 import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,saveChatReadState,loadChatEvents,saveChatEvent,forgetChatEvent,saveChatRecord,loadChatRecords,forgetChatRecords} from './history';
-import {BACKFILL_MS,CHAT_VERSION,EDITS_VERSION,DELETE_TEXT,MAX_TEXT_BYTES,editText,eventOf,eventRecipient,isLayerEvent,isLiveEvent,parseThread,parseMentions,reactionText,validEmoji} from './chatEvents';
+import {AGENT_VERSION,BACKFILL_MS,CHAT_VERSION,EDITS_VERSION,DELETE_TEXT,MAX_TEXT_BYTES,editText,eventOf,eventRecipient,isAgentStatusEvent,isLayerEvent,isLiveEvent,parseAgentTag,parseThread,parseMentions,reactionText,validEmoji,type AgentDeliveryState,type AgentStatusEvent} from './chatEvents';
 import {LIVE_VERSION,liveText,type LiveEvent,type LiveOp} from './liveEvents';
 import {LAYER_VERSION,layerText,type LayerEvent} from './layerEvents';
 import {applyEvent,drainPending,hasReacted,newer,nextReactionTime,EMPTY_OVERLAY,type DeleteEntry,type EditEntry,type EventOverlay,type ReactionState} from './reactions';
@@ -99,6 +99,12 @@ export const subscribeLiveEvents=(listener:(event:TeamLiveEvent)=>void)=>{liveLi
 export type TeamLayerEvent={team:string;user:string;sender:string;senderName?:string;member:boolean;event:LayerEvent};
 const layerListeners=new Set<(event:TeamLayerEvent)=>void>();
 export const subscribeLayerEvents=(listener:(event:TeamLayerEvent)=>void)=>{layerListeners.add(listener);return()=>{layerListeners.delete(listener);};};
+/** A teammate's Canopy saying what happened to a message this account wrote
+ *  for one of their agents (chatEvents.ts `AgentStatusEvent`). `sender` is the
+ *  account the transport authenticated. */
+export type TeamAgentStatus={team:string;user:string;sender:string;event:AgentStatusEvent};
+const agentStatusListeners=new Set<(event:TeamAgentStatus)=>void>();
+export const subscribeAgentStatus=(listener:(event:TeamAgentStatus)=>void)=>{agentStatusListeners.add(listener);return()=>{agentStatusListeners.delete(listener);};};
 export class TeamSession {
  private listeners=new Set<()=>void>();
  private client:PeerClient;
@@ -138,7 +144,7 @@ export class TeamSession {
    // outside the 500-message cap. A deleted message is never saved again, and
    // live session traffic is never saved at all: it is presence and requests,
    // only meaningful while the session runs.
-   persist:message=>{const e=eventOf(message);return isLiveEvent(e)||isLayerEvent(e)?Promise.resolve():e?saveChatEvent(this.user,this.team,message):this.tombstoned(message)?Promise.resolve():saveChatMessage(this.user,this.team,message);},
+   persist:message=>{const e=eventOf(message);return isLiveEvent(e)||isLayerEvent(e)||isAgentStatusEvent(e)?Promise.resolve():e?saveChatEvent(this.user,this.team,message):this.tombstoned(message)?Promise.resolve():saveChatMessage(this.user,this.team,message);},
    members:members=>this.update({members:Object.fromEntries(members.map(m=>[m.id,m.name]))}),
    message:(message,meta)=>this.receive(message,meta?.backfill===true),
    job:(job,sender)=>this.emitJob(sender,{kind:'job',job}),
@@ -246,6 +252,17 @@ export class TeamSession {
   if(sent.devices||!reachAll)return sent.devices;
   return (await this.client.sendToCapable(1,{...message,id:crypto.randomUUID()})).devices;
  }
+ /** Tells `peer` (who wrote message `target` for one of this account's agents)
+  * what happened to it. Only to their devices that understand it (chat v5);
+  * an older Canopy just never shows a status. */
+ async sendAgentStatus(peer:string,target:string,agent:string,state:AgentDeliveryState):Promise<number>{
+  if(this.invalid||peer===this.user)return 0;
+  const event:AgentStatusEvent={type:'agent-status',target,agent,state};
+  const text=state==='delivered'?`Delivered to ${agent}`:state==='queued'?`${agent} gets this when it finishes its turn`:state==='paused'?`Not passed to ${agent}: too many agent messages in a row`:state==='gone'?`Not delivered: ${agent} stopped before it could take it`:`${agent} isn't running`;
+  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient:peer,text,created:Date.now(),v:CHAT_VERSION,event};
+  await this.ready.catch(()=>{});if(this.invalid)return 0;
+  return (await this.client.sendToCapable(AGENT_VERSION,message)).devices;
+ }
  async submitJob(job:JobRequest,recipient:string,device?:string){
   if(this.invalid)throw Error('Sign in again to submit jobs');
   await this.ready;return this.client.sendJob(job,recipient,device);
@@ -293,7 +310,7 @@ export class TeamSession {
  private applyEvents(events:ChatMessage[]){
   if(this.invalid)return;let next=this.overlay;
   for(const event of events){
-   const e=eventOf(event);if(isLiveEvent(e)||isLayerEvent(e))continue;
+   const e=eventOf(event);if(isLiveEvent(e)||isLayerEvent(e)||isAgentStatusEvent(e))continue;
    if(e?.type==='edit'){const ids=this.editEvents.get(e.target)??new Set<string>();ids.add(event.id);this.editEvents.set(e.target,ids);}
    if(event.sender===this.user&&this.ownEvents.size<2000)this.ownEvents.set(event.id,event);
    next=applyEvent(next,event,this.find);
@@ -314,6 +331,10 @@ export class TeamSession {
   // back here and are dropped.
   if(isLiveEvent(event)){if(message.sender!==this.user)this.emitLive(message.sender,event);return;}
   if(isLayerEvent(event)){if(message.sender!==this.user)this.emitLayer(message.sender,event);return;}
+  if(isAgentStatusEvent(event)){
+   if(message.sender!==this.user){const e:TeamAgentStatus={team:this.team,user:this.user,sender:message.sender,event};agentStatusListeners.forEach(fn=>{try{fn(e);}catch{/* a listener never breaks delivery */}});}
+   return;
+  }
   if(event){this.applyEvents([message]);return;}
   // A deleted message stays deleted, whether its copy arrives late or backfilled.
   if(this.tombstoned(message))return;
@@ -604,6 +625,13 @@ export class TeamSession {
    const mentions=parseMentions([...new Set(known)].slice(0,50));if(mentions)out.mentions=mentions;
   }
   if(ext.mentionsAll===true&&peer===null)out.mentionsAll=true;
+  if(ext.agent!==undefined){
+   const tag=parseAgentTag(ext.agent);if(!tag)throw Error('Name the agent with a short single line');
+   // An agent this account owns is reached in its own terminal, not through chat;
+   // in a direct message the agent addressed can only be the other person's.
+   if(tag.to&&(tag.to.owner===this.user||(peer!==null&&tag.to.owner!==peer)))throw Error('That agent is not in this conversation');
+   out.agent=tag;
+  }
   return Object.keys(out).length?out:undefined;
  }
  /** The bytes of an attachment: this device's copy, or pulled from the sender's

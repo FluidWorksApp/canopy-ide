@@ -32,7 +32,7 @@ describe('live session events',()=>{
   const m:ChatMessage={id:req,sender:'ana',recipient:'sam',text:liveText(event),created:1,v:CHAT_VERSION,event,thread:{root:room}};
   const ext=parseExtensions(m);
   expect(isLiveEvent(ext.event)).toBe(true);expect(ext.thread).toBeUndefined();
-  expect(CHAT_VERSION).toBe(LIVE_VERSION);expect(eventVersion(event)).toBe(LIVE_VERSION);
+  expect(CHAT_VERSION).toBeGreaterThanOrEqual(LIVE_VERSION);expect(eventVersion(event)).toBe(LIVE_VERSION);
   expect(liveText(event)).toMatch(/join your live agent session/);
  });
  it('fits a state event under its bound by dropping the oldest turns',()=>{

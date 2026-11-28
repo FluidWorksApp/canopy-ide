@@ -110,6 +110,11 @@ IDE the user is watching, and their results stay inspectable:\n\
   own agent -> canopy_team_people, then canopy_team_send to a teammate or the \
   team channel. It posts in the user's Teams chat as the user, marked as \
   agent-written; only send what the user asked you to\n\
+- Talking with one of a teammate's agents -> canopy_team_send with `to` (the \
+  teammate) and `agent` (the name its messages are signed with). A Teams \
+  message delivered to you (notice \"a teammate's Teams message for you, id \
+  X\") is answered with canopy_team_send({ replyTo: \"X\", text }), in its \
+  thread\n\
 - If available, delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
   brief. The child has no memory of this conversation; it opens as a pane beside \
   you, and autoClose: true makes it a one-shot that reports and closes itself. \

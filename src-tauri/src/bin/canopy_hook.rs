@@ -4700,12 +4700,14 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "canopy_team_send",
-            "description": "Post a message in the user's Canopy Teams chat, as the user and marked as sent by an agent: a direct message to a teammate, or the team's channel. End-to-end encrypted, like the user typing it. The recipient can hand it to one of their agents or run it as a task from the chat, so write it to stand alone. Not for agents — that is canopy_mesh_send.",
+            "description": "Post a message in the user's Canopy Teams chat, as the user and marked as written by you: a direct message to a teammate, or the team's channel. End-to-end encrypted, like the user typing it. Name `agent` to talk to one of that teammate's agents in the same conversation: their Canopy types it into that agent's terminal once it finishes its turn, and its answer comes back to this terminal. When a Teams message is delivered to you, answer it with `replyTo` set to that message's id: it goes in the same thread, to whoever wrote it. Write each message to stand alone. For your own user's agents on this machine use canopy_mesh_send.",
             "inputSchema": { "type": "object", "properties": {
-                "to": { "type": "string", "description": "A teammate's name, email or id from canopy_team_people, or \"channel\" for everyone in the team" },
+                "to": { "type": "string", "description": "A teammate's name, email or id from canopy_team_people, or \"channel\" for everyone in the team. Not needed with replyTo" },
                 "text": { "type": "string", "description": "The message, in full; multi-line is fine (15 KB max)" },
+                "agent": { "type": "string", "description": "One of that teammate's agents, by the name it signs its messages with (e.g. \"Yarrow 6\"): it gets the message. A direct message only" },
+                "replyTo": { "type": "string", "description": "The id of the Teams message you are answering (from the message you were given): the reply goes in its thread, to its writer, and to their agent when an agent wrote it" },
                 "team": { "type": "string", "description": "Team name or id, when the user is in more than one" }
-            }, "required": ["to", "text"], "additionalProperties": false }
+            }, "required": ["text"], "additionalProperties": false }
         }),
         serde_json::json!({
             "name": "canopy_machines",
@@ -5503,9 +5505,11 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
             arg("brief").map(|b| b.chars().take(240).collect()),
         ),
         "canopy_team_send" => (
-            match arg("to").as_deref().map(str::trim) {
-                Some("channel") | None => "Post in the team channel".into(),
-                Some(to) => format!("Message {to} in Teams"),
+            match (arg("to").as_deref().map(str::trim), arg("agent")) {
+                (_, Some(agent)) => format!("Message the agent {agent} in Teams"),
+                (None, None) if arg("replyTo").is_some() => "Reply in a Teams thread".into(),
+                (Some("channel") | None, None) => "Post in the team channel".into(),
+                (Some(to), None) => format!("Message {to} in Teams"),
             },
             arg("text").map(|t| t.chars().take(240).collect()),
         ),
@@ -6304,9 +6308,11 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         }
         "canopy_team_send" => {
             let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
-            let to = arg("to")
-                .filter(|t| !t.is_empty())
-                .ok_or("missing required argument: to (a teammate from canopy_team_people, or \"channel\")")?;
+            let to = arg("to").filter(|t| !t.is_empty());
+            let reply_to = arg("replyTo").filter(|t| !t.is_empty());
+            if to.is_none() && reply_to.is_none() {
+                return Err("missing required argument: to (a teammate from canopy_team_people, or \"channel\"), or replyTo (the message you are answering)".into());
+            }
             let body = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -6316,7 +6322,13 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             // the message in `prompt`, the team in `label`.
             text(ui_op(
                 "team_send",
-                &serde_json::json!({ "member": to, "prompt": body, "label": arg("team") }),
+                &serde_json::json!({
+                    "member": to,
+                    "prompt": body,
+                    "label": arg("team"),
+                    "agent": arg("agent").filter(|a| !a.is_empty()),
+                    "replyTo": reply_to,
+                }),
                 35,
             ))
         }

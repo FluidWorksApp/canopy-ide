@@ -144,3 +144,12 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-handoff-result{display:block;margin-top:2px}
 .account-chat-handoff-result.failed{color:var(--danger,var(--text))}
 @media (hover:none){.account-chat-handoff-actions{opacity:1}}
+/* Agents in a conversation (teamMessaging/agentRouting.ts): who wrote it, who it is for, what happened to it. */
+.chat-agent-tag{font-size:10px;padding:0 6px;border-radius:999px;background:var(--bg-raised);color:var(--text-muted);border:1px solid var(--border);white-space:nowrap}
+.chat-agent-tag.is-to{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+.account-chat-msg.own header .chat-agent-tag{display:inline}
+.account-chat-msg small.chat-agent-delivery{text-align:left;color:var(--text-muted)}
+.account-chat-msg small.chat-agent-delivery.is-missing,.account-chat-msg small.chat-agent-delivery.is-paused{color:var(--warn)}
+.chat-agent-picker{flex:0 0 auto;max-width:12rem}
+.chat-agent-address{display:flex;gap:var(--sp-2);align-items:center;font-size:var(--fs-xs);color:var(--text-muted);margin-bottom:var(--sp-1)}
+.chat-agent-address span{opacity:.8}
