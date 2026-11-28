@@ -516,15 +516,11 @@ fn error_line_with_home(message: &str, home: &str) -> String {
     cut
 }
 
-/// Which log lines go in the release error log: warnings and errors from
-/// Canopy itself and from its webview, never from third-party crates, and not
-/// the watchdog's own lines (those are in the resilience log).
+/// Which log lines go in the release error log: warnings and errors from the
+/// webview only. Those pass through `error_line` first; native `log::warn!`
+/// lines are written as they are, so they stay out.
 fn error_log_keeps(metadata: &log::Metadata) -> bool {
-    let target = metadata.target();
-    metadata.level() <= log::Level::Warn
-        && (target == "webview"
-            || target.starts_with("app_lib")
-            || (target.starts_with("canopy") && !target.contains("watchdog")))
+    metadata.level() <= log::Level::Warn && metadata.target() == "webview"
 }
 
 /// Apps started by launchd inherit macOS's 256-descriptor soft limit. Canopy
@@ -1413,13 +1409,13 @@ mod error_log_tests {
     }
 
     #[test]
-    fn error_log_keeps_canopy_warnings_only() {
+    fn error_log_keeps_webview_warnings_only() {
         fn meta(level: log::Level, target: &str) -> log::Metadata<'_> {
             log::Metadata::builder().level(level).target(target).build()
         }
         assert!(error_log_keeps(&meta(log::Level::Error, "webview")));
-        assert!(error_log_keeps(&meta(log::Level::Warn, "app_lib::pty")));
-        assert!(error_log_keeps(&meta(log::Level::Warn, "canopy::client")));
+        assert!(error_log_keeps(&meta(log::Level::Warn, "webview")));
+        assert!(!error_log_keeps(&meta(log::Level::Warn, "app_lib::pty")));
         assert!(!error_log_keeps(&meta(log::Level::Info, "webview")));
         assert!(!error_log_keeps(&meta(
             log::Level::Warn,

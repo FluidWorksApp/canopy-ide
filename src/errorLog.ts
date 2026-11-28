@@ -29,7 +29,7 @@ function text(args: unknown[]): string {
 }
 
 /** Forward console.warn / console.error to `write`, at most `PER_MINUTE` lines
- *  a minute, repeats of the previous line dropped. Returns the undo. */
+ *  a minute, repeats of the previous line dropped within the minute. Returns the undo. */
 export function forwardConsole(
   write: Write,
   target: Pick<Console, "warn" | "error"> = console,
@@ -45,13 +45,15 @@ export function forwardConsole(
       original[level].apply(this ?? target, args);
       // A warning raised while forwarding must not forward itself.
       if (inside) return;
-      const line = text(args);
-      if (!line || line === last) return;
       const t = now();
       if (t - windowStart >= 60_000) {
         windowStart = t;
         count = 0;
+        // A failure that keeps coming back is written again once a minute.
+        last = "";
       }
+      const line = text(args);
+      if (!line || line === last) return;
       if (count >= PER_MINUTE) return;
       count++;
       last = line;
