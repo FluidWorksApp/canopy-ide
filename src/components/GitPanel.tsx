@@ -722,7 +722,7 @@ export function GitPanel({
           }
           onClick={() => setSection("branches")}
         >
-          {status?.detached ? "⚠ snapshot" : `⎇ ${status?.branch ?? "—"}`}
+          {status?.detached ? "⚠ snapshot" : `⑂ ${status?.branch ?? "—"}`}
         </button>
         {status && (status.ahead > 0 || status.behind > 0) && (
           <span className="git-counts" title={`${status.ahead} to push · ${status.behind} to pull`}>

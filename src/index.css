@@ -2095,7 +2095,7 @@ body.resizing-side * {
 }
 
 .sync-files li {
-  font-family: var(--mono, ui-monospace, monospace);
+  font-family: var(--mono, ui-monospace, monospace), var(--glyph-fallback);
   font-size: 11px;
   color: var(--text);
   padding: 1px 0;
@@ -2964,7 +2964,7 @@ body.resizing-side * {
 
 .ws-run-port {
   flex: 0 0 auto;
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 9px;
   padding: 0 4px;
   border: 1px solid var(--border);
@@ -6410,7 +6410,7 @@ body.dragging-tab * {
 .term-port {
   pointer-events: auto;
   font-size: 10px;
-  font-family: var(--mono, ui-monospace, monospace);
+  font-family: var(--mono, ui-monospace, monospace), var(--glyph-fallback);
   padding: 2px 7px;
   border-radius: 999px;
   color: var(--text-dim);
@@ -7578,7 +7578,7 @@ body.dragging-tab * {
 .workspace-overlay-sub {
   font-size: 11px;
   color: var(--text-dim);
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7658,7 +7658,7 @@ body.dragging-tab * {
   gap: 6px 12px;
   margin-top: 8px;
   font-size: 11.5px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace, var(--glyph-fallback);
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
@@ -7682,7 +7682,7 @@ body.dragging-tab * {
   gap: 4px 8px;
   margin-top: 6px;
   font-size: 11.5px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace, var(--glyph-fallback);
   font-variant-numeric: tabular-nums;
 }
 .aw-trail-seg {
@@ -7727,7 +7727,7 @@ body.dragging-tab * {
   padding: 1px 7px;
 }
 .aw-stat-state {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif, var(--glyph-fallback);
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -8184,7 +8184,7 @@ body.dragging-tab * {
   z-index: 300;
   padding: 4px 8px;
   border-radius: 6px;
-  font: 10px/1.45 var(--font-mono, ui-monospace, monospace);
+  font: 10px/1.45 var(--font-mono, ui-monospace, monospace), var(--glyph-fallback);
   color: var(--text-dim);
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   border: 1px solid var(--border);
@@ -8797,7 +8797,7 @@ body.dragging-tab * {
   animation: ash-spark 1.5s ease-in-out infinite;
 }
 .ash-z {
-  font-family: var(--mono, ui-monospace, monospace);
+  font-family: var(--mono, ui-monospace, monospace), var(--glyph-fallback);
   opacity: 0.5;
   animation: ash-z 2.6s ease-out infinite;
 }
@@ -10109,7 +10109,7 @@ body.dragging-tab * {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 42%;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: 10.5px;
 }
 .task-history-link {
@@ -10292,7 +10292,7 @@ body.dragging-tab * {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   corner-shape: squircle;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: 11.5px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -10385,7 +10385,7 @@ body.dragging-tab * {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: 10.5px;
 }
 /* Drawn, never hidden. "not observed" is a finding — the record says nobody
@@ -10951,7 +10951,7 @@ body.dragging-tab * {
   border: 1px solid var(--border);
   border-radius: var(--r-xs);
   color: var(--text);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: 12px;
   line-height: 1.5;
   padding: 6px 8px;
@@ -11110,7 +11110,7 @@ body.dragging-tab * {
   align-items: center;
   gap: 4px;
   font-size: 10.5px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace, var(--glyph-fallback);
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
   white-space: nowrap;
@@ -12482,7 +12482,7 @@ input[type="radio"]:disabled {
 /* ---------- JSON viewer ---------- */
 
 .json-view {
-  font-family: "SF Mono", Menlo, monospace;
+  font-family: "SF Mono", Menlo, monospace, var(--glyph-fallback);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -13577,7 +13577,7 @@ input[type="radio"]:disabled {
 
 .git-file-status {
   flex: 0 0 18px;
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 10px;
   color: var(--warn);
 }
@@ -13755,7 +13755,7 @@ input[type="radio"]:disabled {
   background: var(--bg-raised);
 }
 .git-commit-hash {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   color: var(--warn);
   flex: 0 0 auto;
 }
@@ -14313,7 +14313,7 @@ input[type="radio"]:disabled {
   cursor: pointer;
 }
 .confirm-check code {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 11px;
   color: var(--text-dim);
 }
@@ -14400,7 +14400,7 @@ input[type="radio"]:disabled {
   max-height: 160px;
   overflow: auto;
   white-space: pre-wrap;
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 10px;
 }
 
@@ -14531,7 +14531,7 @@ input[type="radio"]:disabled {
    open "#843" is only half an address. Monospace and lightly boxed so it reads
    as an identifier rather than as more of the sentence beside it. */
 .pr-repo {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   color: var(--text);
   background: var(--bg-raised);
   border-radius: var(--r-xs);
@@ -14545,7 +14545,7 @@ input[type="radio"]:disabled {
   cursor: default;
 }
 .pr-stat {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
 }
 .pr-add {
   color: var(--ok);
@@ -14887,7 +14887,7 @@ input[type="radio"]:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--mono, monospace);
+  font-family: var(--mono, monospace), var(--glyph-fallback);
   font-size: 10px;
   color: var(--accent);
   cursor: pointer;
@@ -15068,7 +15068,7 @@ input[type="radio"]:disabled {
   border-top: none;
 }
 .pr-round-n {
-  font-family: var(--mono, monospace);
+  font-family: var(--mono, monospace), var(--glyph-fallback);
   color: var(--fg-dim);
   margin-right: 6px;
 }
@@ -15093,7 +15093,7 @@ input[type="radio"]:disabled {
   border: 1px solid var(--border);
   border-radius: var(--r-xs);
   corner-shape: squircle;
-  font-family: var(--mono, monospace);
+  font-family: var(--mono, monospace), var(--glyph-fallback);
   font-size: 10px;
   white-space: pre-wrap;
   color: var(--fg-dim);
@@ -15601,7 +15601,7 @@ input[type="radio"]:disabled {
 }
 
 .prs-row-num {
-  font-family: var(--mono, monospace);
+  font-family: var(--mono, monospace), var(--glyph-fallback);
   font-size: 10px;
   color: var(--fg-dim);
 }
@@ -15679,7 +15679,7 @@ input[type="radio"]:disabled {
   padding: 7px 10px;
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 11.5px;
   line-height: 1.4;
   min-width: 0;
@@ -15709,7 +15709,7 @@ input[type="radio"]:disabled {
   gap: 8px;
   padding: 6px 10px;
   background: var(--bg-alt);
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 11px;
   color: var(--text-dim);
   cursor: pointer;
@@ -16144,7 +16144,7 @@ input[type="radio"]:disabled {
 
 .share-files {
   margin-top: 3px;
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 9px;
   color: var(--warn);
   opacity: 0.8;
@@ -16267,7 +16267,7 @@ input[type="radio"]:disabled {
 }
 
 .ws-port {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 9px;
   padding: 0 4px;
   border: 1px solid var(--border);
@@ -16996,7 +16996,7 @@ textarea,
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   corner-shape: squircle;
-  font-family: "SF Mono", Menlo, monospace;
+  font-family: "SF Mono", Menlo, monospace, var(--glyph-fallback);
   font-size: 11px;
   white-space: pre-wrap;
   color: var(--text-dim);
@@ -17093,7 +17093,7 @@ textarea,
 }
 
 .ticket-view-body code {
-  font-family: "SF Mono", Menlo, monospace;
+  font-family: "SF Mono", Menlo, monospace, var(--glyph-fallback);
   font-size: 12px;
 }
 
@@ -17613,7 +17613,7 @@ textarea,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
 }
 
 .aw-pr-title {
@@ -17800,7 +17800,7 @@ textarea,
    lifts to the accent on hover; plain <code> chips (no diff match) stay quiet. */
 .aw-touched-file-link {
   background: none;
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   cursor: pointer;
   transition:
     color var(--dur-fast) var(--ease-out),
@@ -17869,7 +17869,7 @@ textarea,
   cursor: default;
 }
 .aw-more-name {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -18043,7 +18043,7 @@ textarea,
 }
 
 .resume-row code {
-  font-family: "SF Mono", Menlo, monospace;
+  font-family: "SF Mono", Menlo, monospace, var(--glyph-fallback);
   font-size: 11px;
   color: var(--text);
 }
@@ -18160,7 +18160,7 @@ textarea,
   margin-bottom: -4px;
 }
 .crash-msg {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 12px;
   color: var(--text-dim);
   white-space: pre-wrap;
@@ -18187,7 +18187,7 @@ textarea,
   line-height: 1.45;
 }
 .crash-report-note code {
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 11px;
 }
 .crash-report-done {
@@ -18228,7 +18228,7 @@ textarea,
   corner-shape: squircle;
   background: var(--bg-raised);
   color: var(--text);
-  font-family: ui-monospace, monospace;
+  font-family: ui-monospace, monospace, var(--glyph-fallback);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -20050,7 +20050,7 @@ a.btn-sm {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace, var(--glyph-fallback);
   font-size: 11px;
 }
 .preview-note-remove {
@@ -20179,7 +20179,7 @@ a.btn-sm {
 }
 .preview-server-url {
   color: var(--text-dim);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace, var(--glyph-fallback);
   font-size: 12px;
   flex: 1;
 }
@@ -20232,7 +20232,7 @@ a.btn-sm {
   border-radius: var(--r-xs);
   corner-shape: squircle;
   padding: 0 5px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace, var(--glyph-fallback);
   font-size: 11px;
 }
 
@@ -20967,7 +20967,7 @@ a.btn-sm {
 
 .blocked-file-path {
   margin-top: 4px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: 12px;
   color: var(--text-dim);
   overflow-wrap: anywhere;
@@ -21004,7 +21004,7 @@ a.btn-sm {
 
 .assoc-input {
   width: 140px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
 }
 
 .assoc-search {
@@ -21058,7 +21058,7 @@ a.btn-sm {
 }
 
 .assoc-pattern {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -22284,7 +22284,7 @@ a.btn-sm {
 }
 .pr-run-elapsed {
   margin-left: auto;
-  font-family: var(--mono, monospace);
+  font-family: var(--mono, monospace), var(--glyph-fallback);
   font-size: 10px;
   color: var(--fg-dim);
 }
@@ -22860,7 +22860,7 @@ a.btn-sm {
   margin: 6px 0 12px;
   padding: 10px 12px;
   overflow: auto;
-  font-family: var(--mono, monospace);
+  font-family: var(--mono, monospace), var(--glyph-fallback);
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -23542,7 +23542,7 @@ a.btn-sm {
   overflow: hidden;
   margin: 0;
   padding: 6px 8px;
-  font-family: var(--mono);
+  font-family: var(--mono), var(--glyph-fallback);
   font-size: 10px;
   line-height: 1.4;
   white-space: pre-wrap;
@@ -23788,7 +23788,7 @@ a.btn-sm {
 
 .vault-secret {
   margin-top: 4px;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-mono, ui-monospace, monospace), var(--glyph-fallback);
   font-size: 12px;
   padding: 6px 8px;
   border-radius: 6px;
@@ -23874,7 +23874,7 @@ a.btn-sm {
 .vault-pw input {
   flex: 1 1 auto;
   min-width: 0;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-mono, ui-monospace, monospace), var(--glyph-fallback);
 }
 
 /* Both read as available: dimmed, these sat next to the pressed Show and read
@@ -25080,7 +25080,7 @@ a.btn-sm {
 
 .companion-ask-detail {
   margin-top: 2px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace, var(--glyph-fallback);
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-dim);
@@ -29117,7 +29117,7 @@ a.btn-sm {
 .remote-file-ro, .remote-file-dim, .remote-file-foot { font-size: 11px; color: var(--text-dim, #9aa3ad); }
 .remote-file-close { background: none; border: 0; color: inherit; font-size: 18px; cursor: pointer; }
 .remote-file-body { overflow: auto; padding: 12px 14px; min-height: 80px; }
-.remote-file-body pre { margin: 0; font: 12px/1.5 var(--mono, ui-monospace, monospace); white-space: pre-wrap; word-break: break-word; }
+.remote-file-body pre { margin: 0; font: 12px/1.5 var(--mono, ui-monospace, monospace), var(--glyph-fallback); white-space: pre-wrap; word-break: break-word; }
 .remote-file-body img { max-width: 100%; }
 .remote-file-foot { padding: 7px 14px; border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

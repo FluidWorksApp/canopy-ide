@@ -176,7 +176,7 @@
   gap: 6px;
 }
 .gates-file-label {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: 12px;
 }
 .gates-suggestion blockquote {

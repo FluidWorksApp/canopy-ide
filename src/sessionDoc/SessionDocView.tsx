@@ -453,7 +453,7 @@ export function SessionDocView({
             <div className="sdoc-meta">
               <span>{request.agent}</span>
               {doc?.cwd && <span title={doc.cwd}>{basename(doc.cwd)}</span>}
-              {loaded?.digest?.branch && <span>⎇ {loaded.digest.branch}</span>}
+              {loaded?.digest?.branch && <span>⑂ {loaded.digest.branch}</span>}
               <span>{request.live ? "running" : "past session"}</span>
               <span className="sdoc-private" title="Only you can see this document. Sharing always shows you the exact text first.">
                 🔒 Private to you

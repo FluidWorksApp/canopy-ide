@@ -314,7 +314,7 @@ describe("the control panel table", () => {
     const lead = await screen.findByText("Coral Hawk");
     expect(lead).toBeTruthy();
     // Identity detail: branch riding next to the name.
-    expect(screen.getByText(/⎇ feat\/panel/)).toBeTruthy();
+    expect(screen.getByText(/⑂ feat\/panel/)).toBeTruthy();
     // The initial prompt stays retained while the explicit status owns "now".
     expect(screen.getByText("coordinate the panel build")).toBeTruthy();
     expect(screen.getByText("stitching live status into the table")).toBeTruthy();

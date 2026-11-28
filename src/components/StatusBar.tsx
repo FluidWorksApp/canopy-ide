@@ -847,7 +847,7 @@ export const StatusBar = memo(function StatusBar({
             // the chip rather than off the end of the window.
             onClick={(e) => branchMenu.openAbove(e, branchItems(), branchFilter())}
           >
-            {detached ? "⚠ snapshot" : `⎇ ${branch}`}
+            {detached ? "⚠ snapshot" : `⑂ ${branch}`}
             {dirty > 0 && <span className="status-dirty"> ±{dirty}</span>}
           </button>
         </span>

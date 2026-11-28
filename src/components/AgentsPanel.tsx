@@ -220,7 +220,7 @@ function SharedDialog({
             <div key={d.session_id} className="share-digest">
               <div className="share-digest-head">
                 {basename(d.cwd)}
-                {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
+                {d.branch && <span className="share-branch">⑂ {d.branch}</span>}
                 <span className={`share-state ${meta.cls}`} title={life.note}>
                   {meta.label}
                 </span>
@@ -875,7 +875,7 @@ export function AgentsPanel({
             <ReceiptBadge sessionId={digest?.session_id} ptyId={s.id} cwd={s.cwd} cli={agent.id ?? ""} quietWhenUnverified={shown === "ended"} />
           )}
           {dir && <span className="ap2-chip" title={s.cwd}>{dir}</span>}
-          {digest?.branch && <span className="ap2-chip ap2-chip-branch" title={`On branch ${digest.branch}`}>⎇ {digest.branch}</span>}
+          {digest?.branch && <span className="ap2-chip ap2-chip-branch" title={`On branch ${digest.branch}`}>⑂ {digest.branch}</span>}
           {digest?.profile && digest.profile !== "default" && (
             <span className="ap2-chip" title={`Running under the "${digest.profile}" account`}>{digest.profile}</span>
           )}
@@ -987,7 +987,7 @@ export function AgentsPanel({
         </div>
         <div className="ap2-meta">
           {dir && <span className="ap2-chip" title={entry.cwd}>{dir}</span>}
-          {entry.branch && <span className="ap2-chip ap2-chip-branch">⎇ {entry.branch}</span>}
+          {entry.branch && <span className="ap2-chip ap2-chip-branch">⑂ {entry.branch}</span>}
           {fate && (
             <span className={`ap2-chip${entry.unsaved ? " ap2-chip-warn" : ""}`}>{fate}</span>
           )}
@@ -1064,7 +1064,7 @@ export function AgentsPanel({
         <div className="ap2-meta">
           <AgentRuntime timing={d} live={false} />
           {dir && <span className="ap2-chip" title={runIn}>{dir}</span>}
-          {d.branch && <span className="ap2-chip ap2-chip-branch">⎇ {d.branch}</span>}
+          {d.branch && <span className="ap2-chip ap2-chip-branch">⑂ {d.branch}</span>}
         </div>
         <div className="ap2-prompt">{last ?? <em>(no prompt captured for this session)</em>}</div>
         <div className="ap2-actions">

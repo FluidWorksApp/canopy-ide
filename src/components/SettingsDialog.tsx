@@ -3354,7 +3354,7 @@ function SelfHostedRemoteSettings({
               )}
 
               {tunnel.message && tunnelForProvider && (
-                <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
+                <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace, var(--glyph-fallback)" }}>
                   {tunnel.message}
                 </div>
               )}

@@ -51,8 +51,9 @@
      font settings, which are the user's to pick, not a skin's to override. */
   --font-ui:
     "Archivo Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  --font-mono: "JetBrains Mono Variable", "SF Mono", Menlo, Monaco, monospace;
+    sans-serif, var(--glyph-fallback);
+  --font-mono: "JetBrains Mono Variable", "SF Mono", Menlo, Monaco, monospace,
+    var(--glyph-fallback);
 
   /* A corner is where glass shows its thickness, so every radius goes up a
      step. */

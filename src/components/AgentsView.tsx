@@ -371,7 +371,7 @@ export function AgentsView({
           )}
           {digest?.branch && (
             <span className="agv-chip agv-chip-branch" title={`On branch ${digest.branch}`}>
-              ⎇ {digest.branch}
+              ⑂ {digest.branch}
             </span>
           )}
           {digest?.profile && digest.profile !== "default" && (
@@ -772,7 +772,7 @@ export function AgentsView({
                           {basename(entry.worktree?.root ?? entry.cwd)}
                         </span>
                         {entry.branch && (
-                          <span className="agv-chip agv-chip-branch">⎇ {entry.branch}</span>
+                          <span className="agv-chip agv-chip-branch">⑂ {entry.branch}</span>
                         )}
                         {unsaved && <span className="agv-chip ap2-chip-warn">Kept: {unsaved}</span>}
                         <span className="agv-past-when">{ago(Math.floor(entry.settledAt / 1000))}</span>
@@ -850,7 +850,7 @@ export function AgentsView({
                           </span>
                         )}
                         {d.branch && (
-                          <span className="agv-chip agv-chip-branch">⎇ {d.branch}</span>
+                          <span className="agv-chip agv-chip-branch">⑂ {d.branch}</span>
                         )}
                         <span className="agv-past-when">{ago(d.updated)}</span>
                       </div>

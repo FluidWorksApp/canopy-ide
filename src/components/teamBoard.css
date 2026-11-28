@@ -73,7 +73,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 2px 8px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: var(--fs-xs);
 }
 
@@ -162,7 +162,7 @@
   border-radius: var(--r-sm, 4px);
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace), var(--glyph-fallback);
   font-size: var(--fs-xs);
 }
 

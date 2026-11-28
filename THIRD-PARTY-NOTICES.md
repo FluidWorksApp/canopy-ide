@@ -82,6 +82,8 @@ rendering library is bundled, so nothing is redistributed for that feature.
 
 **ONNX Runtime 1.24.x — MIT.** Copyright (c) Microsoft Corporation. Microsoft's official prebuilt shared library (`libonnxruntime.dylib` / `.so` / `.dll`), fetched at release time and shipped in the app bundle as `onnxruntime/`. Voice dictation loads it dynamically. The Intel-macOS build has no compatible release and ships without it. <https://github.com/microsoft/onnxruntime>
 
+**Noto Sans Symbols, Noto Sans Symbols 2, Noto Sans Math, Noto Emoji (subsets) @fontsource 5.3 — OFL-1.1.** Copyright 2022 The Noto Project Authors (https://github.com/notofonts). Subsets of only the symbols the UI draws (`src/assets/fonts/glyph-fallback/`, made by `scripts/glyph-fallback/build.py`), loaded on Linux so a machine without such fonts does not draw boxes. No Reserved Font Name, so subsetting needs no rename. <https://github.com/notofonts>
+
 ## Models downloaded at runtime
 
 Voice dictation downloads a speech model on first use, and after install

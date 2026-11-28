@@ -265,7 +265,7 @@ export function nodeLabel(id: NodeIdentity): { primary: string; detail: string }
   const primary = id.name?.trim() || `${id.agentLabel?.trim() || "terminal"} #${id.ptyId}`;
   const detail = [
     id.tabTitle?.trim() && id.tabTitle.trim() !== primary ? id.tabTitle.trim() : null,
-    id.branch?.trim() ? `⎇ ${id.branch.trim()}` : null,
+    id.branch?.trim() ? `⑂ ${id.branch.trim()}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
