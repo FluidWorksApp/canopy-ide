@@ -127,6 +127,7 @@ import { handleMachineOp, relaySources } from "./machines/directory";
 import { peekMachines, savedMachines } from "./machines/inventory";
 import { AgentRelays } from "./machines/agentRelay";
 import { liveEnvironments } from "./environments/live";
+import { AllWorkspacesView } from "./components/AllWorkspacesView";
 import { useAllWorkspaces } from "./remoteExecution/allMode";
 import { useAllWorkspacesPlan } from "./environments/useAllWorkspacesPlan";
 import { isVisitingId, type ForeignSession } from "./environments/allProjects";
@@ -3706,14 +3707,8 @@ export default function App() {
     allMode && visitingActive && allPlan.visiting.some((v) => v.id === visitingActive)
       ? visitingActive
       : ws.activeId;
-  const visitingProjects = useMemo(
-    () =>
-      allMode
-        ? allPlan.visiting.map((v) => ({
-            project: { id: v.id, name: v.name, components: [] } as unknown as Project,
-            visiting: v,
-          }))
-        : [],
+  const visitingTabs = useMemo(
+    () => (allMode ? allPlan.visiting.map(({ id, name, machines }) => ({ id, name, machines })) : []),
     [allMode, allPlan],
   );
   /** Asleep here, but running on another machine: its live terminals show
@@ -4573,7 +4568,7 @@ export default function App() {
         projects={ws.projects}
         openProjects={openProjects}
         activeId={shownActiveId}
-        visiting={visitingProjects.map((v) => v.visiting)}
+        visiting={visitingTabs}
         liveElsewhere={liveElsewhere}
         pendingCount={pendingCount}
         collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
@@ -4663,47 +4658,32 @@ export default function App() {
             />
           ))}
         {/* "All workspaces": a project asleep here but running elsewhere, and
-            projects only other machines have. Each shows those machines'
-            terminals and nothing of this machine's: no folders, nothing saved. */}
-        {[
-          ...openProjects
-            .filter((p) => liveElsewhere.has(p.id) && showsWakeScreen(p.id))
-            .map((p) => ({
-              key: `all:asleep:${p.id}`,
-              shownAs: p.id,
-              project: { ...p, id: `all:asleep:${p.id}`, components: [] } as Project,
-              sessions: allPlan.joins.get(p.id) ?? NO_SESSIONS,
-            })),
-          ...visitingProjects.map((v) => ({
-            key: v.project.id,
-            shownAs: v.project.id,
-            project: v.project,
-            sessions: v.visiting.sessions,
-          })),
-        ].map((v) => (
-          <ProjectView
-            key={v.key}
-            project={v.project}
-            visible={v.shownAs === shownActiveId}
-            allSessions={v.sessions}
-            restore={null}
-            zen={zen}
-            allProjects={allProjectRoots}
-            events={agentEvents}
-            hookPath={hookPath}
-            terminalGovernor={terminalGovernor}
-            relay={relay}
-            dismissedPending={dismissedPending}
-            onDismissPending={dismissPending}
-            onEdit={handlersFor(v.key).onEdit}
-            onNotice={notify}
-            onShareContext={handlersFor(v.key).onShareContext}
-            onSaveCustomTasks={handlersFor(v.key).onSaveCustomTasks}
-            onSaveIntegrations={handlersFor(v.key).onSaveIntegrations}
-            onPersistVibeTarget={handlersFor(v.key).onPersistVibeTarget}
-            onPersistVibeSetup={handlersFor(v.key).onPersistVibeSetup}
-          />
-        ))}
+            projects only other machines have. Terminals only (AllWorkspacesView). */}
+        {openProjects
+          .filter((p) => liveElsewhere.has(p.id) && showsWakeScreen(p.id))
+          .map((p) => {
+            const sessions = allPlan.joins.get(p.id) ?? NO_SESSIONS;
+            return (
+              <AllWorkspacesView
+                key={`all:asleep:${p.id}`}
+                name={p.name}
+                machines={[...new Set(sessions.map((s) => s.machineName))]}
+                sessions={sessions}
+                visible={p.id === shownActiveId}
+                onWake={() => wakeProject(p.id)}
+              />
+            );
+          })}
+        {allMode &&
+          allPlan.visiting.map((v) => (
+            <AllWorkspacesView
+              key={v.id}
+              name={v.name}
+              machines={v.machines}
+              sessions={v.sessions}
+              visible={v.id === shownActiveId}
+            />
+          ))}
 
         {/* The frost, layered over the project area. Going to sleep it forms
             over the live workspace; waking, it stays put while the workspace
@@ -4719,7 +4699,7 @@ export default function App() {
         )}
         {Object.entries(waking).map(([id, w]) => {
           const project = ws.projects.find((p) => p.id === id);
-          if (!project || id !== ws.activeId) return null;
+          if (!project || id !== shownActiveId) return null;
           return (
             <div key={id} className="hib-layer">
               <HibernationView

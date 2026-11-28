@@ -50,6 +50,33 @@ export async function readMachine(env: string, name: string, invoke: Invoke): Pr
   };
 }
 
+/** Reads of machines, kept: a machine that misses one pass (a slow answer, a
+ *  dropped connection) keeps what it showed last time, so its projects do not
+ *  vanish from the strip and come back. One that fails is asked again after
+ *  `UNREACHABLE_MS`; one that is no longer running is simply not asked. */
+export class MachineReads<M> {
+  private readonly last = new Map<string, { read: MachineRead; machine: M }>();
+  private readonly retryAt = new Map<string, number>();
+  private readonly now: () => number;
+  constructor(now: () => number = () => Date.now()) {
+    this.now = now;
+  }
+
+  async get(key: string, run: () => Promise<{ read: MachineRead; machine: M }>): Promise<{ read: MachineRead; machine: M } | undefined> {
+    if ((this.retryAt.get(key) ?? 0) > this.now()) return this.last.get(key);
+    try {
+      const fresh = await run();
+      this.last.set(key, fresh);
+      this.retryAt.delete(key);
+      return fresh;
+    } catch (error) {
+      this.retryAt.set(key, this.now() + UNREACHABLE_MS);
+      console.warn(`[all-workspaces] could not read ${key}: ${String((error as Error)?.message ?? error)}`);
+      return this.last.get(key);
+    }
+  }
+}
+
 /** Same plan? Compared by what the strip shows, so an unchanged pass does not re-render. */
 function planKey(plan: AllPlan): string {
   const joins = [...plan.joins].map(([id, list]) => `${id}=${list.map((s) => `${s.env}:${s.session.id}:${s.session.title ?? ""}`).join(",")}`);
@@ -70,7 +97,7 @@ export function useAllWorkspacesPlan(on: boolean, primary: readonly StoreProject
     let live = true;
     let running = false;
     let lastKey = "";
-    const unreachableUntil = new Map<string, number>();
+    const memory = new MachineReads<RepoMachine>();
     const here = (): RepoMachine => ({
       env: isRemoteHost() ? `remote:${activeWorkspace()?.connection.workspaceId ?? "active"}` : THIS_MAC_ENV,
       invoke: hostInvoke,
@@ -79,17 +106,17 @@ export function useAllWorkspacesPlan(on: boolean, primary: readonly StoreProject
     const pass = async () => {
       const reads: MachineRead[] = [];
       const machines = new Map<string, RepoMachine>();
-      const attempt = async (key: string, env: string, read: () => Promise<{ name: string; invoke: Invoke; desktop?: boolean }>) => {
-        if ((unreachableUntil.get(key) ?? 0) > Date.now()) return;
-        try {
-          const machine = await read();
-          reads.push(await readMachine(env, machine.name, machine.invoke));
-          machines.set(env, { env, invoke: machine.invoke, desktop: machine.desktop });
-          unreachableUntil.delete(key);
-        } catch (error) {
-          unreachableUntil.set(key, Date.now() + UNREACHABLE_MS);
-          console.warn(`[all-workspaces] could not read ${key}: ${String((error as Error)?.message ?? error)}`);
-        }
+      const attempt = async (key: string, env: string, connect: () => Promise<{ name: string; invoke: Invoke; desktop?: boolean }>) => {
+        const got = await memory.get(key, async () => {
+          const machine = await connect();
+          return {
+            read: await readMachine(env, machine.name, machine.invoke),
+            machine: { env, invoke: machine.invoke, desktop: machine.desktop },
+          };
+        });
+        if (!got) return;
+        reads.push(got.read);
+        machines.set(env, got.machine);
       };
       // While a workspace is the window's own machine, this Mac is one of the others.
       if (isWorkspaceHost()) {

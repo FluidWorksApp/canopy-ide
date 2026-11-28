@@ -30112,3 +30112,65 @@ a.btn-sm {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.all-workspaces-view {
+  min-height: 0;
+}
+.all-workspaces-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.all-workspaces-where {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-faint);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.all-workspaces-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px 8px 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+.all-workspaces-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 4px 10px;
+  border-radius: 6px 6px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.all-workspaces-tab.active {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+.all-workspaces-tab-close {
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.all-workspaces-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.all-workspaces-term {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.all-workspaces-empty {
+  margin: auto;
+  color: var(--text-faint);
+}
