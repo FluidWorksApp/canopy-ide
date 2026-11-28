@@ -127,6 +127,9 @@ import { handleMachineOp, relaySources } from "./machines/directory";
 import { peekMachines, savedMachines } from "./machines/inventory";
 import { AgentRelays } from "./machines/agentRelay";
 import { liveEnvironments } from "./environments/live";
+import { useAllWorkspaces } from "./remoteExecution/allMode";
+import { useAllWorkspacesPlan } from "./environments/useAllWorkspacesPlan";
+import { isVisitingId, type ForeignSession } from "./environments/allProjects";
 import { THIS_MAC } from "./machines/ops";
 import { startClaudeIdeBridge } from "./claudeIdeBridge";
 import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorkspace";
@@ -275,6 +278,8 @@ import {
 const RELAY_CHAT_PREFIX = "canopy.relayChat:";
 const governorAttentionKey = (id: number) => `governor-memory:${id}`;
 const NO_DISMISSED_GOVERNOR_REQUESTS = new Set<string>();
+/** One empty list, so a project with nothing joined keeps the same prop. */
+const NO_SESSIONS: ForeignSession[] = [];
 function loadRelayChat(label: string): ipc.RelayChatMsg[] {
   try {
     const raw = localStorage.getItem(RELAY_CHAT_PREFIX + label);
@@ -3688,6 +3693,51 @@ export default function App() {
   );
   // Each open tab's own icon, found in its folders (projectIcon.ts).
   const projectIcons = useProjectIcons(openProjects, hibernated);
+  // "All workspaces": every running machine's projects and terminals
+  // (environments/allProjects.ts). Projects only other machines have are held
+  // here, never in `ws`: `ws` is this machine's saved workspace.
+  const allMode = useAllWorkspaces();
+  const allPlan = useAllWorkspacesPlan(allMode, ws.projects);
+  const [visitingActive, setVisitingActive] = useState<string | null>(null);
+  // Choosing one of this machine's projects (a click, a digit, a link) leaves
+  // the visiting one.
+  useEffect(() => setVisitingActive(null), [ws.activeId]);
+  const shownActiveId =
+    allMode && visitingActive && allPlan.visiting.some((v) => v.id === visitingActive)
+      ? visitingActive
+      : ws.activeId;
+  const visitingProjects = useMemo(
+    () =>
+      allMode
+        ? allPlan.visiting.map((v) => ({
+            project: { id: v.id, name: v.name, components: [] } as unknown as Project,
+            visiting: v,
+          }))
+        : [],
+    [allMode, allPlan],
+  );
+  /** Asleep here, but running on another machine: its live terminals show
+   *  instead of the wake screen, and its tab is not drawn frozen. */
+  const liveElsewhere = useMemo(
+    () =>
+      new Set(
+        allMode
+          ? openProjects.filter((p) => hibernated[p.id] && allPlan.joins.get(p.id)?.length).map((p) => p.id)
+          : [],
+      ),
+    [allMode, allPlan, openProjects, hibernated],
+  );
+  const chooseShownProject = useCallback(
+    (id: string) => {
+      if (isVisitingId(id)) {
+        setVisitingActive(id);
+        return;
+      }
+      setVisitingActive(null);
+      selectProject(id);
+    },
+    [selectProject],
+  );
   // The companion's reach: EVERY project, not just the open ones. That is the
   // whole point of it — "which repos have unpushed work" is a question about
   // the workspace, and answering only for the tabs that happen to be open
@@ -4522,7 +4572,9 @@ export default function App() {
       <TitleBar
         projects={ws.projects}
         openProjects={openProjects}
-        activeId={ws.activeId}
+        activeId={shownActiveId}
+        visiting={visitingProjects.map((v) => v.visiting)}
+        liveElsewhere={liveElsewhere}
         pendingCount={pendingCount}
         collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
         tabDragId={tabDrag.dragId}
@@ -4534,7 +4586,7 @@ export default function App() {
         notifUrgency={notifBadge.urgency}
         onOpenNotifications={openNotifications}
         onOpenProject={(id) => void openProject(id)}
-        onSelectProject={selectProject}
+        onSelectProject={chooseShownProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
         onTogglePinProject={togglePinProject}
@@ -4564,12 +4616,12 @@ export default function App() {
         {/* A project that is asleep and not being woken has no ProjectView at
             all — that is the saving. It's the frost, and a button. */}
         {openProjects
-          .filter((p) => showsWakeScreen(p.id))
+          .filter((p) => showsWakeScreen(p.id) && !liveElsewhere.has(p.id))
           .map((p) => (
             <div
               key={p.id}
               className="project-view"
-              style={{ display: p.id === ws.activeId ? "flex" : "none" }}
+              style={{ display: p.id === shownActiveId ? "flex" : "none" }}
             >
               <HibernationView
                 project={p}
@@ -4586,7 +4638,8 @@ export default function App() {
             <ProjectView
               key={p.id}
               project={p}
-              visible={p.id === ws.activeId}
+              visible={p.id === shownActiveId}
+              allSessions={allMode ? (allPlan.joins.get(p.id) ?? NO_SESSIONS) : undefined}
               restore={waking[p.id]?.snapshot ?? null}
               onRestoreStep={handlersFor(p.id).onRestoreStep}
               onRestored={handlersFor(p.id).onRestored}
@@ -4609,6 +4662,48 @@ export default function App() {
               onPersistVibeSetup={handlersFor(p.id).onPersistVibeSetup}
             />
           ))}
+        {/* "All workspaces": a project asleep here but running elsewhere, and
+            projects only other machines have. Each shows those machines'
+            terminals and nothing of this machine's: no folders, nothing saved. */}
+        {[
+          ...openProjects
+            .filter((p) => liveElsewhere.has(p.id) && showsWakeScreen(p.id))
+            .map((p) => ({
+              key: `all:asleep:${p.id}`,
+              shownAs: p.id,
+              project: { ...p, id: `all:asleep:${p.id}`, components: [] } as Project,
+              sessions: allPlan.joins.get(p.id) ?? NO_SESSIONS,
+            })),
+          ...visitingProjects.map((v) => ({
+            key: v.project.id,
+            shownAs: v.project.id,
+            project: v.project,
+            sessions: v.visiting.sessions,
+          })),
+        ].map((v) => (
+          <ProjectView
+            key={v.key}
+            project={v.project}
+            visible={v.shownAs === shownActiveId}
+            allSessions={v.sessions}
+            restore={null}
+            zen={zen}
+            allProjects={allProjectRoots}
+            events={agentEvents}
+            hookPath={hookPath}
+            terminalGovernor={terminalGovernor}
+            relay={relay}
+            dismissedPending={dismissedPending}
+            onDismissPending={dismissPending}
+            onEdit={handlersFor(v.key).onEdit}
+            onNotice={notify}
+            onShareContext={handlersFor(v.key).onShareContext}
+            onSaveCustomTasks={handlersFor(v.key).onSaveCustomTasks}
+            onSaveIntegrations={handlersFor(v.key).onSaveIntegrations}
+            onPersistVibeTarget={handlersFor(v.key).onPersistVibeTarget}
+            onPersistVibeSetup={handlersFor(v.key).onPersistVibeSetup}
+          />
+        ))}
 
         {/* The frost, layered over the project area. Going to sleep it forms
             over the live workspace; waking, it stays put while the workspace

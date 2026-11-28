@@ -30097,3 +30097,18 @@ a.btn-sm {
   color: var(--warn, #f5a524);
   background: color-mix(in srgb, var(--warn, #f5a524) 14%, transparent);
 }
+
+/* "All workspaces": a project only another machine has. Its machine rides
+   beside the name, the way a joined terminal tab carries its machine. */
+.project-tab-visiting {
+  border-style: dashed;
+}
+.project-tab-machine {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--text-faint);
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
