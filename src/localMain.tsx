@@ -33,6 +33,7 @@ import {
   selftestConfig,
 } from "./ipc";
 import { setSelftestMode } from "./selftest/mode";
+import { forwardConsole } from "./errorLog";
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);
@@ -90,6 +91,10 @@ window.addEventListener("error", (e) =>
 window.addEventListener("unhandledrejection", (e) =>
   jsLog("error", `unhandled rejection: ${e.reason}`),
 );
+// Warnings and errors written to the console reach the app's error log too
+// (errors.log): a failure that only ever reached the console left no trace in
+// a release build.
+forwardConsole((level, message) => jsLog(level, message));
 jsLog("info", "webview booting");
 // Replace the prior page's native attachments before any terminal can mount.
 // PTY children survive and keep draining into bounded Rust rings; orphaned

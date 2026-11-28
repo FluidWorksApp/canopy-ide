@@ -676,6 +676,9 @@ export default function App() {
             projectName: projectNameFor(opts.projectId),
           }
         : projectIdentity(opts?.path);
+      // An error shown to the person is kept in the error log as well: the
+      // toast goes away, and the log is what is left to read afterwards.
+      if (kind === "error") void ipc.jsLog("warn", `notice: ${text}${opts?.body ? ` — ${opts.body}` : ""}`);
       void postAttention({
         kind: "fyi",
         tone: kind,
